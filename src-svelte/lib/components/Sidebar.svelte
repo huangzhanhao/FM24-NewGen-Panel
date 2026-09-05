@@ -7,22 +7,37 @@
 
   let newProfileName = $state('');
   let creating = $state(false);
+  let profileSelect = $state<HTMLSelectElement | null>(null);
 
   const snap = $derived(appStore.snapshot);
   const busy = $derived(!!snap?.replacing);
   const hasProfile = $derived(!!snap && snap.currentProfile !== 'No Profile');
+  const activeProfile = $derived(snap?.currentProfile ?? '');
+  /** 下拉即切档，选中项永远等于激活档；旁边只是个状态标签 */
+  const stateHint = $derived(
+    hasProfile ? `当前已激活存档：${activeProfile}` : '尚未激活任何存档，请先新建或在下拉框选择',
+  );
 
   async function createProfile() {
+    const name = newProfileName.trim();
+    if (!name) return;
     try {
-      await applySnapshot(await api.createProfile(newProfileName));
+      await applySnapshot(await api.createProfile(name));
       newProfileName = '';
       creating = false;
     } catch (e) { await showError(e); }
   }
 
-  async function switchProfile(e: Event) {
-    try { await applySnapshot(await api.switchProfile((e.target as HTMLSelectElement).value)); }
-    catch (e) { await showError(e); }
+  /** 下拉框一改就切档（v1 交互）；失败时把选项回退到当前激活档 */
+  async function switchProfile() {
+    const target = profileSelect?.value;
+    if (!target || target === activeProfile) return;
+    try {
+      await applySnapshot(await api.switchProfile(target));
+    } catch (e) {
+      if (profileSelect) profileSelect.value = activeProfile;
+      await showError(e);
+    }
   }
 
   async function deleteProfile() {
@@ -64,23 +79,28 @@
 
   <section>
     <div class="side-head">
-      <span>Profile</span>
+      <span>存档资料</span>
       <button class="icon-btn" title="新建 Profile" onclick={() => (creating = !creating)}>＋</button>
     </div>
     {#if creating}
       <div class="row">
-        <input type="text" placeholder="新 Profile 名称" bind:value={newProfileName} style="width:100%" />
+        <input type="text" placeholder="新 Profile 名称" bind:value={newProfileName} class="w-full" />
         <button class="btn" onclick={createProfile} disabled={!newProfileName.trim()}>创建</button>
       </div>
     {/if}
-    <select value={snap?.currentProfile ?? ''} onchange={switchProfile} disabled={busy} style="width:100%">
+    <select bind:this={profileSelect} value={activeProfile} onchange={switchProfile} disabled={busy} class="w-full">
       {#each snap?.profiles ?? [] as p}
         <option value={p}>{p}</option>
       {/each}
     </select>
-    {#if hasProfile}
-      <button class="link danger small" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
-    {/if}
+    <div class="prf-actions">
+      <span class="prf-state" class:off={!hasProfile} role="status" title={stateHint}>
+        {hasProfile ? '已激活' : '未激活'}
+      </span>
+      {#if hasProfile}
+        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
+      {/if}
+    </div>
   </section>
 
   <section>

@@ -124,9 +124,14 @@ impl ProfileManager {
     }
 
     // ---------------- Profile 管理 ----------------
+    /// 新建档：建好空档文件并立即切档（v1 交互：新建即激活）
     pub fn create_profile(&mut self, name: &str) -> Result<(), String> {
-        if name.trim().is_empty() {
+        let name = name.trim();
+        if name.is_empty() {
             return Err("Profile 名不能为空".into());
+        }
+        if self.config.profile.contains_key(name) {
+            return Err(format!("Profile「{name}」已存在"));
         }
         self.config.profile.insert(name.to_string(), true);
         json_store::save(&self.user_dir.join("cfg.json"), &self.config)?;
@@ -188,10 +193,6 @@ impl ProfileManager {
     }
 
     // ---------------- 组管理 ----------------
-    pub fn list_groups(&self) -> Vec<String> {
-        self.prf_cfg.groups.keys().cloned().collect()
-    }
-
     /// 新头像包目录自动建组并设为当前组（对等 ensure_group）
     pub fn ensure_group(&mut self, img_dir: &str) -> Option<String> {
         let dir = norm_dir(img_dir);
@@ -231,14 +232,6 @@ impl ProfileManager {
         }
         self.persist_prf()?;
         Ok(true)
-    }
-
-    pub fn get_group_rtf(&self, img_dir: &str) -> String {
-        self.prf_cfg
-            .groups
-            .get(&norm_dir(img_dir))
-            .map(|g| g.rtf.clone())
-            .unwrap_or_default()
     }
 
     pub fn get_cur_rtf(&self) -> String {
@@ -300,9 +293,12 @@ mod tests {
     fn create_switch_delete_profile() {
         let dir = data_dir();
         let mut pm = ProfileManager::new(None, dir.path()).unwrap();
-        pm.create_profile("档A").unwrap();
+        // 新建即激活（v1 交互），名字会被 trim
+        pm.create_profile(" 档A ").unwrap();
         assert_eq!(pm.cur_prf, "档A");
         assert!(pm.config.profile["档A"]);
+        // 同名档不得覆写已有存档文件
+        assert!(pm.create_profile("档A").is_err());
         pm.create_profile("档B").unwrap();
         assert_eq!(pm.cur_prf, "档B");
         assert!(pm.config.profile["档B"]);
@@ -324,9 +320,9 @@ mod tests {
         assert!(pm.set_cur_rtf(r"C:\list.rtf").unwrap());
         assert_eq!(pm.get_cur_rtf(), r"C:\list.rtf");
         pm.ensure_group(r"C:\pack2").unwrap();
-        assert_eq!(pm.list_groups().len(), 2);
+        assert_eq!(pm.prf_cfg.groups.len(), 2);
         assert!(pm.delete_group(r"C:\pack1").unwrap());
-        assert_eq!(pm.list_groups().len(), 1);
+        assert_eq!(pm.prf_cfg.groups.len(), 1);
         // 删除当前组后回退到剩余组
         assert_eq!(pm.cur_group.clone().unwrap(), norm_dir(r"C:\pack2"));
     }
@@ -344,7 +340,7 @@ mod tests {
         let mut pm = ProfileManager::new(None, dir.path()).unwrap();
         pm.create_profile("档A").unwrap();
         pm.ensure_group(img.to_str().unwrap()).unwrap();
-        // 切走：档A 快照应保存
+        // 切走：新建并激活档B，档A 快照应保存
         pm.create_profile("档B").unwrap();
         assert!(group_xml_path(&dir.path().join(".user"), "档A", &norm_dir(img.to_str().unwrap())).is_file());
         // 改写目录里的 config.xml，切回档A 应恢复快照

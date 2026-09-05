@@ -37,7 +37,7 @@
 <h3>Players Preview <span class="muted">{result ? `${result.total} records` : ''}</span></h3>
 
 <div class="row">
-  <input type="text" placeholder="Search UID / name / nationality..." bind:value={search} style="flex:1;max-width:360px" />
+  <input type="text" placeholder="Search UID / name / nationality..." bind:value={search} class="flex-1" style="max-width:360px" />
   <button class="btn" onclick={() => (page = 0)} disabled={page === 0}>‹ Prev</button>
   <span class="muted">Page {page + 1} / {totalPages}</span>
   <button class="btn" onclick={() => (page += 1)} disabled={page + 1 >= totalPages}>Next ›</button>
@@ -63,7 +63,7 @@
       <tbody>
         {#each result.items as r (r.uid)}
           <tr>
-            <td style="font-family:var(--mono)">{r.uid}</td>
+            <td class="mono">{r.uid}</td>
             <td>{r.primaryNat}</td>
             <td>{r.secNat}</td>
             <td>{r.name}</td>

@@ -30,7 +30,6 @@ pub struct RunResult {
 }
 
 pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &AtomicBool) -> RunResult {
-    let empty = RunResult { outcome: Outcome::Finished, rtf_data: Vec::new(), mapping: Vec::new() };
     // 阶段1：校验 RTF（0%）
     progress("Validating RTF file...", 0);
     let mut parser = RtfParser::new();

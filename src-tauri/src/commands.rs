@@ -1,15 +1,12 @@
 //! Tauri 命令层：对等 services/* + app.py。数据留在 Rust，IPC 只传摘要/分页
-use crate::assets::ETH_CFG;
 use crate::face_mapper::Mode;
 use crate::logger::{LogPage, Logger};
-use crate::paths::norm_dir;
-use crate::profile_manager::{GlobalCfg, GroupCfg, ProfileManager};
+use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
 use crate::rtf_parser::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
@@ -108,8 +105,9 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppSnapshot { snapshot(&stat
 
 #[tauri::command]
 pub fn create_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
+    let name = name.trim().to_string();
     state.pm.lock().unwrap().create_profile(&name)?;
-    state.logger.info("profile", format!("创建并切换 Profile: {name}"));
+    state.logger.info("profile", format!("创建并激活 Profile: {name}"));
     Ok(snapshot(&state))
 }
 
@@ -132,7 +130,7 @@ pub fn switch_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
         &pm.config,
     )?;
     drop(pm);
-    state.logger.info("profile", format!("切换 Profile: {name}"));
+    state.logger.info("profile", format!("激活 Profile: {name}"));
     Ok(snapshot(&state))
 }
 
@@ -140,7 +138,7 @@ pub fn switch_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
 pub fn select_image_directory(state: State<'_, AppState>, path: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
     if pm.cur_prf == "No Profile" {
-        return Err("请先创建并选择一个 Profile".into());
+        return Err("请先创建并激活一个 Profile".into());
     }
     pm.ensure_group(&path).ok_or("目录不可用")?;
     drop(pm);
@@ -248,6 +246,10 @@ pub fn start_replace(
         );
         *rtf_cache.lock().unwrap() = result.rtf_data.clone();
         *mapping_cache.lock().unwrap() = result.mapping.clone();
+        if matches!(result.outcome, Outcome::Finished) && result.mapping.is_empty() {
+            // 跑完却一条映射也没有：config.xml 会被写成空表，必须留 WARNING
+            logger.warn("replace", "映射结果为空：本次写入的 config.xml 不含任何映射（多为「仅随机人」过滤掉了全部名单，或头像包内无图片）");
+        }
         let result_str = match result.outcome {
             Outcome::Finished => "finished",
             Outcome::Cancelled => "cancelled",

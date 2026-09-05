@@ -57,43 +57,58 @@
 
 <h3>Viewer <span class="muted">输入 UID 回车预览</span></h3>
 
-<div class="row" style="align-items:flex-start">
-  <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0">
+<div class="viewer-row">
+  <div class="preview-col">
     {#if blobUrl}
-      <img src={blobUrl} alt="preview" style="width:180px;height:180px;object-fit:cover;border:1px solid var(--border);border-radius:6px" />
+      <img src={blobUrl} alt="preview" class="preview-img" />
     {:else}
-      <div style="width:180px;height:180px;display:grid;place-items:center;border:1px dashed var(--border);border-radius:6px;color:var(--muted)">No Image</div>
+      <div class="preview-placeholder">No Image</div>
     {/if}
-    <span class="muted" style="font-family:var(--mono)">
+    <span class="muted mono-text">
       {preview?.mapping ? `${preview.mapping.ethnicity}\\${preview.mapping.image}` : '...\\...'}
     </span>
   </div>
 
-  <div style="flex:1">
-    <div class="row">
-      <label>UID:</label>
-      <input type="text" bind:value={uid} style="width:140px" onkeydown={(e) => e.key === 'Enter' && showPreview()} />
-      <label>Nation:</label><input type="text" readonly value={preview?.record?.primaryNat ?? ''} style="width:60px" />
-      <label>2nd:</label><input type="text" readonly value={preview?.record?.secNat ?? ''} style="width:60px" />
-      <label>Name:</label><input type="text" readonly value={preview?.record?.name ?? ''} style="flex:1" />
+  <div class="fields-col">
+    <div class="fgrid">
+      <div class="field">
+        <label for="pv-uid">UID:</label>
+        <input id="pv-uid" type="text" bind:value={uid} onkeydown={(e) => e.key === 'Enter' && showPreview()} />
+      </div>
+      <div class="field"><label for="pv-nat">Nation:</label><input id="pv-nat" type="text" readonly value={preview?.record?.primaryNat ?? ''} /></div>
+      <div class="field"><label for="pv-2nd">2nd:</label><input id="pv-2nd" type="text" readonly value={preview?.record?.secNat ?? ''} /></div>
+      <div class="field long"><label for="pv-name">Name:</label><input id="pv-name" type="text" readonly value={preview?.record?.name ?? ''} /></div>
+      <div class="field"><label for="pv-hair">Hair:</label><input id="pv-hair" type="text" readonly value={preview?.record?.hairLength ?? ''} /></div>
+      <div class="field"><label for="pv-color">Color:</label><input id="pv-color" type="text" readonly value={preview?.record?.hairColor ?? ''} /></div>
+      <div class="field"><label for="pv-eth">Eth:</label><input id="pv-eth" type="text" readonly value={preview?.record?.ethnicityCode ?? ''} /></div>
+      <div class="field"><label for="pv-skin">Skin:</label><input id="pv-skin" type="text" readonly value={d?.skinCode ?? ''} /></div>
+      <div class="field"><label for="pv-newgan">isNewGAN:</label><input id="pv-newgan" type="text" readonly value={d?.isNewgan ?? ''} /></div>
+      <div class="field long"><label for="pv-club">Club:</label><input id="pv-club" type="text" readonly value={d?.club ?? ''} /></div>
+      <div class="field"><label for="pv-age">Age:</label><input id="pv-age" type="text" readonly value={d?.age ?? ''} /></div>
+      <div class="field"><label for="pv-height">Height:</label><input id="pv-height" type="text" readonly value={d?.height ?? ''} /></div>
+      <div class="field"><label for="pv-weight">Weight:</label><input id="pv-weight" type="text" readonly value={d?.weight ?? ''} /></div>
     </div>
-    <div class="row">
-      <label>Hair:</label><input type="text" readonly value={preview?.record?.hairLength ?? ''} style="width:50px" />
-      <label>Color:</label><input type="text" readonly value={preview?.record?.hairColor ?? ''} style="width:50px" />
-      <label>Eth:</label><input type="text" readonly value={preview?.record?.ethnicityCode ?? ''} style="width:50px" />
-      <label>Skin:</label><input type="text" readonly value={d?.skinCode ?? ''} style="width:50px" />
-      <label>isNewGAN:</label><input type="text" readonly value={d?.isNewgan ?? ''} style="width:50px" />
-    </div>
-    <div class="row">
-      <label>Club:</label><input type="text" readonly value={d?.club ?? ''} style="flex:1" />
-      <label>Age:</label><input type="text" readonly value={d?.age ?? ''} style="width:50px" />
-      <label>Height:</label><input type="text" readonly value={d?.height ?? ''} style="width:60px" />
-      <label>Weight:</label><input type="text" readonly value={d?.weight ?? ''} style="width:60px" />
-    </div>
-    <div class="row">
-      <input type="text" placeholder="Image to replace..." bind:value={imgPathInput} style="flex:1" />
+    <div class="replace-row">
+      <input type="text" placeholder="Image to replace..." bind:value={imgPathInput} aria-label="替换图片路径" />
       <button class="btn" onclick={browseImage} disabled={!snap?.currentGroup}>Browse</button>
       <button class="btn primary" onclick={replaceIt} disabled={!uid.trim() || !imgPathInput.trim()}>Replace it</button>
     </div>
   </div>
 </div>
+
+<style>
+  /* 窄窗口下靠换行而不是横向滚动来保全 label 与按钮可见 */
+  .viewer-row { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .preview-col { display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0; }
+  .preview-img { width: 180px; height: 180px; object-fit: cover; border: 1px solid var(--border); border-radius: var(--radius-md); }
+  .preview-placeholder { width: 180px; height: 180px; display: grid; place-items: center; border: 1px dashed var(--border); border-radius: var(--radius-md); color: var(--muted); }
+  .mono-text { font-family: var(--mono); }
+  .fields-col { flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .fgrid { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+  .field { display: flex; align-items: center; gap: 6px; flex: 1 1 170px; min-width: 0; }
+  .field.long { flex-basis: 260px; }
+  .field label { flex-shrink: 0; color: var(--muted); text-align: right; white-space: nowrap; }
+  .field input { flex: 1 1 0; min-width: 48px; }
+  .replace-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .replace-row input { flex: 1 1 220px; min-width: 0; }
+</style>

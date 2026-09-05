@@ -43,11 +43,6 @@ pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
     Ok(out)
 }
 
-/// 按 UID 取 "种族/图片名" 路径（对等 get_imgpath_from_uid）
-pub fn get_imgpath_from_uid(path: &Path, uid: &str) -> Option<String> {
-    parse_xml(path).ok()?.get(uid).map(|e| format!("{}/{}", e.ethnicity, e.image))
-}
-
 /// 全量覆写 config.xml（对等 write_xml：模板 [players] 占位替换）
 pub fn write_xml(data: &[MappingEntry], img_dir: &Path, save_backup: bool) -> Result<(), String> {
     let config_path = img_dir.join("config.xml");

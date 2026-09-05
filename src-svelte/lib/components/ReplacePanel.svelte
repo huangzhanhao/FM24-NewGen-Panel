@@ -49,7 +49,7 @@
 <div class="card">
   <div class="card-title">替换执行</div>
   <div class="row">
-    <label>模式：</label>
+    <span class="row-label">模式：</span>
     {#each Object.keys(MODE_INFO) as m}
       <button
         class="mode-chip"
@@ -58,16 +58,16 @@
         disabled={busy}
       >{m}</button>
     {/each}
-    <span class="muted small" style="flex:1">{MODE_INFO[mode]}</span>
+    <span class="muted small flex-1">{MODE_INFO[mode]}</span>
   </div>
-  <div class="row">
-    <label></label>
+  <div class="row checks">
+    <span class="row-label">选项设置：</span>
     <label><input type="checkbox" bind:checked={allowDuplicates} disabled={busy} /> 允许复用图片</label>
     <label><input type="checkbox" bind:checked={filterNewgan} disabled={busy} /> 仅随机人</label>
     <label><input type="checkbox" bind:checked={saveBackup} disabled={busy} /> 写入前备份</label>
   </div>
   <div class="row">
-    <button class="btn primary big" style="flex:1" onclick={startReplace} disabled={busy || !ready}>
+    <button class="btn primary big flex-1" onclick={startReplace} disabled={busy || !ready}>
       {busy ? '替换中…' : 'Replace Faces'}
     </button>
     <button class="btn" onclick={() => api.cancelReplace()} disabled={!busy}>取消</button>

@@ -113,6 +113,33 @@ impl Logger {
     pub fn path(&self) -> &Path { &self.path }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 启动行必须同时落在日志文件与可查询的环形缓冲里：
+    /// 它在 WebView 订阅 `log:batch` 之前就已 emit（Tauri 不重放事件），
+    /// 前端只能靠 `query_logs` 回填看到它 —— 本测试守住这条回填路径。
+    #[test]
+    fn startup_line_survives_for_history_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let (logger, rx) = Logger::new(dir.path()).unwrap();
+        logger.info("app", "Starting Application v2");
+
+        assert_eq!(rx.try_iter().count(), 1, "启动行应已进入事件通道");
+
+        let page = logger.query("INFO", false, 0, 10_000);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].message, "Starting Application v2");
+
+        let body = std::fs::read_to_string(dir.path().join("newgan.log")).unwrap();
+        assert!(body.contains("Starting Application v2"), "文件里也应有启动行: {body}");
+
+        // 阈值过滤：WARNING 以上不包含 INFO 启动行
+        assert_eq!(logger.query("WARNING", false, 0, 10_000).total, 0);
+    }
+}
+
 /// 每 100ms 批量把日志推给前端（避免逐条事件冲击 IPC）
 pub fn spawn_emitter(app: tauri::AppHandle, rx: Receiver<LogLine>) {
     std::thread::spawn(move || loop {

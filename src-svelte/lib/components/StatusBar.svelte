@@ -17,7 +17,7 @@
     <div class="progress-track mini"><div class="progress-fill" style="width:{appStore.progress.value}%"></div></div>
     <span class="muted">{appStore.progress.value}%</span>
   {/if}
-  <span style="flex:1"></span>
+  <span class="flex-1"></span>
   <button class="link" onclick={() => (ui.logOpen = !ui.logOpen)}>
     日志{#if errorCount > 0}<span class="badge">{errorCount}</span>{/if}
   </button>

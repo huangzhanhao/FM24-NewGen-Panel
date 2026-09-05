@@ -1,8 +1,7 @@
 <script lang="ts">
   import { VList } from 'virtua/svelte';
   import { openPath } from '@tauri-apps/plugin-opener';
-  import { api } from '../api';
-  import { appStore } from '../stores/app.svelte';
+  import { appStore, reloadLogs } from '../stores/app.svelte';
   import { clearDisplay, filterLines, LEVELS, logStore } from '../stores/log.svelte';
   import { ui } from '../stores/ui.svelte';
   import type { LogLine } from '../types';
@@ -12,10 +11,7 @@
     if (!ui.logOpen) return;
     void logStore.level;
     void logStore.only;
-    api.queryLogs(logStore.level, logStore.only, 0, 10_000).then((page) => {
-      clearDisplay();
-      logStore.lines.push(...page.items);
-    });
+    void reloadLogs();
   });
 
   const shown = $derived(filterLines(logStore.lines, logStore.level, logStore.only));
@@ -26,7 +22,7 @@
 </script>
 
 {#if ui.logOpen}
-  <div class="drawer-backdrop" onclick={() => (ui.logOpen = false)}></div>
+  <div class="drawer-backdrop" role="button" tabindex={0} aria-label="关闭日志面板" onclick={() => (ui.logOpen = false)} onkeydown={(e) => e.key === 'Escape' && (ui.logOpen = false)}></div>
   <aside class="drawer">
     <div class="row">
       <strong>运行日志</strong>
@@ -34,13 +30,13 @@
       <select bind:value={logStore.level}>
         {#each LEVELS as l}<option value={l}>{l}</option>{/each}
       </select>
-      <span style="flex:1"></span>
+      <span class="flex-1"></span>
       <button class="btn" onclick={openLogFile}>打开日志文件</button>
       <button class="btn" onclick={clearDisplay}>清空显示</button>
       <button class="icon-btn" onclick={() => (ui.logOpen = false)}>×</button>
     </div>
     <div class="drawer-body">
-      <VList data={shown} style="height:100%;font-family:var(--mono);font-size:12px">
+      <VList data={shown} style="height:100%" class="mono small">
         {#snippet children(line: LogLine)}
           <div class="log-line {line.level.toLowerCase()}" style="padding:1px 8px;white-space:nowrap">
             | {line.ts} | {line.level.padEnd(8)} | {line.module} | {line.message}

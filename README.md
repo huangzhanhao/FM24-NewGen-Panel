@@ -35,7 +35,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 ## 快速开始（普通用户）
 
 1. 到 **Releases** 下载对应平台安装包，安装运行（无需安装 Python / .NET）。
-   - **Windows**：`NewGAN-Manager_2.0.0_x64-setup.exe`（NSIS，推荐）或 `.msi`。系统使用自带 WebView2（Win10 1809+ / Win11 一般已内置）；若缺失，安装包会联网引导安装。
+   - **Windows**：`NewGAN-Manager_2.0.0_x64-setup.exe`（NSIS，安装到当前用户目录，无需管理员权限）。系统使用自带 WebView2（Win10 1809+ / Win11 一般已内置）；若缺失，安装包会联网引导安装。
    - **macOS / Linux**：下载 CI 构建的对应平台产物。
 2. 把仓库里的 `views/`、`filters/` 两个文件夹复制到 FM 用户目录：
    - Windows：`文档\Sports Interactive\Football Manager 20XX\`
@@ -111,12 +111,20 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 ## 项目结构
 
 ```
+├── src-svelte/                  # Svelte 5 前端
+│   ├── main.ts / App.svelte / app.css
+│   └── lib/
+│       ├── types.ts / api.ts / dialog.ts   # IPC 类型与封装、统一错误弹窗
+│       ├── stores/            # app / log / ui（runes 状态）
+│       └── components/        # Sidebar / SetupCard / ReplacePanel / ResultsSection /
+│                               # PlayersTable / PlayerViewer / StatusBar / LogDrawer
 ├── src-tauri/                  # Rust 后端
 │   ├── Cargo.toml / build.rs / tauri.conf.json
 │   ├── assets/                 # 嵌入资源：eth_cfg.json / nat_translation.json / config_template
 │   ├── capabilities/default.json
+│   ├── icons/                  # 应用全套图标（OS 窗口 / 安装包用，由 app-icon.png 生成）
 │   └── src/
-│       ├── main.rs / lib.rs    # 入口 + Tauri Builder 装配（含 v1 数据自动迁移）
+│       ├── main.rs / lib.rs    # 入口 + Tauri Builder 装配（含便携数据目录与 v1 迁移）
 │       ├── assets.rs           # 编译期加载映射表
 │       ├── json_store.rs       # JSON 原子读写 + 损坏回退
 │       ├── paths.rs            # 路径规范化（目录 key / 快照路径）
@@ -127,17 +135,14 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       ├── replace_flow.rs     # ← services/replace_service.py（替换流水线）
 │       ├── logger.rs           # ← core/NewGanLogManager.py（环形缓冲 + 事件）
 │       └── commands.rs         # ← services/* + 对话框原语（17 个 Tauri 命令）
-├── src/                        # Svelte 5 前端
-│   ├── main.ts / App.svelte / app.css
-│   └── lib/
-│       ├── types.ts / api.ts / dialog.ts   # IPC 类型与封装、统一错误弹窗
-│       ├── stores/            # app / log / ui（runes 状态）
-│       └── components/        # Sidebar / SetupCard / ReplacePanel / ResultsSection /
-│                               # PlayersTable / PlayerViewer / StatusBar / LogDrawer
+├── tests/testing_data/          # RTF 测试样本（不入库）
+├── .cargo/config.toml           # Cargo 构建配置（target-dir 指向根目录 target/）
 ├── package.json / vite.config.ts / svelte.config.js / tsconfig.json
 ├── views/ filters/ docs/ LICENSE  # FM 视图与过滤器、文档、许可
 └── .github/workflows/tauri.yml    # CI：Rust/Web 测试门禁 + 三平台构建
 ```
+
+> 生成目录（均已 gitignore）：`node_modules/`（pnpm 依赖）、`dist/`（前端构建）、`target/`（Rust 构建）、`data/`（开发调试时的运行数据）。
 
 > 分层对应 v1：**UI（Svelte 组件）→ 命令层（Tauri commands）→ 业务核心（Rust 模块）**。数据永远留在 Rust 侧，IPC 只传分页 / 摘要，根治大 RTF 卡顿。
 > v1（Python/Toga 版）的架构文档见 [docs/legacy-python/ARCHITECTURE.md](docs/legacy-python/ARCHITECTURE.md)。
@@ -151,7 +156,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 # 1) 安装依赖
 pnpm install
 
-# 2) 开发模式（前端热重载 + Rust 增量编译）
+# 2) 开发模式（前端热重载 + Rust 增量编译；运行数据写入 <项目根>/data/）
 pnpm tauri dev
 
 # 3) 测试与检查
@@ -159,9 +164,14 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试
 pnpm test                                          # vitest 前端单测
 pnpm check                                         # svelte-check 类型检查
 
-# 4) 打包（Windows 产出 NSIS .exe 与 .msi）
-pnpm tauri build                                   # 产物在 src-tauri/target/release/bundle/
+# 4) 打包（Windows 产出 NSIS 安装包，产物在 target/release/bundle/）
+pnpm tauri build
+
+# 5) 重新生成全套应用图标（源文件为根目录 app-icon.png）
+pnpm tauri icon app-icon.png
 ```
+
+> Rust 构建产物统一在项目根 `target/`（由 `.cargo/config.toml` 指定）；前端构建产物在 `dist/`。
 
 ---
 
@@ -170,7 +180,7 @@ pnpm tauri build                                   # 产物在 src-tauri/target/
 v2 首次启动时自动完成迁移，无需手动操作：
 
 - **迁移来源**（按顺序查找，找到即止）：v1 便携模式 `<v2安装目录>\data\.user` → v1 标准模式 `%LOCALAPPDATA%\NewGAN Manager\.user`。
-- **迁移目标**：v2 数据目录（Windows 为 `%APPDATA%\com.fm.newganmanager`），整目录复制，Profile、组、RTF 设置、映射快照全部保留；旧版单档 Profile 格式自动升级为按组快照的新格式。
+- **迁移目标**：v2 便携数据目录 `<安装目录>\data\.user`（开发调试时为 `<项目根>\data\.user`），整目录复制，Profile、组、RTF 设置、映射快照全部保留；旧版单档 Profile 格式自动升级为按组快照的新格式。
 - 迁移是**复制**而非移动，v1 安装不受影响，可随时回退。
 - 产物 100% 兼容：`config.xml` 生成规则逐字节一致（同一模板、`r-` 前缀规则）、`.user/` 数据结构不变、14 个种族目录名不变、备份命名与保留策略不变。
 
@@ -178,7 +188,7 @@ v2 首次启动时自动完成迁移，无需手动操作：
 
 ## 应用数据与配置文件
 
-只读映射表在编译期嵌入二进制（内容与 v1 `.config/` 完全一致）；用户运行时数据写入 Tauri 标准数据目录（Windows：`%APPDATA%\com.fm.newganmanager`）：
+只读映射表在编译期嵌入二进制（内容与 v1 `.config/` 完全一致）；用户运行时数据**全部便携化**——开发调试写入 `<项目根>\data\`，正式安装后写入 `<安装目录>\data\`（不落在 C 盘 AppData）：
 
 ```
 # 只读配置（源码位置，编译期嵌入）
@@ -187,7 +197,7 @@ src-tauri/assets/
   nat_translation.json  中文国籍 → 英文三字码 对照表（解析中文 RTF 用）
   config_template       config.xml 的固定头尾模板，[players] 为占位符
 
-# 用户数据目录
+# 用户数据目录（开发：<项目根>/data/；安装后：<安装目录>/data/）
 .user/
   cfg.json              Profile 列表与激活状态（仅一个为 true）
   <Profile>.json        单个 Profile 的头像包目录（组）与 RTF 设置
@@ -200,7 +210,7 @@ newgan.log              运行日志（10 MB × 3 滚动）
 
 ## 故障排查
 
-出问题时请先附上日志 `newgan.log` 再提 issue。最快的定位方式：点状态栏 `日志` 打开抽屉，把级别选到 `DEBUG` 复现一次，点 **打开日志文件** 直接打开日志（文件在数据目录，如 Windows 的 `%APPDATA%\com.fm.newganmanager\newgan.log`）。
+出问题时请先附上日志 `newgan.log` 再提 issue。最快的定位方式：点状态栏 `日志` 打开抽屉，把级别选到 `DEBUG` 复现一次，点 **打开日志文件** 直接打开日志（文件在数据目录：开发时为 `<项目根>\data\newgan.log`，安装后为 `<安装目录>\data\newgan.log`）。
 
 | 现象 | 原因与处理 |
 | :--- | :--- |

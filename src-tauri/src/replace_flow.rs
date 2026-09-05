@@ -1,5 +1,6 @@
-//! Replace Faces 流水线（自 services/replace_service.py 移植）
-//! 进度通过回调上报（值与 v1 对齐：20/40/80/90/100），取消经 AtomicBool 逐球员生效
+//! 【新手导读】Replace Faces 流水线（自旧版 services/replace_service.py 移植）。
+//! 把「校验 RTF → 解析 → 映射 → 写 config.xml」四个阶段串成一条完整流程。
+//! 进度通过回调上报（值与 v1 对齐：20/40/80/90/100），取消经 AtomicBool 逐球员生效。
 use crate::assets::{ETH_CFG, NAT_TRANSLATION};
 use crate::face_mapper::{FaceMapper, Mode};
 use crate::rtf_parser::{PlayerRecord, RtfParser};
@@ -7,15 +8,17 @@ use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// 一次替换所需的全部参数（由 commands 层从前端收集后组装）。
 pub struct ReplaceParams {
-    pub rtf_path: String,
-    pub img_dir: String,
-    pub mode: Mode,
-    pub filter_newgen: bool,
-    pub allow_duplicates: bool,
-    pub save_backup: bool,
+    pub rtf_path: String,       // RTF 名单文件路径
+    pub img_dir: String,        // 头像包目录
+    pub mode: Mode,             // 替换模式
+    pub filter_newgen: bool,    // 是否只处理随机人
+    pub allow_duplicates: bool, // 是否允许图片复用
+    pub save_backup: bool,      // 写入前是否备份
 }
 
+/// 流水线最终结果：成功 / 被取消 / 失败（带错误信息）。
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Finished,
@@ -23,14 +26,18 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// run() 的返回体：除了结果状态，还把解析出的球员与映射带回（供前端预览）。
 pub struct RunResult {
     pub outcome: Outcome,
     pub rtf_data: Vec<PlayerRecord>,
     pub mapping: Vec<MappingEntry>,
 }
 
+/// 【核心函数】执行整条替换流水线。
+/// progress 是一个回调函数（&mut dyn FnMut）：每进入一个阶段就调用它上报状态文字和百分比。
+/// cancel 是跨线程取消标志：阶段之间、以及映射循环内部都会检查它。
 pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &AtomicBool) -> RunResult {
-    // 阶段1：校验 RTF（0%）
+    // 阶段1：校验 RTF（0%）。check_rtf_valid 返回 Ok(true)/Ok(false)/Err 三种，分别处理。
     progress("Validating RTF file...", 0);
     let mut parser = RtfParser::new();
     match parser.check_rtf_valid(Path::new(&params.rtf_path)) {
@@ -41,7 +48,7 @@ pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &
     if cancel.load(Ordering::Relaxed) {
         return cancelled();
     }
-    // 阶段2：解析 RTF（20%）
+    // 阶段2：解析 RTF（20%），得到结构化球员列表（内部会做中文国籍翻译）。
     progress("Parsing RTF file...", 20);
     let rtf_data = match parser.parse_rtf(Path::new(&params.rtf_path), params.filter_newgen, &NAT_TRANSLATION) {
         Ok(d) => d,
@@ -50,7 +57,7 @@ pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &
     if cancel.load(Ordering::Relaxed) {
         return cancelled();
     }
-    // 阶段3：映射（40%）
+    // 阶段3：映射（40%）。先扫描头像包建索引，再为每个球员选图。
     progress("Mapping player to image...", 40);
     let mut mapper = match FaceMapper::new(&params.img_dir) {
         Ok(m) => m,
@@ -64,22 +71,24 @@ pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &
         &ETH_CFG,
     ) {
         Some(m) => m,
+        // 返回 None 可能是被取消，也可能是其他失败；根据 cancel 标志区分。
         None => return if cancel.load(Ordering::Relaxed) { cancelled() } else { failed("映射失败") },
     };
     if cancel.load(Ordering::Relaxed) {
         return cancelled();
     }
-    // 阶段4：写 config.xml（80%）
+    // 阶段4：写 config.xml（80%）。把映射结果一次性写入头像包目录。
     progress("Generating config.xml...", 80);
     if let Err(e) = xml_parser::write_xml(&mapping, Path::new(&params.img_dir), params.save_backup) {
         return failed(&e);
     }
-    // 阶段5：完成（90 → 100）
+    // 阶段5：完成（90 → 100）。上报最后两个进度，返回成功与数据。
     progress("Saving profile metadata...", 90);
     progress("Finished! :)", 100);
     RunResult { outcome: Outcome::Finished, rtf_data, mapping }
 }
 
+// 下面两个是构造 RunResult 的小工具，避免重复写字段（失败/取消时数据为空）。
 fn failed(msg: &str) -> RunResult {
     RunResult { outcome: Outcome::Failed(msg.into()), rtf_data: Vec::new(), mapping: Vec::new() }
 }

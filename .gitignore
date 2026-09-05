@@ -1,52 +1,43 @@
 # ===============================
-# Python
+# 前端（src-svelte / Vite / pnpm）
 # ===============================
-
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Distribution / packaging
-.Python
-build/
-dist/
-*.egg-info/
-*.egg
-
-# Unit test / coverage reports
-htmlcov/
-.coverage
-.pytest_cache/
-
-# Type checkers
-.mypy_cache/
+node_modules/
+/dist/
 
 # ===============================
-# Virtual Environments
+# Rust（src-tauri / cargo）
 # ===============================
+/target/
+/src-tauri/gen/
 
+# ===============================
+# 运行时数据（开发调试时生成在项目根 data/，不提交）
+# ===============================
+/data/
+*.log
+newgan.log
+
+# ===============================
+# 测试样本（含超大 RTF，暂不入库）
+# ===============================
+tests/testing_data/
+
+# ===============================
+# Virtual Environments（v1 Python 分支切换用，保留忽略）
+# ===============================
 .venv/
 .venv*/
 env/
 venv/
-ENV/
 
 # ===============================
 # IDEs and Editors
 # ===============================
-
-# VS Code
 .vscode/
 *.code-workspace
 .qoder
-
-# PyCharm / IntelliJ IDEA
 .idea/
 *.iml
-
-# Other editors
 *.sublime-project
 *.sublime-workspace
 *.swp
@@ -56,83 +47,26 @@ ENV/
 # ===============================
 # Operating Systems
 # ===============================
-
-# Windows
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 *.lnk
-
-# macOS
 .DS_Store
 .AppleDouble
 ._*
-
-# Linux
-*~
 .directory
 .Trash-*
 
 # ===============================
-# Briefcase (BeeWare)
+# Temporary / Environment
 # ===============================
-
-iOS/
-macOS/
-windows/
-android/
-linux/
-
-# ===============================
-# Project Specific
-# ===============================
-
-# Application logs
-*.log
-newgan.log
-
-# User configuration files
-src/newganmanager/.user/*.json
-src/newganmanager/.user/*.xml
-
-# 测试夹具数据（含超大 RTF 样本）—— 暂不跟踪，项目重构完成后会重新生成测试代码与测试数据
-src/tests/testing_data/
-
-# User RTF exports (personal data, never commit)
-src/newganmanager/user_rtf/
-user_rtf/
-
-# Portable user data directory (dev runtime output, never commit)
-src/newganmanager/data/
-# Keep template files
-!src/newganmanager/.user/No Profile.json
-!src/newganmanager/.user/default_cfg.json
-
-# Temporary files
 *.tmp
 *.temp
 *.bak
 *.backup
-
-# Database files
 *.db
 *.sqlite*
-
-# ===============================
-# Environment and Development
-# ===============================
-
-# Environment files
 .env.local
 .env.*.local
 .env.development
 .env.production
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-node_modules
-
-node_modules/
-/dist/
-/src-tauri/target/
-/src-tauri/gen/

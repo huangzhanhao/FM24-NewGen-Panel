@@ -1,0 +1,3 @@
+# Cargo 配置：构建产物统一放在项目根目录 target/（与前端 dist/ 同级，根目录更整洁）
+[build]
+target-dir = "target"

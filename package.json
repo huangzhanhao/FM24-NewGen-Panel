@@ -8,8 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run",
-    "build:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable.ps1"
+    "test": "vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

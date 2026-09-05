@@ -34,9 +34,8 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 
 ## 快速开始（普通用户）
 
-1. 到 **Releases** 下载对应平台安装包或便携版，运行（无需安装 Python / .NET）。
-   - **Windows 安装版**：`NewGAN-Manager_2.0.0_x64-setup.exe`（NSIS，安装到当前用户目录，无需管理员权限）。
-   - **Windows 便携版**：`NewGAN-Manager_2.0.0_x64-portable.zip`，解压到任意目录直接双击运行；用户数据保存在解压目录的 `data\` 里，整个文件夹即拷即用。
+1. 到 **Releases** 下载对应平台安装包，安装运行（无需安装 Python / .NET）。
+   - **Windows**：`NewGAN-Manager_2.0.0_x64-setup.exe`（NSIS，安装到当前用户目录，无需管理员权限）。
    - 系统使用自带 WebView2（Win10 1809+ / Win11 一般已内置）；若缺失，安装包会联网引导安装。
    - **首次运行提示**：应用未购买代码签名证书，Windows SmartScreen 或部分杀毒软件可能弹出警告（"Windows 已保护你的电脑"）。请点 **「更多信息」→「仍要运行」**；如在杀软信任区添加应用目录可避免反复提示。应用源码完全公开，可自行审计。
    - **macOS / Linux**：下载 CI 构建的对应平台产物。
@@ -139,7 +138,6 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       ├── logger.rs           # ← core/NewGanLogManager.py（环形缓冲 + 事件）
 │       └── commands.rs         # ← services/* + 对话框原语（17 个 Tauri 命令）
 ├── tests/testing_data/          # RTF 测试样本（不入库）
-├── scripts/                     # 辅助脚本（build-portable.ps1 便携版打包）
 ├── .cargo/config.toml           # Cargo 构建配置（target-dir 指向根目录 target/）
 ├── package.json / vite.config.ts / svelte.config.js / tsconfig.json
 ├── views/ filters/ docs/ LICENSE  # FM 视图与过滤器、文档、许可
@@ -171,10 +169,7 @@ pnpm check                                         # svelte-check 类型检查
 # 4) 打包（Windows 产出 NSIS 安装包，产物在 target/release/bundle/）
 pnpm tauri build
 
-# 5) 生成便携版 ZIP（单文件 exe 自包含，产物在 target/release/bundle/portable/）
-pnpm build:portable
-
-# 6) 重新生成全套应用图标（源文件为根目录 app-icon.png）
+# 5) 重新生成全套应用图标（源文件为根目录 app-icon.png）
 pnpm tauri icon app-icon.png
 ```
 

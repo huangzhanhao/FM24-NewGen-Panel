@@ -129,5 +129,10 @@ src/newganmanager/data/
 .env.production
 
 # Jupyter Notebook
-.ipynb_checkpoints
+.ipynb_checkpoints/
 node_modules
+
+node_modules/
+/dist/
+/src-tauri/target/
+/src-tauri/gen/

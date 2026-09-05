@@ -260,6 +260,10 @@ impl ProfileManager {
         Ok(true)
     }
 
+    pub fn user_cfg_path(&self) -> PathBuf {
+        self.user_dir.clone()
+    }
+
     fn persist_prf(&self) -> Result<(), String> {
         json_store::save(&Self::prf_path(&self.user_dir, &self.cur_prf), &self.prf_cfg)
     }

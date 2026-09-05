@@ -21,6 +21,16 @@ export interface MappingEntry { uid: string; ethnicity: string; image: string; }
 /// 一个头像包（组）的摘要（对应 Rust 的 GroupInfo）。
 export interface GroupInfo { imgDir: string; rtf: string; }
 
+/// 「检查完整性」结果（对应 Rust 的 IntegrityResult）。
+/// standard: 1=图片直铺 / 2=14 种族 / 3=65 细分；0=无法识别。
+export interface IntegrityResult {
+  standard: number;
+  status: 'complete' | 'fixable' | 'unknown';
+  missing: string[];
+  found: number;
+  expectedTotal: number;
+}
+
 /// 应用全局快照（对应 Rust 的 AppSnapshot）。前端大部分界面都基于它渲染。
 export interface AppSnapshot {
   profiles: string[]; currentProfile: string; groups: GroupInfo[];

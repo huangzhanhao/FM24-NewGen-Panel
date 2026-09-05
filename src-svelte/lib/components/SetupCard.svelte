@@ -6,11 +6,19 @@
   import { showError } from '../dialog';
   import { pinScrollEnd } from '../actions'; // 把长路径钉到最右的 action
   import { appStore, applySnapshot } from '../stores/app.svelte';
+  import type { IntegrityResult } from '../types';
 
-  let missingDirs = $state<string[] | null>(null); // null = 未检查；[] = 完整；非空数组 = 缺失的目录
+  let integrity = $state<IntegrityResult | null>(null); // null = 未检查
 
   const snap = $derived(appStore.snapshot);
   const busy = $derived(!!snap?.replacing); // !! 把值强转为布尔（替换中时禁用按钮）
+  // 完整时按命中的标准给出中文标注（标准一/二/三）。
+  const completeLabel = $derived(
+    integrity?.standard === 1 ? '标准一：图片直铺，无种族子目录'
+    : integrity?.standard === 2 ? '标准二：14 个种族目录齐全'
+    : integrity?.standard === 3 ? '标准三：65 个种族目录齐全'
+    : '',
+  );
 
   // 切档 / 换组后清掉上一次检查结论，不把旧组的结论显示到新组上。
   // $effect(函数)：在组件挂载后运行，并在它“读取过的响应式值”变化时重新运行。
@@ -18,7 +26,7 @@
   let lastGroup = '';
   $effect(() => {
     const g = snap?.currentGroup ?? ''; // ?? 是空值合并：左边为 null/undefined 时取右边
-    if (g !== lastGroup) { lastGroup = g; missingDirs = null; }
+    if (g !== lastGroup) { lastGroup = g; integrity = null; }
   });
 
   /** 浏览并选择 RTF 文件。open 返回选中路径（字符串）或 null（取消）。 */
@@ -26,28 +34,30 @@
     const file = await open({ filters: [{ name: 'RTF', extensions: ['rtf'] }], title: '选择 RTF 名单' });
     if (typeof file === 'string') {
       // 调后端设置 RTF，并用返回的快照刷新界面；成功后清掉检查结论。
-      try { await applySnapshot(await api.setCurrentRtf(file)); missingDirs = null; }
+      try { await applySnapshot(await api.setCurrentRtf(file)); integrity = null; }
       catch (e) { await showError(e); }
     }
   }
 
-  /** 检查完整性：调后端校验当前组缺哪些种族目录。 */
+  /** 检查完整性：让后端识别头像包属于三套标准中的哪一套，并返回缺失目录。 */
   async function checkIntegrity() {
     if (!snap?.currentGroup) return;
-    missingDirs = await api.validateImageDirs(snap.currentGroup);
+    integrity = await api.checkIntegrity(snap.currentGroup);
   }
 
-  /** 一键创建缺失目录（先弹确认框）。 */
+  /** 一键创建缺失目录（先弹确认框）；创建成功后重新检查，拿最新结论。 */
   async function fixMissing() {
-    if (!snap?.currentGroup || !missingDirs) return;
+    if (!snap?.currentGroup || !integrity || integrity.missing.length === 0) return;
+    const stdName = integrity.standard === 3 ? '标准三(65)' : '标准二(14)';
     const ok = await ask(
-      `缺少 ${missingDirs.length} 个种族目录：\n${missingDirs.join(', ')}\n\n自动创建？`,
+      `${stdName} 缺少 ${integrity.missing.length} 个目录：\n${integrity.missing.join(', ')}\n\n自动创建？`,
       { title: 'Missing Directories' },
     );
     if (!ok) return; // 用户取消
-    // 创建成功后把 missingDirs 置为空数组（表示已完整）。
-    try { await api.createMissingDirs(snap.currentGroup, missingDirs); missingDirs = []; }
-    catch (e) { await showError(e); }
+    try {
+      await api.createMissingDirs(snap.currentGroup, integrity.missing);
+      integrity = await api.checkIntegrity(snap.currentGroup); // 复校，得到权威结论
+    } catch (e) { await showError(e); }
   }
 </script>
 
@@ -63,7 +73,7 @@
              use:pinScrollEnd={snap.currentGroup ?? ''} />
       <!-- disabled 在忙碌或无选中组时置 true；title 根据情况给不同提示。 -->
       <button class="btn" onclick={checkIntegrity} disabled={busy || !snap.currentGroup}
-              title={snap.currentGroup ? '校验 14 个种族目录是否齐全' : '请先关联头像包目录'}>检查完整性</button>
+              title={snap.currentGroup ? '识别并校验三套标准：图片直铺 / 14 种族 / 65 细分' : '请先关联头像包目录'}>检查完整性</button>
     </div>
     <!-- RTF 名单路径行：只读输入框 + 选择文件按钮。 -->
     <div class="path-row">
@@ -76,12 +86,14 @@
     <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓；已检查且缺失→黄色警告 + 一键创建按钮。 -->
     {#if !snap.currentGroup}
       <p class="muted small">先在左侧「头像包（组）」关联一个头像包目录，或点击已有组。</p>
-    {:else if missingDirs !== null}
-      {#if missingDirs.length === 0}
-        <p class="ok-text small">✓ 头像包目录完整（14 个种族目录齐全）</p>
-      {:else}
-        <p class="warn-text small">缺少 {missingDirs.length} 个种族目录：{missingDirs.join(', ')}</p>
+    {:else if integrity !== null}
+      {#if integrity.status === 'complete'}
+        <p class="ok-text small">✓ 头像包结构完整（{completeLabel}）</p>
+      {:else if integrity.status === 'fixable'}
+        <p class="warn-text small">标准{integrity.standard === 3 ? '三(65)' : '二(14)'}：缺少 {integrity.missing.length} 个目录（已有 {integrity.found}/{integrity.expectedTotal}）：{integrity.missing.join(', ')}</p>
         <button class="btn primary" onclick={fixMissing} disabled={busy}>一键创建缺失目录</button>
+      {:else}
+        <p class="warn-text small">⚠ 无法识别头像包结构：子目录既不属于标准二(14 种族)，也不属于标准三(65 细分)，请检查目录命名后重试。</p>
       {/if}
     {/if}
   </div>

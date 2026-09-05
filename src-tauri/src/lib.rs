@@ -173,6 +173,7 @@ pub fn run() {
             commands::set_current_group,    // 切换当前头像包（组）
             commands::delete_group,         // 删除组
             commands::validate_image_dirs,  // 校验 14 个种族目录是否齐全
+            commands::check_integrity,      // 检查完整性：识别三套头像包标准（图片直铺/14/65）并给出缺失目录
             commands::create_missing_dirs,  // 批量创建缺失目录
             commands::start_replace,        // 启动批量替换（后台线程）
             commands::cancel_replace,       // 请求取消正在进行的替换

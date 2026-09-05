@@ -24,6 +24,24 @@ pub const FACEPACK_DIRS: [&str; 14] = [
     "SpanMed", "YugoGreek",
 ];
 
+/// 65 个细分种族目录（标准三）。保持社区原始拼写（含 Finstonia / Staff / WF 等历史写法），
+/// 与标准二仅 "Scandinavian" 一名重合，故两套互斥，可用于「就近判标准」。
+pub const FACEPACK_DIRS_65: [&str; 65] = [
+    "Afroamerican", "Afrocaribbean", "Albania", "AlbanianGreek", "Anglosphere",
+    "ArabGulf", "Armenian", "Azerbaijan", "Baltics", "BrazilMixed",
+    "CaucasianNA", "Caucasus", "CentralAfrica", "CentralAsian", "CentralEurope",
+    "China", "Denmark", "EastAfrica", "EastBalkan", "EastSlavic",
+    "Filipino", "Finstonia", "France", "HornOfAfrica", "Hungary",
+    "Iceland", "IndigenousSA", "Indonesia", "Iran", "Ireland",
+    "Israel", "Italia", "Japan", "Korea", "Maghreb",
+    "MainlandSEA", "Malaysia", "Mashriq", "Mestizo", "MixedRace",
+    "Mongolia", "Netherlands", "NorthernSA", "Norway", "PacificIslanders",
+    "Poland", "Portugal", "Romania", "SahelianAfrica", "Scandinavian",
+    "Singapore", "SouthAsia", "SouthConeSA", "SouthernAfrica", "Spain",
+    "Staff", "Sweden", "Tajikistan", "Turkish", "Uzbekistan",
+    "Vietnam", "WF", "WestAfrica", "WestBalkan", "WestSlavic",
+];
+
 /// 应用全局状态（在 lib.rs 的 setup 里用 app.manage 交给 Tauri 托管）。
 /// 【为何这样包】命令可能在不同线程被调用，后台替换也跑在单独线程；
 /// 所以共享数据用 Mutex（互斥锁）保护，跨线程引用用 Arc（共享所有权），标志用 AtomicBool。
@@ -62,6 +80,17 @@ pub struct AppSnapshot {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressPayload { pub status: String, pub value: u8 }
+
+/// 「检查完整性」结果：头像包命中的标准 + 可修复的缺失目录（供 check_integrity 命令返回）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrityResult {
+    pub standard: u8,          // 1=图片直铺 / 2=14 种族 / 3=65 细分；0=无法识别
+    pub status: String,        // "complete" | "fixable" | "unknown"
+    pub missing: Vec<String>,  // fixable 时可一键创建的缺失目录（按标准原顺序）
+    pub found: usize,          // 已命中的子目录数
+    pub expected_total: usize, // 该标准应有的目录总数（标准一/无法识别为 0）
+}
 
 /// 前端发起替换时传来的参数（Deserialize = 从前端 JSON 解析而来）。
 #[derive(Deserialize)]
@@ -224,6 +253,73 @@ pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
         .filter(|d| !existing.contains(**d))
         .map(|d| d.to_string())
         .collect()
+}
+
+/// 「检查完整性」：识别头像包属于三套标准中的哪一套，并给出可一键补全的缺失目录。
+/// - 标准一：无子目录、只有图片（图片直铺）→ 判完整。
+/// - 标准二：子目录集合 == FACEPACK_DIRS(14) → 判完整。
+/// - 标准三：子目录集合 == FACEPACK_DIRS_65(65) → 判完整。
+/// - 非完全一致时「就近判标准」：子目录全 ⊆ 14 组→标准二、全 ⊆ 65 组→标准三，列出缺失可补全；
+///   含未知名或跨两套混用→无法识别。
+#[tauri::command]
+pub fn check_integrity(img_dir: String) -> IntegrityResult {
+    // 扫描目录：子目录名收进 HashSet，同时探测是否存在图片文件（扩展名对齐 resolve_image_file）。
+    let mut subdirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut has_images = false;
+    if let Ok(rd) = std::fs::read_dir(&img_dir) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                subdirs.insert(e.file_name().to_string_lossy().to_string());
+            } else if path
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| matches!(x.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+                .unwrap_or(false)
+            {
+                has_images = true;
+            }
+        }
+    }
+
+    // 标准一：无任何子目录。含图片→完整；连图片都没有（空目录）→无法识别。
+    if subdirs.is_empty() {
+        return IntegrityResult {
+            standard: 1,
+            status: if has_images { "complete".into() } else { "unknown".into() },
+            missing: vec![],
+            found: 0,
+            expected_total: 0,
+        };
+    }
+
+    let s14: std::collections::HashSet<String> = FACEPACK_DIRS.iter().map(|s| s.to_string()).collect();
+    let s65: std::collections::HashSet<String> = FACEPACK_DIRS_65.iter().map(|s| s.to_string()).collect();
+
+    // 完全一致：直接命中标准二 / 标准三，判完整（集合比较与顺序无关）。
+    if subdirs == s14 {
+        return IntegrityResult { standard: 2, status: "complete".into(), missing: vec![], found: subdirs.len(), expected_total: 14 };
+    }
+    if subdirs == s65 {
+        return IntegrityResult { standard: 3, status: "complete".into(), missing: vec![], found: subdirs.len(), expected_total: 65 };
+    }
+
+    // 就近判标准：观察到的子目录是否完整落在某一套已知集合之内。
+    let within = |known: &std::collections::HashSet<String>| subdirs.iter().all(|d| known.contains(d));
+    // 该标准里「尚未出现」的目录，按常量原顺序返回，便于前端稳定展示与创建。
+    let missing_in = |known: &[&str]| -> Vec<String> {
+        known.iter().copied().filter(|d| !subdirs.contains(*d)).map(|d| d.to_string()).collect()
+    };
+    // 两判据互斥（14 与 65 仅 Scandinavian 一名重合）；极端下同时 ⊆ 两套时优先标准二（历史主格式）。
+    if within(&s14) {
+        return IntegrityResult { standard: 2, status: "fixable".into(), missing: missing_in(&FACEPACK_DIRS), found: subdirs.len(), expected_total: 14 };
+    }
+    if within(&s65) {
+        return IntegrityResult { standard: 3, status: "fixable".into(), missing: missing_in(&FACEPACK_DIRS_65), found: subdirs.len(), expected_total: 65 };
+    }
+
+    // 含未知名 / 跨两套混用 → 无法识别，不提供自动补全。
+    IntegrityResult { standard: 0, status: "unknown".into(), missing: vec![], found: subdirs.len(), expected_total: 0 }
 }
 
 /// 批量创建缺失目录（前端确认后调用）。
@@ -422,4 +518,122 @@ pub fn query_logs(state: State<'_, AppState>, level: String, only: bool, offset:
 pub fn cancel_replace(state: State<'_, AppState>) {
     state.cancel.store(true, Ordering::SeqCst);
     state.logger.info("replace", "用户请求取消");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在临时目录下按 names 建子目录，返回根路径字符串。
+    fn mk_dirs(root: &Path, names: &[&str]) {
+        for n in names {
+            std::fs::create_dir_all(root.join(n)).unwrap();
+        }
+    }
+
+    #[test]
+    fn standard1_images_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
+    }
+
+    #[test]
+    fn empty_dir_is_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str()), (1, "unknown"));
+    }
+
+    #[test]
+    fn standard2_exact_regardless_of_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut shuffled: Vec<&str> = FACEPACK_DIRS.to_vec();
+        shuffled.reverse(); // 顺序不同仍应命中
+        mk_dirs(tmp.path(), &shuffled);
+        std::fs::write(tmp.path().join(FACEPACK_DIRS[0]).join("a.jpg"), b"x").unwrap();
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str(), r.missing.len(), r.expected_total), (2, "complete", 0, 14));
+    }
+
+    #[test]
+    fn standard3_exact() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &FACEPACK_DIRS_65);
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 65));
+    }
+
+    #[test]
+    fn standard2_fixable_reports_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 标准二去掉最后一个（YugoGreek）→ 13 个，应判 fixable 且缺失正好是 YugoGreek。
+        let present: Vec<&str> = FACEPACK_DIRS[..13].to_vec();
+        mk_dirs(tmp.path(), &present);
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str(), r.found, r.expected_total), (2, "fixable", 13, 14));
+        assert_eq!(r.missing, vec!["YugoGreek".to_string()]);
+    }
+
+    #[test]
+    fn standard3_fixable_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 65 组
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str(), r.found, r.expected_total), (3, "fixable", 3, 65));
+        assert_eq!(r.missing.len(), 62);
+        assert!(!r.missing.contains(&"China".to_string()));
+    }
+
+    #[test]
+    fn unknown_when_unrecognized_name_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &["African", "Asian", "NotARealRace"]);
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
+    }
+
+    #[test]
+    fn unknown_when_mixing_two_sets() {
+        let tmp = tempfile::tempdir().unwrap();
+        // African 属 14 组、China 属 65 组，跨两套混用 → 无法识别。
+        mk_dirs(tmp.path(), &["African", "China"]);
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
+    }
+
+    /// 在根目录放标准说明里点名的辅助文件（config.xml / .md / 备注.txt），验证其不参与判定。
+    fn drop_aux_files(root: &Path) {
+        std::fs::write(root.join("config.xml"), b"<config/>").unwrap();
+        std::fs::write(root.join("README.md"), b"# md").unwrap();
+        std::fs::write(root.join("备注.txt"), b"note").unwrap();
+    }
+
+    #[test]
+    fn standard2_ignores_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &FACEPACK_DIRS);
+        drop_aux_files(tmp.path());
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str(), r.missing.len()), (2, "complete", 0));
+    }
+
+    #[test]
+    fn standard3_fixable_ignores_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]);
+        drop_aux_files(tmp.path());
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "fixable", 65));
+    }
+
+    #[test]
+    fn standard1_complete_with_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
+        drop_aux_files(tmp.path());
+        let r = check_integrity(tmp.path().to_string_lossy().to_string());
+        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
+    }
 }

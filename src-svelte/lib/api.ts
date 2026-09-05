@@ -7,7 +7,7 @@
 // 【为何集中封装】组件里只需写 api.createProfile(name)，不必重复写 invoke 字符串，也方便类型提示。
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, LogLine, PageResult, PlayerPreview,
+  AppSnapshot, IntegrityResult, LogLine, PageResult, PlayerPreview,
   PlayerQuery, PlayerRecord, ReplaceArgs,
 } from './types'; // import type 仅导入类型，编译后会被完全抹去（不产生运行时代码）
 
@@ -23,6 +23,8 @@ export const api = {
   setCurrentGroup: (imgDir: string) => invoke<AppSnapshot>('set_current_group', { imgDir }),
   deleteGroup: (imgDir: string) => invoke<AppSnapshot>('delete_group', { imgDir }),
   validateImageDirs: (imgDir: string) => invoke<string[]>('validate_image_dirs', { imgDir }),
+  // 检查完整性：识别三套头像包标准并给出可补全的缺失目录（仅“检查完整性”按钮使用）。
+  checkIntegrity: (imgDir: string) => invoke<IntegrityResult>('check_integrity', { imgDir }),
   createMissingDirs: (imgDir: string, names: string[]) =>
     invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。

@@ -1,6 +1,7 @@
 mod assets;
 mod json_store;
 mod paths;
+mod profile_manager;
 mod rtf_parser;
 mod xml_parser;
 

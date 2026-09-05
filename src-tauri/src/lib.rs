@@ -81,6 +81,18 @@ pub fn run() {
             let data_dir = portable_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             migrate_legacy_user_data(&data_dir)?;
+
+            // 主窗口编程式创建（而非 tauri.conf.json 声明）：
+            // 只有 Builder API 能指定 WebView2 数据目录为绝对路径，把浏览器缓存/localStorage
+            // 一并便携化到 <data>\webview，避免 WebView2 默认写入 C 盘 AppData
+            let webview_data = data_dir.join("webview");
+            std::fs::create_dir_all(&webview_data)?;
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("NewGAN Manager")
+                .inner_size(1000.0, 640.0)
+                .resizable(true)
+                .data_directory(webview_data)
+                .build()?;
             let (logger, log_rx) = Logger::new(&data_dir)?;
             let logger = Arc::new(logger);
             logger.info("app", "Starting Application v2");

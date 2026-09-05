@@ -10,7 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "NewGAN Manager", "width": 1000, "height": 640, "resizable": true }],
     "security": { "csp": null }
   },
   "bundle": {

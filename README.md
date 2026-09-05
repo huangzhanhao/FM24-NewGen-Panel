@@ -210,6 +210,7 @@ src-tauri/assets/
   <Profile>.json        单个 Profile 的头像包目录（组）与 RTF 设置
   <Profile>/
     <sanitized_dir>.xml 组映射快照（切换 Profile / 组时交换）
+webview/                WebView2 浏览器数据（缓存/localStorage，已重定向，不写 C 盘）
 newgan.log              运行日志（10 MB × 3 滚动）
 ```
 

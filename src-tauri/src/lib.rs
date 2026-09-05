@@ -1,6 +1,7 @@
 mod assets;
 mod json_store;
 mod paths;
+mod rtf_parser;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

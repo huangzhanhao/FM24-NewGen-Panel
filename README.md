@@ -3,11 +3,9 @@
 > 给 Football Manager 的 NewGAN / 随机人批量匹配头像（facepack）的桌面工具。
 > 读取 FM 导出的 RTF 名单 → 按「国籍 + 种族」自动挑一张头像图片 → 生成 FM 能识别的 `config.xml`。
 
-![Windows](https://github.com/huangzhanhao/NewGAN-Manager-ByHzH/workflows/Windows/badge.svg)
-![Linux](https://github.com/huangzhanhao/NewGAN-Manager-ByHzH/workflows/Linux/badge.svg)
-![MacOS](https://github.com/huangzhanhao/NewGAN-Manager-ByHzH/workflows/MacOS/badge.svg)
+![Tauri Build](https://github.com/huangzhanhao/NewGAN-Manager-ByHzH/actions/workflows/tauri.yml/badge.svg)
 
-**当前版本 v1.4.4** ｜ Fork 自 [Maradonna90/NewGAN-Manager](https://github.com/Maradonna90/NewGAN-Manager)（上游已停止维护）｜ 图形界面基于 [BeeWare / Toga](https://beeware.org/)，支持 Windows、macOS、Linux。
+**当前版本 v2.0.0** ｜ Fork 自 [Maradonna90/NewGAN-Manager](https://github.com/Maradonna90/NewGAN-Manager)（上游已停止维护）｜ v2 基于 **Tauri 2（Rust 后端）+ Svelte 5（前端）** 重构：无需 Python / .NET 运行时，大名单（30 万行级）不卡顿，界面按操作旅程重排。
 
 ---
 
@@ -21,24 +19,24 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 
 ## 主要功能
 
-- **多 Profile 管理**：不同头像包 / 不同存档各建一套 Profile（记录头像包目录、RTF、映射快照）。切换 Profile 时自动把当前 `config.xml` 备份回 `.user/<Profile>.xml`，再把目标快照写回头像包目录。
-- **中文数据库支持**：可识别中文表头、中文国籍的 RTF。国籍中文名会先经 `.config/nat_translation.json` 翻译回英文三字码再查种族映射——**无需把 FM 切成英文**。
-- **只处理随机人**：`only for NewGAN players` 开关按 RTF 最后一列（`Yes/No`、`是/否`）过滤，只给随机人换脸，被过滤者不写入 `config.xml`。
+- **多 Profile / 组管理**：不同存档各建一套 Profile；一个 Profile 下可关联多个头像包目录（组），每组独立记录 RTF 与映射快照。切换 Profile / 组时自动把当前 `config.xml` 存回快照、再把目标快照写回头像包目录。
+- **中文数据库支持**：可识别中文表头、中文国籍的 RTF。国籍中文名经 `nat_translation.json` 翻译回英文三字码再查种族映射——**无需把 FM 切成英文**。
+- **只处理随机人**：`仅随机人` 开关按 RTF 最后一列（`Yes/No`、`是/否`）过滤，只给随机人换脸，被过滤者不写入 `config.xml`。
 - **三种替换模式**：`Preserve` 保留已换过的只补新的；`Overwrite` 对名单内球员全部重抽、名单外保留；`Generate` 无视现有 `config.xml` 从零生成。
-- **单个球员微调**：底部 Viewer 区输入 UID → 预览当前头像与球员uid信息→ 选一张图 `Replace it`，只改写这一条映射。
+- **名单预览（v2 新增）**：RTF 解析结果分页预览表，支持排序 / 搜索；数据保留在 Rust 侧，前端只取当前页，大名单也不卡。
+- **单个球员微调**：结果区切到 `单人微调`，输入 UID 回车 → 预览当前头像与球员信息 → 选一张图 `Replace it`，只改写这一条映射。
 - **自动备份**：每次写入前生成 `config备份_YYYYMMDD-HHMMSS.xml`，每个头像包目录最多保留最近 10 份。
-- **进度与取消**：`Replace Faces` 带进度条与状态文字，解析/映射/写文件放线程池执行避免界面卡死，执行中可 `Cancel`。
-- **应用内日志面板**：`Log` 标签可按级别筛选、只看某一级、一键打开日志、清空显示；日志文件 10 MB × 3 份滚动。
-- **缺失目录提示创建**：头像包缺少某种族子目录时逐个询问是否创建。
+- **进度与取消**：解析 / 映射 / 写文件全部在 Rust 后台线程执行，进度经事件流推送；执行中界面保持流畅，可随时 `取消`。
+- **应用内日志**：状态栏常驻状态与迷你进度，`日志` 按钮带错误角标；抽屉内可按级别筛选、只看某一级、一键打开日志文件；日志文件 10 MB × 3 份滚动。
+- **缺失目录检查与一键创建**：配置卡可主动检查头像包 14 个种族目录是否齐全，缺失时一键批量创建（执行前仍兜底校验）。
 
 ---
 
 ## 快速开始（普通用户）
 
-1. 到 **Releases** 下载对应平台安装包，安装运行（无需装 Python）。
-   - **Windows**：解压 `NewGAN-Manager-*-Windows.zip`，运行其中的 `.msi`。首次建议**以管理员身份**运行（写 `config.xml` 到受保护目录需要权限）。
-   - **Linux**：解压 `.zip`，`sudo chmod +x *.AppImage` 后运行，视权限用 `sudo`。
-   - **macOS**：双击 `.dmg`，把 App 拖入 `Applications`；若无法启动，用 Rosetta 打开。
+1. 到 **Releases** 下载对应平台安装包，安装运行（无需安装 Python / .NET）。
+   - **Windows**：`NewGAN-Manager_2.0.0_x64-setup.exe`（NSIS，推荐）或 `.msi`。系统使用自带 WebView2（Win10 1809+ / Win11 一般已内置）；若缺失，安装包会联网引导安装。
+   - **macOS / Linux**：下载 CI 构建的对应平台产物。
 2. 把仓库里的 `views/`、`filters/` 两个文件夹复制到 FM 用户目录：
    - Windows：`文档\Sports Interactive\Football Manager 20XX\`
    - macOS：`~/Library/Application Support/Sports Interactive/Football Manager 20XX/`
@@ -58,33 +56,35 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 | 2000472008| ESP  | USA     | Pepe Sáenz  | 1        | 12   | 1      |
 ```
 
-本分支额外支持：
+额外支持：
 - **中文表头 / 中文国籍**（如 `| 编号 | 国籍/地区籍 | … | 姓名 |`，国籍写「美国」这类中文名）；
-- **14 列扩展格式**，多出：肤色码、Face、俱乐部、年龄、身高、体重、`是否为随机人`——只有带最后一列时，`only for NewGAN players` 过滤才生效。
+- **14 列扩展格式**，多出：肤色码、Face、俱乐部、年龄、身高、体重、`是否为随机人`——只有带最后一列时，`仅随机人` 过滤才生效。
 
 > UID 默认按随机人处理并加 `r-` 前缀；当 `是否为随机人 = No / 否` 时改回纯数字 UID。
 
-### 2. 在主界面填 4 项
+### 2. 侧栏：准备 Profile 与头像包
+- 点 `Profile` 区的 ＋ 新建并选择一个 Profile（`No Profile` 为占位状态，不能删除）。
+- 点 `头像包（组）` 区的 ＋ **关联头像包根目录**（其下是 `African`、`Asian`… 等种族子目录），一个 Profile 可关联多组；点组名切换当前组，组条目上显示 RTF 是否已设置。
 
-| 项目 | 说明 |
-| :--- | :--- |
-| **Create / Select Profile** | 新建并选择一个 Profile；`No Profile` 为占位状态，不能删除 |
-| **Images Directory** | 头像包**根目录**（其下是 `African`、`Asian`… 等种族子目录） |
-| **RTF File** | 上一步导出的 RTF 文件 |
-| **Mode** | `Preserve` / `Overwrite` / `Generate`，见[主要功能](#主要功能) |
+### 3. 配置卡：检查完整性并设置 RTF
+- 点 **`检查完整性`**：校验 14 个种族目录是否齐全，缺失时可 **`一键创建缺失目录`**。
+- 点 **`选择文件`** 挑选上一步导出的 RTF。
 
-### 3. 选开关后执行
-- `Allow Duplicates`：允许不同球员复用同一头像（关闭时 Preserve 模式会先剔除 `config.xml` 已用图片）。
-- `only for NewGAN players`：只处理随机人。
-- `Save backup of config.xml`：写入前备份原文件。
+### 4. 执行面板：选模式与开关后执行
+- **模式**：`Preserve` / `Overwrite` / `Generate` 三个 chip 任选，含义见[主要功能](#主要功能)。
+- 开关：`允许复用图片`（关闭时 Preserve 模式会先剔除 `config.xml` 已用图片）、`仅随机人`、`写入前备份`。
+- 未就绪时按钮禁用并提示缺什么（选择 Profile · 选择头像包 · 设置 RTF 名单）。
+- 点击 **Replace Faces**，进度条与状态文字实时推进，执行中可 `取消`，完成弹出 `Finished! :)`。
 
-点击 **Replace Faces**，等待进度到 100% 并弹出 `Finished! :)`。
+### 5. 结果区：名单预览与单人微调
+- **名单预览**：刚解析的名单分页表格，可排序 / 搜索。
+- **单人微调**：输入该球员 UID 回车 → 查看当前头像 → `Browse` 选一张新图（路径需形如 `...\<种族目录>\<图片名>.png`）→ **Replace it**，仅改写这一条映射。
 
-### 4. 回 FM 生效
+### 6. 回 FM 生效
 `偏好设置 → 界面` 中**取消再勾选皮肤、重新加载皮肤缓存**（Reload skin cache），必要时清缓存后重启 FM。
 
-### 5. 个别球员不满意？
-Viewer 区输入该球员 UID 回车 → 查看当前头像 → `Browse` 选一张新图（路径需形如 `...\<种族目录>\<图片名>.png`）→ **Replace it**，仅改写这一条映射。
+### 7. 状态栏与日志
+底部状态栏常驻显示当前状态（Ready / 进度文字）；`日志` 按钮出现红色角标表示有错误，点开抽屉可按级别筛选、只看某一级、打开日志文件或清空显示。
 
 ---
 
@@ -103,120 +103,115 @@ Viewer 区输入该球员 UID 回车 → 查看当前头像 → `Browse` 选一�
 | `MENA` | 中东与北非 | `YugoGreek` | 巴尔干与希腊 |
 
 - 选图池优先级：**国籍同名目录**（如 `ARG/`、`CHN/`）→ 种族目录 → 两者都不存在时使用头像包全部目录。
-- FM 种族码（0–10）如何参与修正选池，见 [种族特征分类说明.md](docs/种族特征分类说明.md) 与 [种族代码示例.xlsx](docs/FM%20NewGAN种族代码示例.xlsx)；实现见 [`FaceMapper.correct_ethnic`](src/newganmanager/core/FaceMapper.py)。
-- 国籍 → 种族的对照表在 `.config/eth_cfg.json`，可自行增改。
+- FM 种族码（0–10）如何参与修正选池，见 [种族特征分类说明.md](docs/种族特征分类说明.md) 与 [种族代码示例.xlsx](docs/FM%20NewGAN种族代码示例.xlsx)；实现见 [`face_mapper.rs`](src-tauri/src/face_mapper.rs)。
+- 国籍 → 种族的对照表在 [`src-tauri/assets/eth_cfg.json`](src-tauri/assets/eth_cfg.json)（编译期嵌入，内容与 v1 一致），修改后需重新构建。
 
 ---
 
 ## 项目结构
 
 ```
-NewGAN-Manager-ByHzH/
-├── .github/workflows/          # CI：windows/mac/linux 打包 + test.yml 单元测试
-├── docs/                       # 设计与说明文档（架构、种族分类说明、示例数据）
-├── filters/                    # FM 过滤器（.fmf），复制到 FM 目录，用于只看随机人
-├── views/                      # FM 视图（.fmf），导出 RTF 用，复制到 FM 目录
-├── src/newganmanager/          # 应用主包
-│   ├── __main__.py / app.py    # 入口 + 主应用（窗口、启动、异步、错误处理）
-│   ├── app_main_tab.py         # Main 标签：Profile / 目录 / RTF / Mode / 执行
-│   ├── app_profile_tab.py      # Profile 标签（当前为占位）
-│   ├── app_log_tab.py          # Log 标签：应用内日志面板
-│   ├── app_viewer.py           # Viewer 区：单球员预览与换脸
-│   ├── .config/                # 只读配置：eth_cfg.json / nat_translation.json / config_template
-│   ├── .user/                  # 首启模板：default_cfg.json / No Profile(.json/.xml)
-│   ├── core/                   # 业务逻辑层
-│   │   ├── ProfileManager.py   #   Profile 增删改查、config.xml 快照交换
-│   │   ├── FaceMapper.py       #   国籍 + 种族码 → 头像图片映射
-│   │   ├── RtfParser.py        #   解析 FM 导出的 RTF（含中文 / 14 列扩展）
-│   │   ├── XmlParser.py        #   依据 config_template 生成 config.xml
-│   │   ├── SourceSelection.py  #   图片池优先级与选图
-│   │   ├── NewGanLogManager.py #   日志与滚动
-│   │   └── Reporter.py         #   外部上报（webhook）
-│   ├── services/               # 服务层：player_service / profile_service / replace_service
-│   └── resources/              # 图标与图片资源
-├── src/tests/                  # 单元测试 + testing_data（RTF / XML / config 样本）
-├── pyproject.toml              # briefcase 应用配置与依赖
-├── requirements.txt            # 冻结依赖清单
-└── README.md / LICENSE / .gitignore
+├── src-tauri/                  # Rust 后端
+│   ├── Cargo.toml / build.rs / tauri.conf.json
+│   ├── assets/                 # 嵌入资源：eth_cfg.json / nat_translation.json / config_template
+│   ├── capabilities/default.json
+│   └── src/
+│       ├── main.rs / lib.rs    # 入口 + Tauri Builder 装配（含 v1 数据自动迁移）
+│       ├── assets.rs           # 编译期加载映射表
+│       ├── json_store.rs       # JSON 原子读写 + 损坏回退
+│       ├── paths.rs            # 路径规范化（目录 key / 快照路径）
+│       ├── rtf_parser.rs       # ← core/RtfParser.py（校验/解析/中文翻译）
+│       ├── xml_parser.rs       # ← core/XmlParser.py（读/写/单条替换/备份轮换）
+│       ├── profile_manager.rs  # ← core/ProfileManager.py（档/组 CRUD、快照交换）
+│       ├── face_mapper.rs      # ← core/FaceMapper.py（种族修正 + 三模式映射）
+│       ├── replace_flow.rs     # ← services/replace_service.py（替换流水线）
+│       ├── logger.rs           # ← core/NewGanLogManager.py（环形缓冲 + 事件）
+│       └── commands.rs         # ← services/* + 对话框原语（17 个 Tauri 命令）
+├── src/                        # Svelte 5 前端
+│   ├── main.ts / App.svelte / app.css
+│   └── lib/
+│       ├── types.ts / api.ts / dialog.ts   # IPC 类型与封装、统一错误弹窗
+│       ├── stores/            # app / log / ui（runes 状态）
+│       └── components/        # Sidebar / SetupCard / ReplacePanel / ResultsSection /
+│                               # PlayersTable / PlayerViewer / StatusBar / LogDrawer
+├── package.json / vite.config.ts / svelte.config.js / tsconfig.json
+├── views/ filters/ docs/ LICENSE  # FM 视图与过滤器、文档、许可
+└── .github/workflows/tauri.yml    # CI：Rust/Web 测试门禁 + 三平台构建
 ```
 
-> 分层：**GUI（`app*.py`）→ 服务层（`services/`）→ 业务核心（`core/`）**。GUI 只做输入输出与线程调度，映射/解析/写文件逻辑集中在 `core/`，便于单测。
-> 运行时生成的 `build/`、`dist/`、`logs/`、`__pycache__/` 以及便携用户数据 `src/newganmanager/data/` 均已在 `.gitignore` 中排除，不纳入仓库。
+> 分层对应 v1：**UI（Svelte 组件）→ 命令层（Tauri commands）→ 业务核心（Rust 模块）**。数据永远留在 Rust 侧，IPC 只传分页 / 摘要，根治大 RTF 卡顿。
+> v1（Python/Toga 版）的架构文档见 [docs/legacy-python/ARCHITECTURE.md](docs/legacy-python/ARCHITECTURE.md)。
 
 ---
 
 ## 开发与打包
 
 ```bash
-# 1) 建环境（需 Python 3.12.10）并安装依赖
-pip install -r requirements.txt        # 或：pip install toga requests dhooks
+# 0) 前置：Rust 工具链（MSVC target）+ Node.js ≥ 20 + pnpm；Win10/11 一般已自带 WebView2
+# 1) 安装依赖
+pnpm install
 
-# 2) 源码运行：在 src/ 目录下以模块方式启动（包用了相对导入，必须 -m）
-cd src && python -m newganmanager
-#    或用 briefcase 开发者模式（项目根目录）
-python -m briefcase dev
+# 2) 开发模式（前端热重载 + Rust 增量编译）
+pnpm tauri dev
 
-# 3) 单元测试（覆盖 FaceMapper / ProfileManager / RtfParser，CI 由 test.yml 运行）
-python -m unittest discover -s src/tests -p "test*.py"
+# 3) 测试与检查
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试
+pnpm test                                          # vitest 前端单测
+pnpm check                                         # svelte-check 类型检查
 
-# 4) 打包
-briefcase build
-briefcase package        # 产物在 dist/
+# 4) 打包（Windows 产出 NSIS .exe 与 .msi）
+pnpm tauri build                                   # 产物在 src-tauri/target/release/bundle/
 ```
 
-架构、类与方法清单、替换流程与 UML 见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+---
+
+## 从 v1 升级（数据自动迁移）
+
+v2 首次启动时自动完成迁移，无需手动操作：
+
+- **迁移来源**（按顺序查找，找到即止）：v1 便携模式 `<v2安装目录>\data\.user` → v1 标准模式 `%LOCALAPPDATA%\NewGAN Manager\.user`。
+- **迁移目标**：v2 数据目录（Windows 为 `%APPDATA%\com.fm.newganmanager`），整目录复制，Profile、组、RTF 设置、映射快照全部保留；旧版单档 Profile 格式自动升级为按组快照的新格式。
+- 迁移是**复制**而非移动，v1 安装不受影响，可随时回退。
+- 产物 100% 兼容：`config.xml` 生成规则逐字节一致（同一模板、`r-` 前缀规则）、`.user/` 数据结构不变、14 个种族目录名不变、备份命名与保留策略不变。
 
 ---
 
 ## 应用数据与配置文件
 
-只读资源随程序分发（源码运行时位于 `src/newganmanager/`）；用户运行时数据写入各平台标准用户数据目录（Toga `paths.data`，如 Windows `%LOCALAPPDATA%\<应用名>`、macOS `~/Library/Application Support/<应用名>`、Linux `~/.local/share/<应用名>`）：
+只读映射表在编译期嵌入二进制（内容与 v1 `.config/` 完全一致）；用户运行时数据写入 Tauri 标准数据目录（Windows：`%APPDATA%\com.fm.newganmanager`）：
 
 ```
-# 应用目录（随程序分发，只读）
-.config/
+# 只读配置（源码位置，编译期嵌入）
+src-tauri/assets/
   eth_cfg.json          国籍（英文三字码）→ 种族目录 对照表
   nat_translation.json  中文国籍 → 英文三字码 对照表（解析中文 RTF 用）
   config_template       config.xml 的固定头尾模板，[players] 为占位符
-.user/
-  default_cfg.json      首次运行时复制到用户数据目录成为 cfg.json
 
-# 用户数据目录（paths.data）
+# 用户数据目录
 .user/
   cfg.json              Profile 列表与激活状态（仅一个为 true）
-  <Profile>.json        单个 Profile 的 img_dir / rtf 等设置
-  <Profile>.xml         单个 Profile 对应 config.xml 的快照（切换 Profile 时交换）
+  <Profile>.json        单个 Profile 的头像包目录（组）与 RTF 设置
+  <Profile>/
+    <sanitized_dir>.xml 组映射快照（切换 Profile / 组时交换）
 newgan.log              运行日志（10 MB × 3 滚动）
 ```
-
-从旧版本升级时，应用目录下的旧 `.user/` 数据会自动迁移到用户数据目录。
 
 ---
 
 ## 故障排查
 
-出问题时请先附上日志 `newgan.log` 再提 issue。最快的定位方式：在 `Log` 标签把级别选到 `DEBUG` 复现一次，点 **Open Log File** 直接打开日志（文件在用户数据目录，如 Windows 的 `%LOCALAPPDATA%\<应用名>\newgan.log`）。
+出问题时请先附上日志 `newgan.log` 再提 issue。最快的定位方式：点状态栏 `日志` 打开抽屉，把级别选到 `DEBUG` 复现一次，点 **打开日志文件** 直接打开日志（文件在数据目录，如 Windows 的 `%APPDATA%\com.fm.newganmanager\newgan.log`）。
 
 | 现象 | 原因与处理 |
 | :--- | :--- |
 | `The RTF file is invalid!` | RTF 表头/列顺序不符，或用了其他分隔符导出。用本仓库 `views/` 视图重新导出；日志会写明识别到的语言 |
-| `The RTF file doesn't exist!` | 文件被移动或改名，重新在 `RTF File` 中选择 |
-| `Folder 'X' is missing...` | 头像包缺该种族目录；选"是"让程序创建，或确认选的是头像包**根目录** |
-| 大量 `primary nationality ... is None - skipping` | `.config/eth_cfg.json` 缺该国籍码（如 FM 用了非英文三字码），补条目即可 |
-| 中文 RTF 中国籍未翻译 | 在 `.config/nat_translation.json` 对应语言节点补「中文名 → 三字码」 |
-| 名单里一个人都没换 | 勾了 `only for NewGAN players` 但 RTF 无「是否为随机人」列，或该列全为 `No`；关掉开关，或改用 14 列视图导出 |
+| `The RTF file doesn't exist!` | 文件被移动或改名，重新在配置卡中 `选择文件` |
+| `缺少 N 个种族目录` | 头像包缺该种族目录；点 `一键创建缺失目录`，或确认选的是头像包**根目录** |
+| 大量 `primary nationality ... is None - skipping` | 映射表缺该国籍码（如 FM 用了非英文三字码），提 issue 反馈；也可修改 `src-tauri/assets/eth_cfg.json` 后自行构建 |
+| 中文 RTF 中国籍未翻译 | `nat_translation.json` 缺该条目，提 issue 反馈；也可修改 `src-tauri/assets/nat_translation.json` 后自行构建 |
+| 名单里一个人都没换 | 勾了 `仅随机人` 但 RTF 无「是否为随机人」列，或该列全为 `No`；关掉开关，或改用 14 列视图导出 |
 | 写 `config.xml` 失败 / 权限错误 | 以管理员（或 `sudo`）运行，或把头像包移到当前用户可写目录 |
 | FM 里头像没变 | 未重新加载皮肤缓存；或 FM 图形缓存目录里存在旧的 `config.xml` 副本 |
-
----
-
-## 已知问题与待办
-
-- `Profile` 标签页目前是空占位（Profile 管理仍在 `Main` 标签内）。
-- `check_for_update()` 指向的是上游仓库，暂未接入本分支版本源，UI 未调用。
-- 头像包目录含中文/特殊字符路径时，个别系统上图片预览可能加载失败。
-- `src/tests/` 已覆盖 FaceMapper / ProfileManager / RtfParser 三个核心模块，其余模块（XmlParser、SourceSelection、UI）测试待补。
-- 替换任务运行期间切换 Profile 存在竞态（`swap_xml` 与写 `config.xml` 互相覆盖），后续版本计划在任务运行时禁用 Profile 切换。
 
 ---
 

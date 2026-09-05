@@ -22,7 +22,7 @@ export const api = {
   previewPlayer: (uid: string) => invoke<PlayerPreview>('preview_player', { uid }),
   replaceSingleFace: (uid: string, imagePath: string, saveBackup: boolean) =>
     invoke<boolean>('replace_single_face', { uid, imagePath, saveBackup }),
-  readImage: (path: string) => invoke<Uint8Array>('read_image', { path }),
+  readImage: (path: string) => invoke<ArrayBuffer>('read_image', { path }),
   queryLogs: (level: string, only: boolean, offset: number, limit: number) =>
     invoke<{ total: number; items: LogLine[] }>('query_logs', { level, only, offset, limit }),
 };

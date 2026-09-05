@@ -3,6 +3,7 @@ mod face_mapper;
 mod json_store;
 mod paths;
 mod profile_manager;
+mod replace_flow;
 mod rtf_parser;
 mod xml_parser;
 

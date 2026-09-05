@@ -1,4 +1,5 @@
 mod assets;
+mod face_mapper;
 mod json_store;
 mod paths;
 mod profile_manager;

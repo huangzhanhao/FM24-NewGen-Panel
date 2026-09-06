@@ -1,6 +1,7 @@
 //! 【新手导读】球员 → 头像映射（自旧版 core/FaceMapper.py 移植，含 0-10 种族码修正规则）。
 //! 这是整个应用的「大脑」：根据每个球员的国籍 + 种族码，算出该用头像包里哪个种族目录，
 //! 再从目录里选一张图片，最终得到一条「球员 UID → 图片」的映射。
+use crate::facepack::{scan_pack, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
 use crate::rtf_parser::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
 use rand::Rng;                          // 随机数库（从图片池里随机选一张）
@@ -35,36 +36,26 @@ pub struct FaceMapper {
     /// 目录名 → 图片名集合（无扩展名）；BTreeMap/BTreeSet 保证行为可复现。
     /// 【为何用有序集合】随机选图时需要按下标取元素，且有序保证同样输入产生同样结果（便于测试）。
     pub faces_map: BTreeMap<String, BTreeSet<String>>,
+    /// 布局判定结果（facepack::classify），平铺分支据此早返回。
+    pub layout: PackLayout,
+    /// 标准一平铺池：包根全部图片名（去扩展名）。仅 layout == Flat 时使用。
+    pub flat_pool: BTreeSet<String>,
 }
 
 impl FaceMapper {
-    /// 扫描头像包一级子目录及图片（对等 v1 __init__：split('.')[0] 取首段）。
-    /// 【做法】遍历目录下每个子文件夹（即种族目录），收集里面所有图片的文件名（去扩展名）。
+    /// 扫描头像包并建立索引（对等 v1 __init__）。扫描与分类统一交给 facepack::scan_pack。
     pub fn new(img_dir: &str) -> Result<Self, String> {
-        let root = Path::new(img_dir);
-        let mut faces_map = BTreeMap::new();
-        for entry in std::fs::read_dir(root).map_err(|e| format!("读取头像包目录失败: {e}"))? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            if !entry.path().is_dir() {
-                continue; // 只看子目录，跳过普通文件
-            }
-            let mut imgs = BTreeSet::new();
-            if let Ok(files) = std::fs::read_dir(entry.path()) {
-                for f in files.flatten() {
-                    if f.path().is_file() {
-                        let name = f.file_name().to_string_lossy().to_string();
-                        // split('.').next() 取第一个 . 之前的部分，即去掉扩展名的图片名。
-                        let stem = name.split('.').next().unwrap_or("").to_string();
-                        if !stem.is_empty() {
-                            imgs.insert(stem);
-                        }
-                    }
-                }
-            }
-            // 以子目录名为键，存入该目录的图片名集合。
-            faces_map.insert(entry.file_name().to_string_lossy().to_string(), imgs);
-        }
-        Ok(Self { img_dir: img_dir.to_string(), faces_map })
+        Self::from_scan(img_dir, scan_pack(img_dir)?)
+    }
+
+    /// 用现成的扫描结果构造（「扫描头像」命令的缓存复用入口）。
+    pub fn from_scan(img_dir: &str, scan: PackScan) -> Result<Self, String> {
+        Ok(Self {
+            img_dir: img_dir.to_string(),
+            faces_map: scan.faces_map,
+            flat_pool: scan.root_images,
+            layout: scan.layout,
+        })
     }
 
     /// 三模式映射总入口；返回 None 表示被取消（对等旧版 generate_mapping）。
@@ -95,6 +86,10 @@ impl FaceMapper {
             for pool in self.faces_map.values_mut() {
                 // difference 取「在池中但不在 used 中」的部分，即剔除已用图。
                 *pool = pool.difference(&used).cloned().collect();
+            }
+            // 平铺池同理（标准一：旧 config.xml 的图名同样可能占用根池）。
+            if self.layout.is_flat() {
+                self.flat_pool = self.flat_pool.difference(&used).cloned().collect();
             }
         }
         // 按模式分发到具体处理函数。
@@ -181,6 +176,12 @@ impl FaceMapper {
         duplicates: bool,
         eth_cfg: &BTreeMap<String, String>,
     ) -> Option<MappingEntry> {
+        // 标准一平铺：忽略 RTF 国籍/种族码，从单一根池完全随机抽图。
+        // （早返回放在最前，Standard2/Empty/Unknown 一律走下方原有 faces_map 通用路径。）
+        if self.layout.is_flat() {
+            let image = self.pick_from_flat(duplicates)?;
+            return Some(MappingEntry { uid: p.uid.clone(), ethnicity: String::new(), image });
+        }
         // e2 = 第二国籍对应的种族目录（没有第二国籍则为 None）。
         let e2 = if p.sec_nat.is_empty() {
             None
@@ -218,6 +219,19 @@ impl FaceMapper {
             pools.extend(self.faces_map.keys().cloned());
         }
         pools
+    }
+
+    /// 标准一平铺选图：从根池随机取一张；禁重复时移除所选（与 pick_image_from_pools 同款可复现取法）。
+    fn pick_from_flat(&mut self, duplicates: bool) -> Option<String> {
+        if self.flat_pool.is_empty() {
+            return None;
+        }
+        let idx = rand::rng().random_range(0..self.flat_pool.len());
+        let choice = self.flat_pool.iter().nth(idx).cloned()?;
+        if !duplicates {
+            self.flat_pool.remove(&choice); // 禁重复：选过的图不再出现
+        }
+        Some(choice)
     }
 
     /// 依序取第一个非空池随机选图；禁重复时从池中移除（对等旧版 pick_image_from_pools）。
@@ -411,5 +425,91 @@ mod tests {
         let cancel = AtomicBool::new(true); // 已取消
         let data = vec![player("r-2001", "ESP", "1")];
         assert!(mapper.generate_mapping(&data, Mode::Generate, true, &cancel, &ETH_CFG).is_none());
+    }
+
+    /// 标准一平铺包 fixture：根目录 5 张普通图 + 1 张点号文件名（锁定 file_stem 词干规则）。
+    fn flatpack(dir: &tempfile::TempDir) -> String {
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("face{i}.png")), b"png").unwrap();
+        }
+        std::fs::write(dir.path().join("x.1.png"), b"png").unwrap();
+        dir.path().to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn standard2_pack_classified_and_maps_by_ethnic() {
+        // facepack() 恰为 14 个合法种族目录 → 必须判 Standard2 且走原有种族匹配路径。
+        let dir = tempfile::tempdir().unwrap();
+        let img = facepack(&dir);
+        let mut mapper = FaceMapper::new(&img).unwrap();
+        assert_eq!(mapper.layout, PackLayout::Standard2 { complete: true });
+        let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "USA", "0")];
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Generate, true, &cancel, &ETH_CFG)
+            .unwrap();
+        assert_eq!(mapping.len(), 2);
+        assert_eq!(mapping[0].ethnicity, "SpanMed"); // 按 correct_ethnic 进种族目录
+        assert_eq!(mapping[1].ethnicity, "Caucasian");
+        for m in &mapping {
+            assert!(mapper.faces_map[&m.ethnicity].contains(&m.image));
+        }
+    }
+
+    #[test]
+    fn flat_generate_maps_everyone_randomly() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = flatpack(&dir);
+        let mut mapper = FaceMapper::new(&img).unwrap();
+        assert_eq!(mapper.layout, PackLayout::Flat);
+        // ZZZ 不在 ETH_CFG：平铺必须忽略国籍/种族码，未知国籍球员同样被映射。
+        let data = vec![player("r-3001", "ZZZ", "1"), player("r-3002", "ESP", "9")];
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Generate, true, &cancel, &ETH_CFG)
+            .unwrap();
+        assert_eq!(mapping.len(), 2);
+        for m in &mapping {
+            assert_eq!(m.ethnicity, "");
+            assert!(mapper.flat_pool.contains(&m.image)); // 允许复用时池不变
+            // 每条映射的图名都能在包根命中真实文件（file_stem 贯通写入/解析/定位）。
+            assert!(xml_parser::resolve_image_file(Path::new(&img), "", &m.image).is_some());
+        }
+    }
+
+    #[test]
+    fn flat_no_duplicates_exhausts_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = flatpack(&dir); // 池共 6 张
+        let mut mapper = FaceMapper::new(&img).unwrap();
+        let data: Vec<PlayerRecord> = (0..8).map(|i| player(&format!("r-40{i}"), "ESP", "1")).collect();
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &ETH_CFG)
+            .unwrap();
+        assert_eq!(mapping.len(), 6); // 池耗尽后其余球员被跳过
+        let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
+        assert_eq!(images.len(), 6); // 全不重复
+    }
+
+    #[test]
+    fn flat_preserve_keeps_existing_flat_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = flatpack(&dir);
+        // 现有 config.xml 已有平铺条目 from="face0"（解析回 ("", "face0")）。
+        crate::xml_parser::write_xml(
+            &[MappingEntry { uid: "r-3001".into(), ethnicity: "".into(), image: "face0".into() }],
+            Path::new(&img), false,
+        ).unwrap();
+        let mut mapper = FaceMapper::new(&img).unwrap();
+        let data = vec![player("r-3001", "ESP", "1"), player("r-3002", "ESP", "1")];
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Preserve, true, &cancel, &ETH_CFG)
+            .unwrap();
+        // r-3001 保留旧平铺映射；r-3002 新建且种族为空。
+        let e = mapping.iter().find(|m| m.uid == "r-3001").unwrap();
+        assert_eq!((e.ethnicity.as_str(), e.image.as_str()), ("", "face0"));
+        assert!(mapping.iter().any(|m| m.uid == "r-3002" && m.ethnicity.is_empty()));
     }
 }

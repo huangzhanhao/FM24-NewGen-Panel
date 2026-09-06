@@ -29,24 +29,29 @@ static RECORD_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 const BACKUP_KEEP: usize = 10; // 最多保留的备份份数
 
+/// config.xml 的 from 值：平铺（ethnicity 空）只写图名，否则 "种族/图名"。
+pub fn record_from(ethnicity: &str, image: &str) -> String {
+    if ethnicity.is_empty() { image.to_string() } else { format!("{ethnicity}/{image}") }
+}
+
 /// 解析 config.xml → {uid: entry}（用字典按 UID 快速查找）。
 pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("读取 config.xml 失败: {e}"))?;
     let mut out = HashMap::new();
     // captures_iter 遍历所有匹配项；cap[1]/cap[2] 分别是第 1/2 个捕获组。
     for cap in RECORD_RE.captures_iter(&text) {
-        // from 的内容形如 "SpanMed/img1"，按 / 切成种族目录和图片名两部分。
-        let eth_img: Vec<&str> = cap[1].split('/').collect();
-        if eth_img.len() >= 2 {
-            out.insert(
-                cap[2].to_string(), // 以 UID 为键
-                MappingEntry {
-                    uid: cap[2].to_string(),
-                    ethnicity: eth_img[0].to_string(),
-                    image: eth_img[1].to_string(),
-                },
-            );
-        }
+        // from 的内容："SpanMed/img1"（标准二）或 "img1"（标准一平铺，无目录前缀）。
+        // 按 / 切分：两段及以上取种族/图名；只有一段则种族为空串（平铺）。
+        let parts: Vec<&str> = cap[1].split('/').collect();
+        let (eth, img) = if parts.len() >= 2 { (parts[0], parts[1]) } else { ("", parts[0]) };
+        out.insert(
+            cap[2].to_string(), // 以 UID 为键
+            MappingEntry {
+                uid: cap[2].to_string(),
+                ethnicity: eth.to_string(),
+                image: img.to_string(),
+            },
+        );
     }
     Ok(out)
 }
@@ -59,13 +64,13 @@ pub fn write_xml(data: &[MappingEntry], img_dir: &Path, save_backup: bool) -> Re
     if save_backup && config_path.is_file() {
         backup_rotation(&config_path, img_dir)?;
     }
-    // 把每条映射拼成一行 <record .../>。
+    // 把每条映射拼成一行 <record .../>。record_from 对非空 ethnicity 输出与旧版逐字节一致。
     let lines: Vec<String> = data
         .iter()
         .map(|m| {
             format!(
-                r#"<record from="{}/{}" to="graphics/pictures/person/{}/portrait"/>"#,
-                m.ethnicity, m.image, m.uid
+                r#"<record from="{}" to="graphics/pictures/person/{}/portrait"/>"#,
+                record_from(&m.ethnicity, &m.image), m.uid
             )
         })
         .collect();
@@ -92,10 +97,11 @@ pub fn single_replacement(
         backup_rotation(&config_path, img_dir)?;
     }
     let text = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-    // target 是要定位的片段（根据 UID 拼出）；new_line 是替换后的完整行。
+    // target 是要定位的片段（根据 UID 拼出）；new_line 是替换后的完整行（record_from 兼容平铺 pack=""）。
     let target = format!(r#"to="graphics/pictures/person/{uid}/portrait""#);
     let new_line = format!(
-        r#"<record from="{pack}/{image}" to="graphics/pictures/person/{uid}/portrait"/>"#,
+        r#"<record from="{}" to="graphics/pictures/person/{uid}/portrait"/>"#,
+        record_from(pack, image),
     );
     let mut replaced = false;
     let mut out: Vec<String> = Vec::new();
@@ -138,20 +144,36 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 反推图片路径中的 (子目录, 图片名)（对等旧版 PlayerService.parse_image_path）。
-/// 例：`C:\pack\MENA\m9.png` → ("MENA", "m9")。用于「单人换脸」时从用户选的图片路径提取种族与图名。
-pub fn parse_image_path(image_path: &str) -> Option<(String, String)> {
-    // [\\/]+ 同时兼容 Windows 反斜杠和 Unix 正斜杠；末尾限定图片扩展名。
-    let re = Regex::new(r"[\\/]+([^\\/]+)[\\/]+([^\\/]+)\.(?:png|jpg|jpeg)$").unwrap();
-    let caps = re.captures(image_path)?; // ? ：不匹配则返回 None
-    Some((caps[1].to_string(), caps[2].to_string()))
+/// 从用户选中的图片绝对路径反推 (种族目录, 图名)。平铺包（图片在 img_dir 根）→ 种族为空串。
+/// 词干用 file_stem，与 facepack::scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
+pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(String, String)> {
+    let p = Path::new(image_path);
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") { return None; }
+    let image = p.file_stem()?.to_string_lossy().to_string();
+    if image.starts_with('.') { return None; }   // 拒收 ._x.png 等隐藏名，与池侧口径一致
+    let parent = p.parent()?;
+    let root = Path::new(img_dir);
+    // 优先 canonicalize（Windows 大小写/分隔符不敏感的权威比较）；失败（文件已删等）退回原样比较。
+    let same = parent.canonicalize().ok() == root.canonicalize().ok() || parent == root;
+    if same {
+        Some((String::new(), image))
+    } else {
+        Some((parent.file_name()?.to_string_lossy().to_string(), image))
+    }
 }
 
 /// 探测实际图片文件（.png/.jpg/.jpeg，对等旧版 PlayerService.resolve_image_file）。
 /// 【为何】config.xml 里只存图片名不存扩展名，需要按常见扩展名依次试找出真实文件。
+/// ethnicity 为空串表示标准一平铺包：图片直接在 img_dir 根下。
 pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Option<String> {
+    let base = if ethnicity.is_empty() {
+        img_dir.to_path_buf()
+    } else {
+        img_dir.join(ethnicity)
+    };
     for ext in ["png", "jpg", "jpeg"] {
-        let p = img_dir.join(ethnicity).join(format!("{image}.{ext}"));
+        let p = base.join(format!("{image}.{ext}"));
         if p.is_file() {
             return Some(p.to_string_lossy().to_string()); // to_string_lossy 把路径安全转为 String
         }
@@ -239,19 +261,68 @@ mod tests {
     }
 
     #[test]
-    fn parse_image_path_and_resolve() {
+    fn record_from_flat_and_nested() {
+        assert_eq!(record_from("", "img1"), "img1");
+        assert_eq!(record_from("MENA", "m9"), "MENA/m9");
+    }
+
+    #[test]
+    fn flat_roundtrip_and_single_replacement() {
         let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        // 平铺条目：write 出 from="img1"（无目录前缀），parse 回 ("", "img1")
+        write_xml(
+            &[MappingEntry { uid: "r-1001".into(), ethnicity: "".into(), image: "img1".into() }],
+            &pack, false,
+        ).unwrap();
+        let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
+        assert!(text.contains(r#"from="img1""#));
+        let parsed = parse_xml(&pack.join("config.xml")).unwrap();
+        assert_eq!(parsed["r-1001"].ethnicity, "");
+        assert_eq!(parsed["r-1001"].image, "img1");
+        // 单人替换 pack="" → from="image"（平铺形态）
+        assert!(single_replacement("r-1001", "", "img2", &pack, false).unwrap());
+        let parsed2 = parse_xml(&pack.join("config.xml")).unwrap();
+        assert_eq!((parsed2["r-1001"].ethnicity.as_str(), parsed2["r-1001"].image.as_str()), ("", "img2"));
+    }
+
+    #[test]
+    fn parse_image_path_in_pack_and_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_s = dir.path().to_string_lossy().to_string();
         let eth = dir.path().join("MENA");
         std::fs::create_dir_all(&eth).unwrap();
         std::fs::write(eth.join("m9.png"), b"png").unwrap();
+        // 嵌套：取父目录名为种族（对等旧 parse_image_path 行为）
         assert_eq!(
-            parse_image_path(r"C:\pack\MENA\m9.png"),
+            parse_image_path_in_pack(&root_s, &eth.join("m9.png").to_string_lossy()),
             Some(("MENA".into(), "m9".into()))
         );
-        assert_eq!(parse_image_path(r"C:\m9.png"), None);
+        // 平铺：父 == 根 → 种族为空串
+        std::fs::write(dir.path().join("r1.png"), b"png").unwrap();
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &dir.path().join("r1.png").to_string_lossy()),
+            Some(("".into(), "r1".into()))
+        );
+        // 点号文件名：file_stem 规则（与 scan_pack 的 root_images 一致）
+        std::fs::write(dir.path().join("a.1.png"), b"png").unwrap();
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &dir.path().join("a.1.png").to_string_lossy()),
+            Some(("".into(), "a.1".into()))
+        );
+        // 非图片扩展名 → None；隐藏名 → None；裸相对文件名（无父目录）→ None
+        assert_eq!(parse_image_path_in_pack(&root_s, &dir.path().join("x.txt").to_string_lossy()), None);
+        assert_eq!(parse_image_path_in_pack(&root_s, &dir.path().join("._h.png").to_string_lossy()), None);
+        assert_eq!(parse_image_path_in_pack(&root_s, "r9.png"), None);
+        // resolve：嵌套命中种族目录；空 ethnicity 命中包根；找不到 → None
         assert_eq!(
             resolve_image_file(dir.path(), "MENA", "m9"),
             Some(eth.join("m9.png").to_string_lossy().to_string())
+        );
+        assert_eq!(
+            resolve_image_file(dir.path(), "", "r1"),
+            Some(dir.path().join("r1.png").to_string_lossy().to_string())
         );
         assert_eq!(resolve_image_file(dir.path(), "MENA", "nope"), None);
     }

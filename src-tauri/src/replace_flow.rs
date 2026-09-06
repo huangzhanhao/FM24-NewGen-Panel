@@ -3,6 +3,7 @@
 //! 进度通过回调上报（值与 v1 对齐：20/40/80/90/100），取消经 AtomicBool 逐球员生效。
 use crate::assets::{ETH_CFG, NAT_TRANSLATION};
 use crate::face_mapper::{FaceMapper, Mode};
+use crate::facepack::PackLayout;
 use crate::rtf_parser::{PlayerRecord, RtfParser};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
@@ -16,6 +17,8 @@ pub struct ReplaceParams {
     pub filter_newgen: bool,    // 是否只处理随机人
     pub allow_duplicates: bool, // 是否允许图片复用
     pub save_backup: bool,      // 写入前是否备份
+    /// 「扫描头像」命令缓存的包索引（按 img_dir 命中即复用，避免重复扫盘）；None = 现场新扫描。
+    pub pre_scan: Option<crate::facepack::PackScan>,
 }
 
 /// 流水线最终结果：成功 / 被取消 / 失败（带错误信息）。
@@ -57,12 +60,20 @@ pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &
     if cancel.load(Ordering::Relaxed) {
         return cancelled();
     }
-    // 阶段3：映射（40%）。先扫描头像包建索引，再为每个球员选图。
+    // 阶段3：映射（40%）。优先用「扫描头像」的缓存索引建 mapper，否则现场扫描。
     progress("Mapping player to image...", 40);
-    let mut mapper = match FaceMapper::new(&params.img_dir) {
+    let mapper = match &params.pre_scan {
+        Some(scan) => FaceMapper::from_scan(&params.img_dir, scan.clone()),
+        None => FaceMapper::new(&params.img_dir),
+    };
+    let mut mapper = match mapper {
         Ok(m) => m,
         Err(e) => return failed(&e),
     };
+    // 标准三（65 目录细分）的映射暂未实现：明确拦截，错误信息含"标准三"供前端提示。
+    if matches!(mapper.layout, PackLayout::Standard3 { .. }) {
+        return failed("标准三（65 目录细分）的替换映射暂未实现，当前仅支持标准一/标准二");
+    }
     let mapping = match mapper.generate_mapping(
         &rtf_data,
         params.mode,
@@ -127,6 +138,7 @@ mod tests {
         let params = ReplaceParams {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
+            pre_scan: None,
         };
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
@@ -150,6 +162,7 @@ mod tests {
             rtf_path: bad.to_string_lossy().to_string(),
             img_dir: dir.path().to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            pre_scan: None,
         };
         let cancel = AtomicBool::new(false);
         let result = run(&params, &mut |_, _| {}, &cancel);
@@ -162,11 +175,82 @@ mod tests {
         let params = ReplaceParams {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
+            pre_scan: None,
         };
         let cancel = AtomicBool::new(false);
         // 解析完成后立刻取消（在进度 40 时置位）
         let result = run(&params, &mut |_, v| { if v == 40 { cancel.store(true, Ordering::Relaxed); } }, &cancel);
         assert_eq!(result.outcome, Outcome::Cancelled);
         assert!(!Path::new(&params.img_dir).join("config.xml").exists());
+    }
+
+    #[test]
+    fn standard3_pack_is_blocked() {
+        // 恰好 65 个细分目录 → replace_flow 必须明确失败并提示"标准三"。
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("pack");
+        fs::create_dir_all(&img).unwrap();
+        for name in crate::facepack::FACEPACK_DIRS_65 {
+            fs::create_dir_all(img.join(name)).unwrap();
+        }
+        let rtf = dir.path().join("list.rtf");
+        fs::write(
+            &rtf,
+            "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
+             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n",
+        ).unwrap();
+        let params = ReplaceParams {
+            rtf_path: rtf.to_string_lossy().to_string(),
+            img_dir: img.to_string_lossy().to_string(),
+            mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            pre_scan: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let result = run(&params, &mut |_, _| {}, &cancel);
+        assert!(matches!(result.outcome, Outcome::Failed(ref m) if m.contains("标准三")));
+        assert!(!Path::new(&params.img_dir).join("config.xml").exists()); // 拦截在写入前
+    }
+
+    #[test]
+    fn flat_pack_end_to_end() {
+        // 标准一平铺端到端：无子目录、只有根图（含一张点号文件名）。
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("pack");
+        fs::create_dir_all(&img).unwrap();
+        for i in 0..4 {
+            fs::write(img.join(format!("face{i}.png")), b"png").unwrap();
+        }
+        fs::write(img.join("x.1.png"), b"png").unwrap();
+        let rtf = dir.path().join("list.rtf");
+        fs::write(
+            &rtf,
+            "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
+             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
+             | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n\
+             | 2000472010| FRA  |         | Pierre | 1  | 12 | 3 |\n",
+        ).unwrap();
+        let params = ReplaceParams {
+            rtf_path: rtf.to_string_lossy().to_string(),
+            img_dir: img.to_string_lossy().to_string(),
+            mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            pre_scan: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let result = run(&params, &mut |_, _| {}, &cancel);
+        assert_eq!(result.outcome, Outcome::Finished);
+        assert_eq!(result.mapping.len(), 3);
+        for m in &result.mapping {
+            assert!(m.ethnicity.is_empty()); // 平铺种族为空串
+            // 每条映射的图名都能在包根命中真实文件（file_stem 规则贯通）。
+            assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), "", &m.image).is_some());
+        }
+        // 全程未创建任何子目录。
+        let subdirs = fs::read_dir(&params.img_dir).unwrap()
+            .filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count();
+        assert_eq!(subdirs, 0);
+        // 写出的 config.xml 每行 from="图名"，解析回 ethnicity==""。
+        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        assert_eq!(xml.len(), 3);
+        assert!(xml.values().all(|e| e.ethnicity.is_empty()));
     }
 }

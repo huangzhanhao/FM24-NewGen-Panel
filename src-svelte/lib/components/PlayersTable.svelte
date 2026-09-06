@@ -2,6 +2,7 @@
      重点演示：$effect 做“参数变化→防抖请求”，以及 {#each} 渲染表格行。 -->
 <script lang="ts">
   import { api } from '../api';
+  import { appStore } from '../stores/app.svelte';
   import type { PageResult, PlayerRecord } from '../types';
 
   const PAGE_SIZE = 200; // 每页条数
@@ -24,8 +25,9 @@
   }
   // 参数变化自动刷新：effect 内同步读取依赖（runes 追踪），请求 300ms 防抖。
   // void page 等是“显式读取”，让 $effect 知道要追踪这些变量；任一变化就重新执行。
+  // rosterVersion：「扫描RTF」成功后 +1，无需执行 Replace 即可在此预览名单。
   $effect(() => {
-    void page; void search; void sortKey; void sortDesc;
+    void page; void search; void sortKey; void sortDesc; void appStore.rosterVersion;
     clearTimeout(searchTimer);            // 取消上一次未触发的请求
     searchTimer = setTimeout(load, 300);  // 300ms 后才真正请求（防抖：避免边输入边频繁请求）
     return () => clearTimeout(searchTimer); // 清理函数：依赖变化/组件销毁时取消定时器
@@ -98,5 +100,5 @@
     </table>
   </div>
 {:else}
-  <p class="muted">执行 Replace Faces 后可在此预览名单（最近一次解析结果）。</p>
+  <p class="muted">执行 Replace Faces 或「扫描RTF」后可在此预览名单（最近一次解析结果）。</p>
 {/if}

@@ -11,6 +11,7 @@
 mod assets;          // 编译期内嵌的只读映射表（种族配置、国籍翻译、config.xml 模板）
 mod commands;        // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper;     // 核心算法：球员 → 头像图片的映射
+mod facepack;        // 头像包标准识别的唯一来源（常量 + 布局分类 + 目录扫描）
 mod json_store;      // JSON 配置的原子读写
 mod logger;          // 日志系统（环形缓冲 + 滚动文件 + 事件推送）
 mod paths;           // 路径规范化工具
@@ -153,6 +154,7 @@ pub fn run() {
                 running: Arc::new(AtomicBool::new(false)),   // 「正在替换」标志
                 rtf_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次解析的 RTF 球员缓存
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
+                faces_cache: Arc::new(Mutex::new(None)),     // 「扫描头像」的包索引缓存（初始为空）
             });
 
             // 7) 启动一个后台线程，把日志按批通过事件（log:batch）推给前端。
@@ -175,6 +177,8 @@ pub fn run() {
             commands::validate_image_dirs,  // 校验 14 个种族目录是否齐全
             commands::check_integrity,      // 检查完整性：识别三套头像包标准（图片直铺/14/65）并给出缺失目录
             commands::create_missing_dirs,  // 批量创建缺失目录
+            commands::scan_images,          // 扫描头像：建图片索引缓存（供替换复用），结果写日志
+            commands::scan_rtf,             // 扫描RTF：解析名单并填充预览缓存，结果写日志
             commands::start_replace,        // 启动批量替换（后台线程）
             commands::cancel_replace,       // 请求取消正在进行的替换
             commands::query_players,        // 分页查询名单（预览）

@@ -33,23 +33,31 @@
     snap && !snap.currentRtf ? '设置 RTF 名单' : '',
   ].filter(Boolean));
 
-  /** 发起替换：先兑底校验目录完整性，再调后端 start_replace。 */
+  /** 发起替换：先兜底校验目录完整性（识别三套标准），再调后端 start_replace。 */
   async function startReplace() {
     if (!snap?.currentGroup) return;
     try {
-      // 兑底校验：用户可能跳过配置卡的完整性检查，这里再查一次。
-      const lacking = await api.validateImageDirs(snap.currentGroup);
-      if (lacking.length > 0) {
+      // 兜底校验：用户可能跳过配置卡的完整性检查，这里再查一次。
+      // 标准一（平铺）complete → 静默继续，不再被旧口径误建 14 个空目录。
+      const res = await api.checkIntegrity(snap.currentGroup);
+      if (res.standard === 3) {
+        await showError('标准三（65 目录）替换暂未实现，当前仅支持标准一/标准二');
+        return;
+      }
+      if (res.status === 'fixable') {
         const ok = await ask(
-          `头像包缺少 ${lacking.length} 个种族目录，自动创建并继续？`,
+          `标准${res.standard === 3 ? '三(65)' : '二(14)'} 缺少 ${res.missing.length} 个目录，自动创建并继续？`,
           { title: 'Missing Directories' },
         );
         if (!ok) return;
-        await api.createMissingDirs(snap.currentGroup, lacking);
-      }
+        await api.createMissingDirs(snap.currentGroup, res.missing);
+      } else if (res.status === 'unknown') {
+        const ok = await ask('头像包结构无法识别，仍要继续替换？', { title: 'Unrecognized Layout' });
+        if (!ok) return;
+      } // complete（标准一/二齐全）→ 静默继续
       // 调后端启动替换（异步后台线程），随后刷新快照：replacing 变 true → 全局禁用。
       await api.startReplace({ mode, filterNewgan, allowDuplicates, saveBackup });
-      await refreshSnapshot(); // replacing=true → 全局禁用
+      await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效
     } catch (e) { await showError(e); }
   }
 </script>

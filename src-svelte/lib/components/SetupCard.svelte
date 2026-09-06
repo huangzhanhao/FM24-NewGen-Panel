@@ -45,6 +45,18 @@
     integrity = await api.checkIntegrity(snap.currentGroup);
   }
 
+  /** 扫描头像：建图片索引缓存（供替换复用），结果已在后端写入日志面板。 */
+  async function scanImages() {
+    if (!snap?.currentGroup) return;
+    try { await api.scanImages(); } catch (e) { await showError(e); }
+  }
+
+  /** 扫描RTF：解析当前 RTF 并填充名单预览缓存；rosterVersion++ 触发名单预览刷新。 */
+  async function scanRtf() {
+    if (!snap?.currentRtf) return;
+    try { await api.scanRtf(); appStore.rosterVersion++; } catch (e) { await showError(e); }
+  }
+
   /** 一键创建缺失目录（先弹确认框）；创建成功后重新检查，拿最新结论。 */
   async function fixMissing() {
     if (!snap?.currentGroup || !integrity || integrity.missing.length === 0) return;
@@ -65,23 +77,31 @@
 {#if snap}
   <div class="card">
     <div class="card-title">当前任务 <span class="muted small">{snap.currentProfile}</span></div>
-    <!-- 头像包路径行：只读输入框 + 完整性检查按钮。use:pinScrollEnd 把长路径钉到最右。 -->
+    <!-- 头像包路径行：只读输入框 + [检查完整性 | 扫描头像] 按钮组。use:pinScrollEnd 把长路径钉到最右。 -->
     <div class="path-row">
       <label for="sc-group">头像包：</label>
       <input id="sc-group" type="text" readonly value={snap.currentGroup ?? ''}
              placeholder="未关联头像包目录" title={snap.currentGroup ?? ''}
              use:pinScrollEnd={snap.currentGroup ?? ''} />
-      <!-- disabled 在忙碌或无选中组时置 true；title 根据情况给不同提示。 -->
-      <button class="btn" onclick={checkIntegrity} disabled={busy || !snap.currentGroup}
-              title={snap.currentGroup ? '识别并校验三套标准：图片直铺 / 14 种族 / 65 细分' : '请先关联头像包目录'}>检查完整性</button>
+      <div class="path-actions">
+        <!-- disabled 在忙碌或无选中组时置 true；title 根据情况给不同提示。 -->
+        <button class="btn" onclick={checkIntegrity} disabled={busy || !snap.currentGroup}
+                title={snap.currentGroup ? '识别并校验三套标准：图片直铺 / 14 种族 / 65 细分' : '请先关联头像包目录'}>检查完整性</button>
+        <button class="btn" onclick={scanImages} disabled={busy || !snap.currentGroup}
+                title="扫描头像包并缓存图片索引（结果写入日志）">扫描头像</button>
+      </div>
     </div>
-    <!-- RTF 名单路径行：只读输入框 + 选择文件按钮。 -->
+    <!-- RTF 名单路径行：只读输入框 + [选择RTF | 扫描RTF] 按钮组。 -->
     <div class="path-row">
       <label for="sc-rtf">RTF 名单：</label>
       <input id="sc-rtf" type="text" readonly value={snap.currentRtf || '未设置'} title={snap.currentRtf}
              use:pinScrollEnd={snap.currentRtf} />
-      <button class="btn" onclick={browseRtf} disabled={busy || !snap.currentGroup}
-              title={snap.currentGroup ? '选择 FM 导出的 RTF 名单' : '请先关联头像包目录'}>选择文件</button>
+      <div class="path-actions">
+        <button class="btn" onclick={browseRtf} disabled={busy || !snap.currentGroup}
+                title={snap.currentGroup ? '选择 FM 导出的 RTF 名单' : '请先关联头像包目录'}>选择RTF</button>
+        <button class="btn" onclick={scanRtf} disabled={busy || !snap.currentRtf}
+                title="解析 RTF 并填充名单预览（结果写入日志）">扫描RTF</button>
+      </div>
     </div>
     <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓；已检查且缺失→黄色警告 + 一键创建按钮。 -->
     {#if !snap.currentGroup}

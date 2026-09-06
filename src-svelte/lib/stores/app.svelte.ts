@@ -11,6 +11,7 @@ export const appStore = $state({
   snapshot: null as AppSnapshot | null, // 后端回传的全局快照（初始为 null，启动后填充）
   progress: { status: '', value: 0 },   // 当前替换进度（状态文字 + 百分比）
   lastResult: '' as 'finished' | 'cancelled' | 'failed' | '', // 最近一次替换结果
+  rosterVersion: 0,                     // 名单预览版本号：「扫描RTF」成功后 +1，触发 PlayersTable 重载
 });
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */

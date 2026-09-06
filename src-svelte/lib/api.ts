@@ -7,8 +7,8 @@
 // 【为何集中封装】组件里只需写 api.createProfile(name)，不必重复写 invoke 字符串，也方便类型提示。
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, IntegrityResult, LogLine, PageResult, PlayerPreview,
-  PlayerQuery, PlayerRecord, ReplaceArgs,
+  AppSnapshot, ImageScanResult, IntegrityResult, LogLine, PageResult, PlayerPreview,
+  PlayerQuery, PlayerRecord, ReplaceArgs, RtfScanResult,
 } from './types'; // import type 仅导入类型，编译后会被完全抹去（不产生运行时代码）
 
 // invoke<返回类型>('命令名', { 参数 }) —— 尖括号里的是告诉 TS 这个 Promise resolve 出什么类型。
@@ -25,6 +25,10 @@ export const api = {
   validateImageDirs: (imgDir: string) => invoke<string[]>('validate_image_dirs', { imgDir }),
   // 检查完整性：识别三套头像包标准并给出可补全的缺失目录（仅“检查完整性”按钮使用）。
   checkIntegrity: (imgDir: string) => invoke<IntegrityResult>('check_integrity', { imgDir }),
+  // 扫描头像：建图片索引缓存（供替换复用），结果写入后端日志。
+  scanImages: () => invoke<ImageScanResult>('scan_images'),
+  // 扫描RTF：解析当前 RTF 并填充名单预览缓存，结果写入后端日志。
+  scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
   createMissingDirs: (imgDir: string, names: string[]) =>
     invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。

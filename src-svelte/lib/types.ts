@@ -31,6 +31,12 @@ export interface IntegrityResult {
   expectedTotal: number;
 }
 
+/// 「扫描头像」返回摘要（对应 Rust 的 ImageScanResult）。
+export interface ImageScanResult { total: number; standard: number; }
+
+/// 「扫描RTF」返回摘要（对应 Rust 的 RtfScanResult）。
+export interface RtfScanResult { total: number; newgan: number; detailed: boolean; language: string; }
+
 /// 应用全局快照（对应 Rust 的 AppSnapshot）。前端大部分界面都基于它渲染。
 export interface AppSnapshot {
   profiles: string[]; currentProfile: string; groups: GroupInfo[];

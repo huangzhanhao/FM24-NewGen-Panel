@@ -77,7 +77,7 @@
         "5":  { "prefer": ["Seasian"], "fallback": "Seasian" },
         "6":  { "prefer": ["SAMed"], "fallback": "African" },
         "7":  { "prefer": ["South American"], "fallback": "South American" },
-        "8":  { "prefer": ["Seasian"], "fallback": "African" },
+        "8":  { "prefer": ["Seasian"], "fallback": "Seasian" },
         "9":  { "prefer": ["South American"], "fallback": "African" },
         "10": { "prefer": ["MESA", "Seasian", "South American"], "fallback": "Asian" }
     }

@@ -64,16 +64,21 @@
     } catch (e) { await showError(e); }
   }
 
-  /** 删除当前存档（先弹确认框）。 */
+  /** 删除下拉选中的存档（先弹确认框）。删除激活档会自动回到 No Profile；删未激活档不影响当前档。 */
   async function deleteProfile() {
-    if (!snap) return;
+    const target = appStore.selectedProfile;
+    if (!target || target === 'No Profile') return;
     const ok = await ask(
-      `删除 Profile「${snap.currentProfile}」及其全部组配置与映射备份？`,
+      `删除 Profile「${target}」及其全部组配置与映射备份？`,
       { title: 'Delete Profile' },
     );
     if (!ok) return;
-    try { await applySnapshot(await api.deleteProfile(snap.currentProfile)); }
-    catch (e) { await showError(e); }
+    try {
+      await applySnapshot(await api.deleteProfile(target));
+      // 选中项回退到当前激活档，浏览态结束
+      appStore.selectedProfile = appStore.snapshot?.currentProfile ?? 'No Profile';
+      appStore.profilePreview = null;
+    } catch (e) { await showError(e); }
   }
 
   /** 关联头像包目录：选一个目录，后端自动建组并设为当前组。 */
@@ -142,9 +147,9 @@
       {:else}
         <button class="btn" disabled title="当前已激活该存档">已激活</button>
       {/if}
-      <!-- 删除按钮：仅选中项已激活且为真实存档时显示（浏览态删除会误删激活档，故隐藏）。 -->
-      {#if hasProfile}
-        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
+      <!-- 删除按钮：选中的是真实存档（非 No Profile）时始终显示；删除的是下拉当前选中的存档。 -->
+      {#if appStore.selectedProfile !== 'No Profile'}
+        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除 Profile</button>
       {/if}
     </div>
   </section>

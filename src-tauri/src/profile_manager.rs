@@ -202,17 +202,21 @@ impl ProfileManager {
         self.load_profile(name) // 立即切到新档
     }
 
-    /// 删除档。'No Profile' 不可删（返回 false）；删后自动切回 'No Profile'。
+    /// 删除档。'No Profile' 不可删（返回 false）；删除「当前激活档」时自动切回 'No Profile'，
+    /// 删除未激活档不影响当前档（浏览态下可安全删除下拉选中的存档）。
     pub fn delete_profile(&mut self, name: &str) -> Result<bool, String> {
-        if name == "No Profile" {
+        if name == "No Profile" || !self.config.profile.contains_key(name) {
             return Ok(false);
         }
+        let was_current = self.cur_prf == name;
         self.config.profile.remove(name); // 从全局配置移除
         let _ = fs::remove_file(Self::prf_path(&self.user_dir, name)); // 删档配置文件（新位置）
         let _ = fs::remove_file(Self::legacy_prf_path(&self.user_dir, name)); // 兼容删除旧位置档 json
         let _ = fs::remove_dir_all(self.user_dir.join(crate::paths::sanitize(name))); // 删快照目录（含 XML 与 json）
         json_store::save(&self.user_dir.join("cfg.json"), &self.config)?;
-        self.load_profile("No Profile")?; // 回到默认档
+        if was_current {
+            self.load_profile("No Profile")?; // 只在删除当前激活档时回到默认档
+        }
         Ok(true)
     }
 
@@ -401,8 +405,9 @@ mod tests {
         assert!(!pm.config.profile["档A"]);
         pm.load_profile("档A").unwrap();
         assert_eq!(pm.cur_prf, "档A");
-        assert!(pm.delete_profile("档B").unwrap());
+        assert!(pm.delete_profile("档B").unwrap()); // 删非激活档：不影响当前档
         assert!(!pm.config.profile.contains_key("档B"));
+        assert_eq!(pm.cur_prf, "档A"); // 当前档保持
         assert!(!pm.delete_profile("No Profile").unwrap());
     }
 

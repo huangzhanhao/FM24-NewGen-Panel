@@ -40,13 +40,18 @@ pub fn sanitize(text: &str) -> String {
     if trimmed.is_empty() { "default".into() } else { trimmed }
 }
 
-/// 组映射快照路径：<user_dir>/<profile>/<sanitized_img_dir>.xml
-/// 【用途】切换存档时，把每个组的 config.xml 快照存到这个路径，切回来时再恢复。
-/// 存档名和目录名都经 sanitize 处理，保证能安全地作为文件夹/文件名。
+/// 组映射快照路径（短命名）：<user_dir>/<profile>/<目录末段>.xml
+/// 【命名】profile 名作子目录 + 头像包目录末段作文件名——替代旧版「整个路径转义」
+/// 的超长命名，两端都保持可辨识。边界：同一存档下若两个组的目录末段同名
+/// （如 C:\a\GUNZO 与 D:\b\GUNZO），将共用同一快照文件。
 pub fn group_xml_path(user_dir: &Path, profile: &str, img_dir: &str) -> PathBuf {
+    let tail = Path::new(img_dir)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     user_dir
-        .join(sanitize(profile))                       // 先拼存档名子目录
-        .join(format!("{}.xml", sanitize(img_dir)))     // 再拼「净化后的目录名.xml」
+        .join(sanitize(profile))                        // 存档名子目录
+        .join(format!("{}.xml", sanitize(&tail)))       // 目录末段作文件名
 }
 
 // 【测试模块】#[cfg(test)] 表示这些代码只在 `cargo test` 时才编译，不会进入正式程序。
@@ -69,8 +74,10 @@ mod tests {
     }
 
     #[test]
-    fn group_xml_path_layout() {
-        let p = group_xml_path(Path::new("d"), "档1", r"C:\pack\");
-        assert_eq!(p, Path::new("d").join("档1").join("C__pack_.xml"));
+    fn group_xml_path_short_and_identifiable() {
+        // 短命名：profile 子目录 + 目录末段.xml（替代旧版「整路径转义」的超长命名）。
+        let long_dir = r"C:\Users\57552\Documents\Sports Interactive\Football Manager 2024\GUNZO 风格头像包";
+        let p = group_xml_path(Path::new("d"), "档1", long_dir);
+        assert_eq!(p, Path::new("d").join("档1").join("GUNZO 风格头像包.xml"));
     }
 }

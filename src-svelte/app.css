@@ -68,6 +68,21 @@ input[type='text'], select { padding: 6px 8px; border: 1px solid var(--border); 
 input[readonly] { background: var(--input-bg); }
 input[type='text']:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+/* ---- 模态对话框（查看XML / 规则编辑） ---- */
+.modal-backdrop { position: fixed; inset: 0; background: var(--overlay); display: grid; place-items: center; z-index: 50; }
+.modal { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg);
+         width: min(940px, 94vw); height: min(660px, 88vh); display: flex; flex-direction: column; padding: 12px 14px; }
+.modal-title { font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* 只读文本查看（config.xml） */
+pre.text-view { flex: 1; overflow: auto; margin: 0; padding: 8px; font-family: var(--mono); font-size: 12.5px;
+                white-space: pre; background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+/* 规则编辑区（等宽、不换行、横向滚动） */
+textarea.editor { flex: 1; width: 100%; resize: none; font-family: var(--mono); font-size: 12.5px;
+                  white-space: pre; overflow: auto; padding: 8px; line-height: 1.5;
+                  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--input-bg); }
+textarea.editor:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
 /* ---- 按钮 ---- */
 button.btn { padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel); cursor: pointer; font-size: 14px; }
 button.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }

@@ -7,6 +7,7 @@
 use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::Mode;
 use crate::facepack::{self, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
+use crate::json_store;
 use crate::logger::{LogPage, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
@@ -49,6 +50,11 @@ pub struct FaceIndex { pub img_dir: String, pub scan: PackScan }
 #[serde(rename_all = "camelCase")]
 pub struct GroupInfo { pub img_dir: String, pub rtf: String }
 
+/// 当前组 config.xml 的路径与存在性（快照附带，前端渲染 config.xml 行）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigXmlInfo { pub path: String, pub exists: bool }
+
 /// 应用全局快照：一次性把前端需要的所有状态打包返回（前端拿到后整体替换本地状态）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +65,7 @@ pub struct AppSnapshot {
     pub current_group: Option<String>, // 当前选中组（Option 对应前端 null）
     pub current_rtf: String,        // 当前组的 RTF
     pub replacing: bool,            // 是否正在替换
+    pub config_xml: Option<ConfigXmlInfo>, // 当前组的 config.xml（无选中组为 None）
     pub log_path: String,           // 日志文件路径
 }
 
@@ -135,6 +142,11 @@ pub struct PlayerPreview {
 /// 【复用】几乎每个命令改完状态后都会调它，把最新状态回传前端，前端据此刷新界面。
 fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
     let pm = state.pm.lock().unwrap(); // 加锁读取存档管理器（lock 期间独占）
+    // 当前组的 config.xml 路径与存在性（前端渲染 config.xml 行；切组/替换后随快照自动刷新）。
+    let config_xml = pm.cur_group.as_ref().map(|g| {
+        let path = Path::new(g).join("config.xml");
+        ConfigXmlInfo { path: path.to_string_lossy().to_string(), exists: path.is_file() }
+    });
     AppSnapshot {
         profiles: pm.config.profile.keys().cloned().collect(),
         current_profile: pm.cur_prf.clone(),
@@ -147,6 +159,7 @@ fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
         current_group: pm.cur_group.clone(),
         current_rtf: pm.get_cur_rtf(),
         replacing: state.running.load(Ordering::SeqCst), // SeqCst 是最严格的内存顺序（跨线程同步标志）
+        config_xml,
         log_path: state.logger.path().to_string_lossy().to_string(),
     }
 }
@@ -593,6 +606,80 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
     let total = rows.len();
     // skip + take 实现分页，只返回当前页。
     PageResult { total, items: rows.into_iter().skip(query.offset).take(query.limit).collect() }
+}
+
+// ---------------- config.xml 查看/定位（「当前任务」卡 config.xml 行） ----------------
+
+/// 当前组 config.xml 路径；未选组报错。
+fn cur_config_xml_path(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+    let g = state.pm.lock().unwrap().cur_group.clone().ok_or("请先选择头像包目录")?;
+    Ok(Path::new(&g).join("config.xml"))
+}
+
+/// 资源管理器定位文件（Windows 专用便携应用）。
+fn explorer_select(path: &Path) -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map_err(|e| format!("打开资源管理器失败: {e}"))?;
+    Ok(())
+}
+
+/// 读取当前组 config.xml 内容（供「查看XML」对话框展示）。
+#[tauri::command]
+pub fn read_config_xml(state: State<'_, AppState>) -> Result<String, String> {
+    let path = cur_config_xml_path(&state)?;
+    std::fs::read_to_string(&path).map_err(|e| format!("读取 config.xml 失败: {e}"))
+}
+
+/// 在资源管理器中定位当前组 config.xml（「所在位置」按钮）。
+#[tauri::command]
+pub fn reveal_config_xml(state: State<'_, AppState>) -> Result<(), String> {
+    let path = cur_config_xml_path(&state)?;
+    if !path.is_file() {
+        return Err("config.xml 不存在（请先执行一次替换）".into());
+    }
+    explorer_select(&path)
+}
+
+// ---------------- 模板规则文件的查看/保存（规则编辑对话框） ----------------
+
+/// 模板规则文件路径（name 白名单：template2|template3）。
+fn rule_file_path(data_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    match name {
+        "template2" | "template3" => Ok(data_dir.join("rules").join(format!("{name}.json"))),
+        _ => Err(format!("未知规则文件: {name}")),
+    }
+}
+
+/// 读取模板规则文件内容（供规则编辑对话框；缺失时先导出内置默认）。
+#[tauri::command]
+pub fn read_rule_file(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    let path = rule_file_path(&state.data_dir, &name)?;
+    if !path.is_file() {
+        rule_config::ensure_user_files(&state.data_dir)?;
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("读取规则文件失败: {e}"))
+}
+
+/// 保存模板规则文件：先按对应模板结构解析校验（schema 即接口），
+/// 合法才原子写回（json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
+#[tauri::command]
+pub fn save_rule_file(state: State<'_, AppState>, name: String, content: String) -> Result<(), String> {
+    let path = rule_file_path(&state.data_dir, &name)?;
+    match name.as_str() {
+        "template2" => {
+            let cfg: crate::rule_config::Template2Config =
+                serde_json::from_str(&content).map_err(|e| format!("JSON 格式错误（模板二）：{e}"))?;
+            json_store::save(&path, &cfg)
+        }
+        "template3" => {
+            let cfg: crate::rule_config::Template3Config =
+                serde_json::from_str(&content).map_err(|e| format!("JSON 格式错误（模板三）：{e}"))?;
+            json_store::save(&path, &cfg)
+        }
+        _ => Err(format!("未知规则文件: {name}")),
+    }
 }
 
 /// 读取预览图片字节（前端转 blob URL 显示）。

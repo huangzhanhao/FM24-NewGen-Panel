@@ -31,6 +31,14 @@ export const api = {
   scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
   // 打开模板规则目录（data/rules/）：编辑 template2/template3.json 后下次替换即生效。
   openRulesDir: () => invoke<void>('open_rules_dir'),
+  // 读取当前组 config.xml 内容（查看XML 对话框）。
+  readConfigXml: () => invoke<string>('read_config_xml'),
+  // 资源管理器定位当前组 config.xml（所在位置）。
+  revealConfigXml: () => invoke<void>('reveal_config_xml'),
+  // 读取/保存模板规则文件（name ∈ template2|template3；保存时后端先按模板 schema 校验）。
+  readRuleFile: (name: 'template2' | 'template3') => invoke<string>('read_rule_file', { name }),
+  saveRuleFile: (name: 'template2' | 'template3', content: string) =>
+    invoke<void>('save_rule_file', { name, content }),
   createMissingDirs: (imgDir: string, names: string[]) =>
     invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。

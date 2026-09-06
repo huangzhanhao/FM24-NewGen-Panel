@@ -7,8 +7,12 @@
   import { pinScrollEnd } from '../actions'; // 把长路径钉到最右的 action
   import { appStore, applySnapshot } from '../stores/app.svelte';
   import type { IntegrityResult } from '../types';
+  import TextViewDialog from './TextViewDialog.svelte';
+  import RuleEditor from './RuleEditor.svelte';
 
   let integrity = $state<IntegrityResult | null>(null); // null = 未检查
+  let xmlView = $state<{ title: string; text: string } | null>(null); // config.xml 查看对话框
+  let ruleEditor = $state<{ openEditor: () => void } | null>(null);   // 规则编辑对话框实例
 
   const snap = $derived(appStore.snapshot);
   const busy = $derived(!!snap?.replacing); // !! 把值强转为布尔（替换中时禁用按钮）
@@ -48,6 +52,19 @@
   /** 打开模板规则目录（data/rules/）：编辑 template2/template3.json，保存后下次替换即生效。 */
   async function openRulesDir() {
     try { await api.openRulesDir(); } catch (e) { await showError(e); }
+  }
+
+  /** 查看 config.xml 内容（对话框只读展示）。 */
+  async function viewConfigXml() {
+    if (!snap?.configXml?.exists) return;
+    try {
+      xmlView = { title: `config.xml（${snap.configXml.path}）`, text: await api.readConfigXml() };
+    } catch (e) { await showError(e); }
+  }
+
+  /** 在资源管理器中定位 config.xml。 */
+  async function revealConfigXml() {
+    try { await api.revealConfigXml(); } catch (e) { await showError(e); }
   }
 
   /** 扫描头像：建图片索引缓存（供替换复用），结果已在后端写入日志面板。 */
@@ -107,6 +124,19 @@
                 title="解析 RTF 并填充名单预览（结果写入日志）">扫描RTF</button>
       </div>
     </div>
+    <!-- config.xml 行：当前组的映射配置文件路径 + [查看XML | 所在位置]。 -->
+    <div class="path-row">
+      <label for="sc-xml">config.xml：</label>
+      <input id="sc-xml" type="text" readonly value={snap.configXml?.path ?? ''}
+             placeholder="未关联头像包（执行替换后生成）" title={snap.configXml?.path ?? ''}
+             use:pinScrollEnd={snap.configXml?.path ?? ''} />
+      <div class="path-actions">
+        <button class="btn" onclick={viewConfigXml} disabled={busy || !snap.configXml?.exists}
+                title={snap.configXml?.exists ? '查看 config.xml 内容' : 'config.xml 尚未生成（请先执行一次替换）'}>查看XML</button>
+        <button class="btn" onclick={revealConfigXml} disabled={busy || !snap.configXml?.exists}
+                title={snap.configXml?.exists ? '在资源管理器中定位 config.xml' : 'config.xml 尚未生成（请先执行一次替换）'}>所在位置</button>
+      </div>
+    </div>
     <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓（含多余目录提示）；已检查且缺失→黄色警告 + 一键创建按钮。 -->
     {#if !snap.currentGroup}
       <p class="muted small">先在左侧「头像包（组）」关联一个头像包目录，或点击已有组。</p>
@@ -120,11 +150,16 @@
         <p class="warn-text small">⚠ 无法识别头像包结构：子目录与任何模板的 FolderList 清单都不构成包含关系，替换时将把包内全部图片随机分配；也可在「规则配置」中调整模板目录清单。</p>
       {/if}
     {/if}
-    <!-- 模板规则入口：打开 data/rules/ 编辑 template2/template3.json（国籍→目录映射、FolderList 等）。 -->
+    <!-- 模板规则入口：打开规则编辑对话框（查看/修改/保存 template2|template3.json）。 -->
     <div class="row">
-      <button class="btn" onclick={openRulesDir} disabled={busy}
-              title="打开模板规则目录（template2/template3.json）：国籍→目录映射、FolderList 等，编辑保存后下次替换即生效">规则配置</button>
+      <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy}
+              title="直接查看、修改并保存模板规则文件（国籍→目录映射、FolderList 等），保存时自动校验 JSON 格式">规则配置</button>
       <span class="muted small">抽图规则来自规则 json（可编辑），保存后下次替换/检查完整性即生效</span>
     </div>
   </div>
 {/if}
+
+{#if xmlView}
+  <TextViewDialog title={xmlView.title} text={xmlView.text} onclose={() => (xmlView = null)} />
+{/if}
+<RuleEditor bind:this={ruleEditor} />

@@ -32,8 +32,8 @@ pub struct PrfCfg {
     pub groups: GroupsMap,         // 所有组
 }
 
-/// 全局配置（对应 .user/cfg.json）。字段名 Profile 在 JSON 里首字母大写，用 rename 对应。
-/// value 为 bool 表示该存档是否「当前激活」（全局只有一个为 true）。
+/// 全局配置（对应 .user/profiles.json）。字段名 Profile 在 JSON 里首字母大写，用 rename 对应。
+/// value 为 bool 表示该存档是否「当前激活」（运行中仅一个为 true；启动时全部归零）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalCfg {
     #[serde(rename = "Profile")]
@@ -51,28 +51,38 @@ pub struct ProfileManager {
 }
 
 impl ProfileManager {
-    /// 创建管理器：读全局 cfg.json（缺失则初始化一个只含 'No Profile' 的默认配置），并加载当前存档。
-    /// name=None 时自动回退到 cfg.json 中标记为激活的存档。
+    /// 创建管理器：读全局 profiles.json（缺失则初始化一个只含 'No Profile' 的默认配置），并加载当前存档。
+    /// 【启动交互】name=None 时固定从默认档（No Profile）开始，不自动恢复上次激活的存档。
     pub fn new(name: Option<&str>, data_dir: &Path) -> Result<Self, String> {
         let user_dir = data_dir.join(".user");
         fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
-        let cfg_path = user_dir.join("cfg.json");
-        // 加载全局配置：成功则用；缺失则写一份默认；损坏则报错（json_store 已自动备份 .corrupt）。
+        let cfg_path = Self::global_cfg_path(&user_dir);
+        let legacy_cfg_path = user_dir.join("cfg.json"); // 旧名 cfg.json，启动时自动迁移到新名
+        // 加载全局配置：新名成功则用；新名缺失但旧名存在 → 迁移（内容沿用、删旧文件）；
+        // 两者都缺失 → 写默认；损坏则报错（json_store 已自动备份 .corrupt）。
         let mut config: GlobalCfg = match json_store::load(&cfg_path) {
             Ok(c) => c,
-            Err(LoadError::Missing) => {
-                // 首次运行：创建一个只含 'No Profile'（未激活）的默认配置并落盘。
-                let c = GlobalCfg {
-                    profile: [("No Profile".to_string(), false)].into_iter().collect(),
-                };
-                json_store::save(&cfg_path, &c)?;
-                c
-            }
+            Err(LoadError::Missing) => match json_store::load(&legacy_cfg_path) {
+                Ok(c) => {
+                    let _ = fs::remove_file(&legacy_cfg_path);
+                    json_store::save(&cfg_path, &c)?; // 迁移：内容写入新名
+                    c
+                }
+                Err(LoadError::Missing) => {
+                    // 首次运行：创建一个只含 'No Profile'（未激活）的默认配置并落盘。
+                    let c = GlobalCfg {
+                        profile: [("No Profile".to_string(), false)].into_iter().collect(),
+                    };
+                    json_store::save(&cfg_path, &c)?;
+                    c
+                }
+                Err(LoadError::Corrupt(e)) => return Err(e),
+            },
             Err(LoadError::Corrupt(e)) => return Err(e),
         };
         // 【启动交互】程序启动固定从默认档（No Profile）开始，不自动恢复上次激活的存档，
         // 需要用户在下拉框手动选择。显式 name（内部调用/测试）仍可指定具体档。
-        // cfg.json 的激活位仅运行中记录当前档：启动时全部归零（所有存档「未激活」），
+        // profiles.json 的激活位仅运行中记录当前档：启动时全部归零（所有存档「未激活」），
         // 有残留激活位则落盘，保证后端状态与前端「未选择 Profile」的展示一致。
         let cur_prf = name
             .filter(|n| config.profile.contains_key(*n))
@@ -96,6 +106,12 @@ impl ProfileManager {
             .clone()
             .filter(|g| cfg.groups.contains_key(g)) // cur_group 必须仍在组列表里
             .or_else(|| cfg.groups.keys().next().cloned()) // 否则取第一个
+    }
+
+    /// 全局配置文件路径（存档列表）：<user_dir>/profiles.json。
+    /// 旧名 cfg.json 仍会在启动时被自动迁移到该文件（见 new）。
+    fn global_cfg_path(user_dir: &Path) -> PathBuf {
+        user_dir.join("profiles.json")
     }
 
     /// 存档配置文件路径：<user_dir>/<存档名>/<存档名>.json——与该存档的 XML 快照同目录。
@@ -204,7 +220,7 @@ impl ProfileManager {
             return Err(format!("Profile「{name}」已存在"));
         }
         self.config.profile.insert(name.to_string(), true); // 加入全局配置
-        json_store::save(&self.user_dir.join("cfg.json"), &self.config)?; // 落盘全局配置
+        json_store::save(&Self::global_cfg_path(&self.user_dir), &self.config)?; // 落盘全局配置
         // 建空档文件（存档子目录下，与 XML 快照同目录）。
         let dir = self.user_dir.join(crate::paths::sanitize(name));
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -223,7 +239,7 @@ impl ProfileManager {
         let _ = fs::remove_file(Self::prf_path(&self.user_dir, name)); // 删档配置文件（新位置）
         let _ = fs::remove_file(Self::legacy_prf_path(&self.user_dir, name)); // 兼容删除旧位置档 json
         let _ = fs::remove_dir_all(self.user_dir.join(crate::paths::sanitize(name))); // 删快照目录（含 XML 与 json）
-        json_store::save(&self.user_dir.join("cfg.json"), &self.config)?;
+        json_store::save(&Self::global_cfg_path(&self.user_dir), &self.config)?;
         if was_current {
             self.load_profile("No Profile")?; // 只在删除当前激活档时回到默认档
         }
@@ -245,14 +261,14 @@ impl ProfileManager {
         for img_dir in self.prf_cfg.groups.keys().cloned().collect::<Vec<_>>() {
             self.restore_group_xml(name, &img_dir);
         }
-        // 4) 更新全局激活位：只有目标档为 true，其余置 false；并落盘 cfg.json
+        // 4) 更新全局激活位：只有目标档为 true，其余置 false；并落盘 profiles.json
         //    【修复】此前激活位变更不落盘，新建存档后重启会回到 No Profile。
         for k in self.config.profile.keys().cloned().collect::<Vec<_>>() {
             if let Some(flag) = self.config.profile.get_mut(&k) {
                 *flag = k == name;
             }
         }
-        json_store::save(&self.user_dir.join("cfg.json"), &self.config)?;
+        json_store::save(&Self::global_cfg_path(&self.user_dir), &self.config)?;
         self.cur_prf = name.to_string();
         self.cur_group = Self::pick_cur_group(&self.prf_cfg);
         Ok(())
@@ -359,7 +375,7 @@ impl ProfileManager {
         Ok(true)
     }
 
-    /// 返回 .user 目录（commands 层拼 cfg.json 路径时用）。
+    /// 返回 .user 目录（commands 层拼 profiles.json 路径时用）。
     pub fn user_cfg_path(&self) -> PathBuf {
         self.user_dir.clone()
     }
@@ -383,7 +399,7 @@ mod tests {
         let dir = data_dir();
         let pm = ProfileManager::new(None, dir.path()).unwrap();
         assert_eq!(pm.cur_prf, "No Profile");
-        assert!(dir.path().join(".user").join("cfg.json").is_file());
+        assert!(dir.path().join(".user").join("profiles.json").is_file());
         // 默认配置：所有存档（含 No Profile）均为「未激活」。
         assert!(!pm.config.profile["No Profile"]);
         // 缺省档 No Profile 的配置直接存 .user 根下，不套子目录。
@@ -396,10 +412,33 @@ mod tests {
         let dir = data_dir();
         let user = dir.path().join(".user");
         fs::create_dir_all(&user).unwrap();
-        fs::write(user.join("cfg.json"), "{ broken json").unwrap();
+        fs::write(user.join("profiles.json"), "{ broken json").unwrap();
         let err = ProfileManager::new(None, dir.path()).unwrap_err();
         assert!(err.contains("损坏"));
-        assert!(user.join("cfg.json.corrupt").is_file());
+        assert!(user.join("profiles.json.corrupt").is_file());
+    }
+
+    #[test]
+    fn legacy_cfg_json_migrated_to_profiles_json() {
+        // 旧名 cfg.json → 启动时自动迁移为 profiles.json（内容沿用、激活位归零、旧文件删除）。
+        let dir = data_dir();
+        let user = dir.path().join(".user");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(
+            user.join("cfg.json"),
+            r#"{"Profile": {"No Profile": false, "wer": true}}"#,
+        ).unwrap();
+        let pm = ProfileManager::new(None, dir.path()).unwrap();
+        assert!(user.join("profiles.json").is_file());
+        assert!(!user.join("cfg.json").is_file());
+        // 迁移后启动交互照旧：回到默认档、激活位归零
+        assert_eq!(pm.cur_prf, "No Profile");
+        let cfg: GlobalCfg = match json_store::load(&user.join("profiles.json")) {
+            Ok(c) => c,
+            Err(_) => panic!("profiles.json 应可解析"),
+        };
+        assert!(cfg.profile.values().all(|v| !*v));
+        assert!(cfg.profile.contains_key("wer")); // 存档名单保留
     }
 
     #[test]
@@ -466,7 +505,7 @@ mod tests {
     #[test]
     fn restart_starts_at_no_profile() {
         // 启动交互：程序启动固定回到默认档（No Profile），不自动恢复上次激活的存档，
-        // 且持久化状态归零——cfg.json 中所有存档的激活位均为 false（全部「未激活」）。
+        // 且持久化状态归零——profiles.json 中所有存档的激活位均为 false（全部「未激活」）。
         let dir = data_dir();
         let user = dir.path().join(".user");
         {
@@ -477,9 +516,9 @@ mod tests {
         let pm = ProfileManager::new(None, dir.path()).unwrap();
         assert_eq!(pm.cur_prf, "No Profile");
         assert!(pm.config.profile.contains_key("wer")); // 存档保留
-        let cfg: GlobalCfg = match json_store::load(&user.join("cfg.json")) {
+        let cfg: GlobalCfg = match json_store::load(&user.join("profiles.json")) {
             Ok(c) => c,
-            Err(_) => panic!("cfg.json 应可解析"),
+            Err(_) => panic!("profiles.json 应可解析"),
         };
         assert!(cfg.profile.values().all(|v| !*v)); // 持久化激活位全部未激活
     }
@@ -507,7 +546,7 @@ mod tests {
         let user = dir.path().join(".user");
         fs::create_dir_all(&user).unwrap();
         fs::write(
-            user.join("cfg.json"),
+            user.join("profiles.json"),
             r#"{"Profile": {"档旧": true}}"#,
         ).unwrap();
         fs::write(
@@ -534,7 +573,7 @@ mod tests {
         let dir = data_dir();
         let user = dir.path().join(".user");
         fs::create_dir_all(&user).unwrap();
-        fs::write(user.join("cfg.json"), r#"{"Profile": {"档A": true}}"#).unwrap();
+        fs::write(user.join("profiles.json"), r#"{"Profile": {"档A": true}}"#).unwrap();
         fs::write(
             user.join("档A.json"),
             r#"{"cur_group": "C:\\pack\\", "groups": {"C:\\pack\\": {"rtf": "C:\\l.rtf"}}}"#,

@@ -39,9 +39,6 @@ body { margin: 0; background: var(--bg); color: var(--text); font-size: 14px; }
 .side-foot { margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .prf-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .prf-actions .btn { flex: 1 1 auto; min-width: 0; padding: 6px 8px; white-space: nowrap; }
-/* 存档状态标签：已激活 = 浅灰文字；未激活（No Profile）= 警示色文字。只表状态，不可点 */
-.prf-state { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
-.prf-state.off { color: var(--warn); }
 
 /* ---- 卡片（主区基本单元） ---- */
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px 14px; }

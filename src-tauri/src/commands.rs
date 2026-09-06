@@ -199,9 +199,9 @@ pub fn delete_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
 pub fn switch_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
     pm.load_profile(&name)?;
-    // 切档后把全局配置 cfg.json 也落盘（记住新的激活位）。
+    // 切档后把全局配置 profiles.json 也落盘（记住新的激活位）。
     crate::json_store::save(
-        &pm.user_cfg_path().join("cfg.json"),
+        &pm.user_cfg_path().join("profiles.json"),
         &pm.config,
     )?;
     drop(pm);

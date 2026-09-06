@@ -19,7 +19,7 @@
   const browseMode = $derived(
     !!snap && appStore.selectedProfile !== (appStore.snapshot?.currentProfile ?? ''),
   );
-  // selectedIsActive：下拉选中的存档是否就是当前激活档（「已激活」标签的依据）。
+  // selectedIsActive：下拉选中的存档是否就是当前激活档（激活按钮灰/蓝态的依据）。
   const selectedIsActive = $derived(
     !!appStore.snapshot && appStore.selectedProfile === appStore.snapshot.currentProfile,
   );
@@ -135,12 +135,7 @@
       {/each}
     </select>
     <div class="prf-actions">
-      <!-- 状态标签：按「选中项是否已激活」显示；浏览未激活存档时为黄色「未激活」。 -->
-      <span class="prf-state" class:off={!selectedIsActive} role="status"
-            title={selectedIsActive ? `已激活存档：${appStore.selectedProfile}` : `浏览中：${appStore.selectedProfile}（未激活，点「激活」生效）`}>
-        {selectedIsActive ? '已激活' : '未激活'}
-      </span>
-      <!-- 激活按钮：浏览未激活存档时蓝色可点；选中项即激活档时灰色不可点。 -->
+      <!-- 激活按钮：浏览未激活存档时蓝色可点；选中项即激活档时灰色不可点（状态由按钮本身表达）。 -->
       {#if browseMode}
         <button class="btn primary" onclick={activateProfile} disabled={busy}
                 title="激活存档「{appStore.selectedProfile}」并切换其组配置与映射">激活</button>

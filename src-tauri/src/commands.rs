@@ -413,18 +413,28 @@ pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, Strin
     Ok(summary)
 }
 
+/// 用资源管理器打开目录（便携应用面向 Windows 的统一出口）。
+/// 【坑】组 key 经 norm_dir 带尾部分隔符，而 explorer 对引号内的尾反斜杠解析脆弱
+/// （`\"` 被当作转义引号，含空格的路径会打不开正确位置），传入前必须去掉尾部分隔符。
+fn explorer_open(dir: &Path, what: &str) -> Result<(), String> {
+    let s = dir.to_string_lossy();
+    let trimmed = s.trim_end_matches(['\\', '/']);
+    // 盘根（`C:\`）去尾后是 `C:`（表示「该盘当前目录」而非根），需保留原样；裸分隔符同理。
+    let target = if trimmed.is_empty() || trimmed.ends_with(':') { s.as_ref() } else { trimmed };
+    std::process::Command::new("explorer")
+        .arg(target)
+        .spawn()
+        .map_err(|e| format!("打开{what}失败: {e}"))?;
+    Ok(())
+}
+
 /// 打开模板规则目录（data/rules/）供用户编辑 template2/template3.json；
 /// 目录或文件缺失时先导出内置默认。编辑保存后下次替换/检查完整性即生效。
 #[tauri::command]
 pub fn open_rules_dir(state: State<'_, AppState>) -> Result<(), String> {
     rule_config::ensure_user_files(&state.data_dir)?;
     let dir = state.data_dir.join("rules");
-    // 便携应用面向 Windows：直接用资源管理器打开规则目录。
-    std::process::Command::new("explorer")
-        .arg(&dir)
-        .spawn()
-        .map_err(|e| format!("打开规则目录失败: {e}"))?;
-    Ok(())
+    explorer_open(&dir, "规则目录")
 }
 
 /// 【最复杂的命令】启动批量替换。开一个后台线程跑流水线，避免阻塞界面。
@@ -647,20 +657,32 @@ pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSn
     })
 }
 
-// ---------------- 存档 XML 查看（「当前任务」卡 config.xml 行） ----------------
+// ---------------- 目录打开（「当前任务」卡 config.xml 行：查看config / 查看快照） ----------------
 
-/// 当前组在存档资料中的 XML 快照路径（.user/<存档名>/<目录末段>.xml）；未选组报错。
-fn cur_config_xml_path(state: &State<'_, AppState>) -> Result<PathBuf, String> {
-    let pm = state.pm.lock().unwrap();
-    let g = pm.cur_group.clone().ok_or("请先选择头像包目录")?;
-    Ok(crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, &g))
+/// 打开头像包目录（config.xml 就写在包根目录，「查看config」按钮）。
+/// 目录由前端传当前展示组的目录：浏览预览态打开的是被浏览档的组，与界面展示一致。
+#[tauri::command]
+pub fn open_pack_config_dir(img_dir: String) -> Result<(), String> {
+    if img_dir.is_empty() {
+        return Err("请先关联头像包目录".into());
+    }
+    let dir = PathBuf::from(img_dir);
+    if !dir.is_dir() {
+        return Err(format!("头像包目录不存在: {}", dir.display()));
+    }
+    explorer_open(&dir, "头像包目录")
 }
 
-/// 读取当前组存档 XML 快照内容（供「查看XML」对话框展示）。
+/// 打开存档 XML 快照所在目录（.user/<存档名>/，「查看快照」按钮）。
+/// 路径由前端传当前展示档的快照 XML 全路径（同上，浏览态自洽）。
 #[tauri::command]
-pub fn read_config_xml(state: State<'_, AppState>) -> Result<String, String> {
-    let path = cur_config_xml_path(&state)?;
-    std::fs::read_to_string(&path).map_err(|e| format!("读取存档 XML 失败: {e}"))
+pub fn open_snapshot_dir(path: String) -> Result<(), String> {
+    let xml = PathBuf::from(path);
+    if !xml.is_file() {
+        return Err("存档 XML 快照尚未生成（请先执行一次替换）".into());
+    }
+    let dir = xml.parent().ok_or_else(|| "无法定位快照目录".to_string())?;
+    explorer_open(dir, "存档快照目录")
 }
 
 // ---------------- 模板规则文件的查看/保存（规则编辑对话框） ----------------

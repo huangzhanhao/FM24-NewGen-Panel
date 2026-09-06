@@ -33,8 +33,10 @@ export const api = {
   openRulesDir: () => invoke<void>('open_rules_dir'),
   // 预览指定存档（下拉浏览展示，不切换后端当前档/激活状态）。
   previewProfile: (name: string) => invoke<AppSnapshot>('preview_profile', { name }),
-  // 读取当前组 config.xml 内容（查看XML 对话框）。
-  readConfigXml: () => invoke<string>('read_config_xml'),
+  // 用资源管理器打开当前展示组头像包目录（config.xml 所在目录，查看config）。
+  openPackConfigDir: (imgDir: string) => invoke<void>('open_pack_config_dir', { imgDir }),
+  // 用资源管理器打开当前展示档的存档 XML 快照所在目录（查看快照）。
+  openSnapshotDir: (path: string) => invoke<void>('open_snapshot_dir', { path }),
   // 读取/保存模板规则文件（name ∈ template2|template3；保存时后端先按模板 schema 校验）。
   readRuleFile: (name: 'template2' | 'template3') => invoke<string>('read_rule_file', { name }),
   saveRuleFile: (name: 'template2' | 'template3', content: string) =>

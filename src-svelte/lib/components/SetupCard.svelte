@@ -7,11 +7,9 @@
   import { pinScrollEnd } from '../actions'; // 把长路径钉到最右的 action
   import { appStore, applySnapshot } from '../stores/app.svelte';
   import type { IntegrityResult } from '../types';
-  import TextViewDialog from './TextViewDialog.svelte';
   import RuleEditor from './RuleEditor.svelte';
 
   let integrity = $state<IntegrityResult | null>(null); // null = 未检查
-  let xmlView = $state<{ title: string; text: string } | null>(null); // config.xml 查看对话框
   let ruleEditor = $state<{ openEditor: () => void } | null>(null);   // 规则编辑对话框实例
 
   const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
@@ -59,12 +57,16 @@
     try { await api.openRulesDir(); } catch (e) { await showError(e); }
   }
 
-  /** 查看 config.xml 内容（对话框只读展示）。 */
-  async function viewConfigXml() {
+  /** 查看config：打开头像包目录（config.xml 就在包根目录）。传当前展示组的目录，浏览态自洽。 */
+  async function openPackConfig() {
+    if (!snap?.currentGroup) return;
+    try { await api.openPackConfigDir(snap.currentGroup); } catch (e) { await showError(e); }
+  }
+
+  /** 查看快照：打开存档 XML 快照所在目录。传当前展示档的快照路径，浏览态自洽。 */
+  async function openSnapshot() {
     if (!snap?.configXml?.exists) return;
-    try {
-      xmlView = { title: `config.xml（${snap.configXml.path}）`, text: await api.readConfigXml() };
-    } catch (e) { await showError(e); }
+    try { await api.openSnapshotDir(snap.configXml.path); } catch (e) { await showError(e); }
   }
 
   /** 扫描头像：建图片索引缓存（供替换复用），结果已在后端写入日志面板。 */
@@ -125,15 +127,17 @@
                 title="解析 RTF 并填充名单预览（结果写入日志）">扫描RTF</button>
       </div>
     </div>
-    <!-- config.xml 行：当前组的映射配置文件路径 + [查看XML | 所在位置]。 -->
+    <!-- config.xml 行：当前组的映射配置文件路径 + [查看config | 查看快照]（左 config 右快照）。 -->
     <div class="path-row">
       <label for="sc-xml">config.xml：</label>
       <input id="sc-xml" type="text" readonly value={snap.configXml?.path ?? ''}
              placeholder="未关联头像包（执行替换后生成）" title={snap.configXml?.path ?? ''}
              use:pinScrollEnd={snap.configXml?.path ?? ''} />
       <div class="path-actions">
-        <button class="btn" onclick={viewConfigXml} disabled={busy || !snap.configXml?.exists}
-                title={snap.configXml?.exists ? '查看存档 XML 内容' : '存档 XML 尚未生成（请先执行一次替换）'}>查看XML</button>
+        <button class="btn" onclick={openPackConfig} disabled={busy || !snap.currentGroup}
+                title={snap.currentGroup ? '打开头像包目录（config.xml 所在目录）' : '请先关联头像包目录'}>查看config</button>
+        <button class="btn" onclick={openSnapshot} disabled={busy || !snap.configXml?.exists}
+                title="打开存档 XML 快照所在目录">查看快照</button>
       </div>
     </div>
     <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓（含多余目录提示）；已检查且缺失→黄色警告 + 一键创建按钮。 -->
@@ -158,7 +162,4 @@
   </div>
 {/if}
 
-{#if xmlView}
-  <TextViewDialog title={xmlView.title} text={xmlView.text} onclose={() => (xmlView = null)} />
-{/if}
 <RuleEditor bind:this={ruleEditor} />

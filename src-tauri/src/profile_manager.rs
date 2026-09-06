@@ -58,7 +58,7 @@ impl ProfileManager {
         fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
         let cfg_path = user_dir.join("cfg.json");
         // 加载全局配置：成功则用；缺失则写一份默认；损坏则报错（json_store 已自动备份 .corrupt）。
-        let config: GlobalCfg = match json_store::load(&cfg_path) {
+        let mut config: GlobalCfg = match json_store::load(&cfg_path) {
             Ok(c) => c,
             Err(LoadError::Missing) => {
                 // 首次运行：创建一个只含 'No Profile'（激活）的默认配置并落盘。
@@ -71,18 +71,41 @@ impl ProfileManager {
             Err(LoadError::Corrupt(e)) => return Err(e),
         };
         // 对等 v1：name 缺失/无效时回退到 cfg.json 中激活的档（get_latest_prf 语义）。
-        // 链式：先用传入 name（且它存在于配置中），否则找 value=true 的那个，再否则兑底 'No Profile'。
+        // 【防御】历史上新建存档的落盘时序缺陷可能留下多个激活位（如 No Profile 与新档同时 true），
+        // 此时优先选「非 No Profile」的激活档（用户创建的档优先于默认档），避免重启回到默认档。
         let cur_prf = name
             .filter(|n| config.profile.contains_key(*n))
             .map(|n| n.to_string())
             .or_else(|| {
-                config
+                let actives: Vec<&String> = config
                     .profile
                     .iter()
-                    .find(|(_, v)| **v) // 找激活位为 true 的存档
-                    .map(|(k, _)| k.clone())
+                    .filter(|(_, v)| **v)
+                    .map(|(k, _)| k)
+                    .collect();
+                match actives.len() {
+                    1 => Some((*actives[0]).clone()),
+                    2.. => actives
+                        .iter()
+                        .find(|k| k.as_str() != "No Profile")
+                        .or_else(|| actives.first())
+                        .map(|k| (*k).clone()),
+                    _ => None,
+                }
             })
             .unwrap_or_else(|| "No Profile".to_string());
+        // 激活位归一化（修复历史双 true 脏数据）：只保留当前档为激活，有变化才落盘。
+        let mut dirty = false;
+        for (k, v) in config.profile.iter_mut() {
+            let target = *k == cur_prf;
+            if *v != target {
+                *v = target;
+                dirty = true;
+            }
+        }
+        if dirty {
+            json_store::save(&cfg_path, &config)?;
+        }
         // 加载当前存档的组配置，并选定当前组。
         let prf_cfg = Self::load_profile_cfg(&user_dir, &cur_prf)?;
         let cur_group = Self::pick_cur_group(&prf_cfg);
@@ -192,12 +215,14 @@ impl ProfileManager {
         for img_dir in self.prf_cfg.groups.keys().cloned().collect::<Vec<_>>() {
             self.restore_group_xml(name, &img_dir);
         }
-        // 4) 更新全局激活位：只有目标档为 true，其余置 false。
+        // 4) 更新全局激活位：只有目标档为 true，其余置 false；并落盘 cfg.json
+        //    【修复】此前激活位变更不落盘，新建存档后重启会回到 No Profile。
         for k in self.config.profile.keys().cloned().collect::<Vec<_>>() {
             if let Some(flag) = self.config.profile.get_mut(&k) {
                 *flag = k == name;
             }
         }
+        json_store::save(&self.user_dir.join("cfg.json"), &self.config)?;
         self.cur_prf = name.to_string();
         self.cur_group = Self::pick_cur_group(&self.prf_cfg);
         Ok(())
@@ -389,6 +414,40 @@ mod tests {
         fs::write(img.join("config.xml"), "changed").unwrap();
         pm.load_profile("档A").unwrap();
         assert!(fs::read_to_string(img.join("config.xml")).unwrap().contains("A/a"));
+    }
+
+    #[test]
+    fn created_profile_survives_restart() {
+        // 复现并锁定修复：新建存档后重启（new(None)），应回到用户创建的档而非 No Profile。
+        // （历史缺陷：create_profile 落盘发生在激活位更新之前，cfg.json 留下双 true。）
+        let dir = data_dir();
+        {
+            let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+            pm.create_profile("wer").unwrap();
+            assert_eq!(pm.cur_prf, "wer");
+        }
+        let pm = ProfileManager::new(None, dir.path()).unwrap();
+        assert_eq!(pm.cur_prf, "wer"); // 重启后仍是用户创建的档
+    }
+
+    #[test]
+    fn duplicated_active_flags_normalized() {
+        // 历史脏数据：cfg.json 出现多个激活位 → 启动归一化为用户创建的档，并修正落盘。
+        let dir = data_dir();
+        let user = dir.path().join(".user");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(
+            user.join("cfg.json"),
+            r#"{"Profile": {"No Profile": true, "wer": true}}"#,
+        ).unwrap();
+        let pm = ProfileManager::new(None, dir.path()).unwrap();
+        assert_eq!(pm.cur_prf, "wer"); // 用户创建的档优先于默认档
+        let cfg: GlobalCfg = match json_store::load(&user.join("cfg.json")) {
+            Ok(c) => c,
+            Err(_) => panic!("cfg.json 应可解析"),
+        };
+        assert!(cfg.profile["wer"]);
+        assert!(!cfg.profile["No Profile"]); // 激活位已归一化（单 true）
     }
 
     #[test]

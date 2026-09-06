@@ -13,38 +13,55 @@
   // bind:this 把 <select> 的真实 DOM 元素引用存进这个变量，方便失败时手动回退选中项。
   let profileSelect = $state<HTMLSelectElement | null>(null);
 
-  const snap = $derived(appStore.snapshot);
+  const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
   const busy = $derived(!!snap?.replacing); // 替换中时禁用大部分操作
-  // hasProfile：是否已激活真实存档（'No Profile' 视为未激活）。
-  const hasProfile = $derived(!!snap && snap.currentProfile !== 'No Profile');
-  const activeProfile = $derived(snap?.currentProfile ?? '');
-  /** 下拉即切档，选中项永远等于激活档；旁边只是个状态标签。 */
-  const stateHint = $derived(
-    hasProfile ? `当前已激活存档：${activeProfile}` : '尚未激活任何存档，请先新建或在下拉框选择',
+  // 浏览态：下拉选中的存档 ≠ 后端当前激活档（选中项未被激活）。
+  const browseMode = $derived(
+    !!snap && appStore.selectedProfile !== (appStore.snapshot?.currentProfile ?? ''),
   );
-
-  /** 新建存档：调后端创建（会立即激活），成功后用返回快照刷新、清空输入、收起输入行。 */
+  // selectedIsActive：下拉选中的存档是否就是当前激活档（「已激活」标签的依据）。
+  const selectedIsActive = $derived(
+    !!appStore.snapshot && appStore.selectedProfile === appStore.snapshot.currentProfile,
+  );
+  // hasProfile：选中项已激活且不是 'No Profile'——组管理与删除等写操作仅在此态可用。
+  const hasProfile = $derived(selectedIsActive && appStore.selectedProfile !== 'No Profile');
+  /** 新建存档：调后端创建（会立即激活），成功后选中项同步、清空输入、收起输入行。 */
   async function createProfile() {
     const name = newProfileName.trim();
     if (!name) return;
     try {
       await applySnapshot(await api.createProfile(name));
+      appStore.selectedProfile = name;      // 新建即激活，下拉选中项同步
+      appStore.profilePreview = null;       // 展示与激活态一致
       newProfileName = '';
       creating = false;
     } catch (e) { await showError(e); }
   }
 
-  /** 下拉框一改就切档（v1 交互）；失败时把选项回退到当前激活档。 */
-  async function switchProfile() {
-    const target = profileSelect?.value; // 从 DOM 引用读当前选中值
-    if (!target || target === activeProfile) return; // 没变就不做
+  /** 下拉选择 = 仅浏览（组列表/当前任务卡随选中项刷新展示），不切换后端当前档；
+      需要点「激活」按钮才真正切换。失败时把下拉选中项回退。 */
+  async function onSelectChange() {
+    const target = profileSelect?.value;
+    const prev = appStore.selectedProfile;
+    if (!target || target === prev) return;
+    appStore.selectedProfile = target;
     try {
-      await applySnapshot(await api.switchProfile(target));
+      appStore.profilePreview = await api.previewProfile(target);
     } catch (e) {
-      // 切档失败：手动把下拉框选中项改回激活档（避免 UI 与实际不一致）。
-      if (profileSelect) profileSelect.value = activeProfile;
+      appStore.selectedProfile = prev; // 预览失败：回退选中项
+      appStore.profilePreview = null;
       await showError(e);
     }
+  }
+
+  /** 激活下拉选中的存档：真正切换后端当前档（快照交换），浏览态结束。 */
+  async function activateProfile() {
+    const target = appStore.selectedProfile;
+    if (!target || target === (appStore.snapshot?.currentProfile ?? '')) return;
+    try {
+      await applySnapshot(await api.switchProfile(target));
+      appStore.profilePreview = null; // 激活后展示与激活态一致
+    } catch (e) { await showError(e); }
   }
 
   /** 删除当前存档（先弹确认框）。 */
@@ -104,19 +121,28 @@
         <button class="btn" onclick={createProfile} disabled={!newProfileName.trim()}>创建</button>
       </div>
     {/if}
-    <!-- 存档下拉框：bind:this 拿到 DOM 引用；onchange 一改就切档；忙碌时禁用。 -->
-    <select bind:this={profileSelect} value={activeProfile} onchange={switchProfile} disabled={busy} class="w-full">
+    <!-- 存档下拉框：选中即「浏览」（组列表/当前任务卡随选中项刷新），不切档；
+         点下方「激活」按钮才真正切换后端当前档。忙碌时禁用。 -->
+    <select bind:this={profileSelect} value={appStore.selectedProfile} onchange={onSelectChange} disabled={busy} class="w-full">
       <!-- {#each} 遍历所有存档名生成选项（snap 为空时用 ?? [] 兑底）。 -->
       {#each snap?.profiles ?? [] as p}
         <option value={p}>{p}</option>
       {/each}
     </select>
     <div class="prf-actions">
-      <!-- 状态标签：class:off 在未激活时加上；role="status" 供读屏软件播报；title 显示详细提示。 -->
-      <span class="prf-state" class:off={!hasProfile} role="status" title={stateHint}>
-        {hasProfile ? '已激活' : '未激活'}
+      <!-- 状态标签：按「选中项是否已激活」显示；浏览未激活存档时为黄色「未激活」。 -->
+      <span class="prf-state" class:off={!selectedIsActive} role="status"
+            title={selectedIsActive ? `已激活存档：${appStore.selectedProfile}` : `浏览中：${appStore.selectedProfile}（未激活，点「激活」生效）`}>
+        {selectedIsActive ? '已激活' : '未激活'}
       </span>
-      <!-- 只有已激活真实存档时才显示“删除当前 Profile”按钮。 -->
+      <!-- 激活按钮：浏览未激活存档时蓝色可点；选中项即激活档时灰色不可点。 -->
+      {#if browseMode}
+        <button class="btn primary" onclick={activateProfile} disabled={busy}
+                title="激活存档「{appStore.selectedProfile}」并切换其组配置与映射">激活</button>
+      {:else}
+        <button class="btn" disabled title="当前已激活该存档">已激活</button>
+      {/if}
+      <!-- 删除按钮：仅选中项已激活且为真实存档时显示（浏览态删除会误删激活档，故隐藏）。 -->
       {#if hasProfile}
         <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
       {/if}
@@ -127,8 +153,9 @@
   <section>
     <div class="side-head">
       <span>头像包（组）</span>
-      <!-- 关联新目录按钮：忙碌或未激活存档时禁用。 -->
-      <button class="icon-btn" title="关联新的头像包目录" onclick={linkFacepack} disabled={busy || !hasProfile}>＋</button>
+      <!-- 关联新目录按钮：忙碌或选中项未激活（浏览态）时禁用——组操作仅对激活档可用。 -->
+      <button class="icon-btn" title={browseMode ? '请先点击「激活」后再关联头像包' : '关联新的头像包目录'}
+              onclick={linkFacepack} disabled={busy || !hasProfile}>＋</button>
     </div>
     <!-- 有组时渲染列表；否则显示空状态提示。 -->
     {#if snap && snap.groups.length > 0}

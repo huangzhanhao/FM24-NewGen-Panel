@@ -31,6 +31,8 @@ export const api = {
   scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
   // 打开模板规则目录（data/rules/）：编辑 template2/template3.json 后下次替换即生效。
   openRulesDir: () => invoke<void>('open_rules_dir'),
+  // 预览指定存档（下拉浏览展示，不切换后端当前档/激活状态）。
+  previewProfile: (name: string) => invoke<AppSnapshot>('preview_profile', { name }),
   // 读取当前组 config.xml 内容（查看XML 对话框）。
   readConfigXml: () => invoke<string>('read_config_xml'),
   // 资源管理器定位当前组 config.xml（所在位置）。

@@ -8,7 +8,12 @@ import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 /** 全局应用状态（runes）。snapshot 由命令返回值整体替换。 */
 // $state 创建响应式对象：任何组件读 appStore.snapshot，当它变化时那些组件会自动重渲染。
 export const appStore = $state({
-  snapshot: null as AppSnapshot | null, // 后端回传的全局快照（初始为 null，启动后填充）
+  snapshot: null as AppSnapshot | null, // 后端回传的全局快照（真实激活态；初始为 null，启动后填充）
+  /** 浏览态预览快照：下拉选择存档但未点「激活」时的展示数据（null = 无浏览态）。
+   *  展示类组件（侧栏/当前任务卡）优先用它；操作类组件（替换执行等）始终用 snapshot。 */
+  profilePreview: null as AppSnapshot | null,
+  /** 下拉选中的存档名（浏览态）。与 snapshot.currentProfile 不同 = 正在浏览未激活的存档。 */
+  selectedProfile: 'No Profile',
   progress: { status: '', value: 0 },   // 当前替换进度（状态文字 + 百分比）
   lastResult: '' as 'finished' | 'cancelled' | 'failed' | '', // 最近一次替换结果
   rosterVersion: 0,                     // 名单预览版本号：「扫描RTF」成功后 +1，触发 PlayersTable 重载

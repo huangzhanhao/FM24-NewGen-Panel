@@ -313,6 +313,17 @@ impl ProfileManager {
         Ok(true)
     }
 
+    /// 预览指定存档的配置（不切换后端当前档）：返回 (该档配置, 该档当前组)。
+    /// 供前端「下拉浏览存档」使用；加载过程可能触发旧布局迁移/默认配置创建（幂等、无破坏）。
+    pub fn preview_cfg(&self, name: &str) -> Result<(PrfCfg, Option<String>), String> {
+        if !self.config.profile.contains_key(name) {
+            return Err(format!("存档「{name}」不存在"));
+        }
+        let prf_cfg = Self::load_profile_cfg(&self.user_dir, name)?;
+        let cur_group = Self::pick_cur_group(&prf_cfg);
+        Ok((prf_cfg, cur_group))
+    }
+
     /// 取当前组的 RTF 路径（链式安全取值，任何一环为 None 都回退空串）。
     pub fn get_cur_rtf(&self) -> String {
         self.cur_group
@@ -453,6 +464,23 @@ mod tests {
             Err(_) => panic!("cfg.json 应可解析"),
         };
         assert!(cfg.profile.values().all(|v| !*v)); // 持久化激活位全部未激活
+    }
+
+    #[test]
+    fn preview_cfg_does_not_switch_current() {
+        // 预览不切档：preview_cfg 返回目标档配置，但当前档/激活状态保持不变。
+        let dir = data_dir();
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        pm.create_profile("wer").unwrap();
+        pm.ensure_group(r"C:\pack1").unwrap();
+        // 预览另一存档（No Profile）：返回其空配置，当前档与当前组不变。
+        let (cfg, cur_group) = pm.preview_cfg("No Profile").unwrap();
+        assert!(cfg.groups.is_empty());
+        assert_eq!(cur_group, None);
+        assert_eq!(pm.cur_prf, "wer");
+        assert_eq!(pm.cur_group.clone().unwrap(), norm_dir(r"C:\pack1"));
+        // 不存在的存档 → 报错
+        assert!(pm.preview_cfg("ghost").is_err());
     }
 
     #[test]

@@ -19,8 +19,12 @@
   let filterNewgan = $state(true);
   let saveBackup = $state(true);
 
-  const snap = $derived(appStore.snapshot);
+  const snap = $derived(appStore.snapshot); // 替换只作用于后端当前激活档（浏览态禁用）
   const busy = $derived(!!snap?.replacing);
+  // 浏览态：下拉选中的存档 ≠ 当前激活档——替换会作用于激活档，为避免误操作禁用替换。
+  const browseMode = $derived(
+    !!snap && appStore.selectedProfile !== snap.currentProfile,
+  );
   // ready：只有“已选 Profile + 已选头像包 + 已设 RTF”都满足才允许开始替换。
   const ready = $derived(
     !!snap && snap.currentProfile !== 'No Profile' && !!snap.currentGroup && !!snap.currentRtf,
@@ -83,11 +87,16 @@
   </div>
   <!-- 开始/取消按钮：未就绪或忙碌时禁用开始；非忙碌时禁用取消。 -->
   <div class="row">
-    <button class="btn primary big flex-1" onclick={startReplace} disabled={busy || !ready}>
+    <button class="btn primary big flex-1" onclick={startReplace}
+            disabled={busy || browseMode || !ready}
+            title={browseMode ? '请先在左侧「激活」存档后再执行替换（当前为浏览预览）' : ''}>
       {busy ? '替换中…' : 'Replace Faces'}
     </button>
     <button class="btn" onclick={() => api.cancelReplace()} disabled={!busy}>取消</button>
   </div>
+  {#if browseMode}
+    <p class="muted small">正在浏览「{appStore.selectedProfile}」（未激活）。替换只作用于已激活的存档，请先在左侧点「激活」。</p>
+  {/if}
   <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比。 -->
   {#if busy || appStore.progress.value > 0}
     <div class="row">

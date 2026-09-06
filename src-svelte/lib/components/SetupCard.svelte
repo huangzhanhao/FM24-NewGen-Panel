@@ -14,8 +14,13 @@
   let xmlView = $state<{ title: string; text: string } | null>(null); // config.xml 查看对话框
   let ruleEditor = $state<{ openEditor: () => void } | null>(null);   // 规则编辑对话框实例
 
-  const snap = $derived(appStore.snapshot);
+  const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
   const busy = $derived(!!snap?.replacing); // !! 把值强转为布尔（替换中时禁用按钮）
+  // 浏览态：下拉选中的存档 ≠ 后端当前激活档——展示只读预览；
+  // 写「后端当前档」状态的操作（选择 RTF 等）禁用，读操作（检查完整性/扫描）自洽可用。
+  const browseMode = $derived(
+    !!snap && appStore.selectedProfile !== (appStore.snapshot?.currentProfile ?? ''),
+  );
   // 完整时按命中的模板号给出中文标注（目录总数来自模板 FolderList，用户可配置）。
   const completeLabel = $derived(
     integrity?.standard === 1 ? '模板一：图片直铺，无种族子目录'
@@ -118,8 +123,9 @@
       <input id="sc-rtf" type="text" readonly value={snap.currentRtf || '未设置'} title={snap.currentRtf}
              use:pinScrollEnd={snap.currentRtf} />
       <div class="path-actions">
-        <button class="btn" onclick={browseRtf} disabled={busy || !snap.currentGroup}
-                title={snap.currentGroup ? '选择 FM 导出的 RTF 名单' : '请先关联头像包目录'}>选择RTF</button>
+        <button class="btn" onclick={browseRtf} disabled={busy || browseMode || !snap.currentGroup}
+                title={browseMode ? '请先点击「激活」后再设置 RTF（当前为浏览预览）'
+                      : snap.currentGroup ? '选择 FM 导出的 RTF 名单' : '请先关联头像包目录'}>选择RTF</button>
         <button class="btn" onclick={scanRtf} disabled={busy || !snap.currentRtf}
                 title="解析 RTF 并填充名单预览（结果写入日志）">扫描RTF</button>
       </div>

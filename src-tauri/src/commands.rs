@@ -612,6 +612,39 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
     PageResult { total, items: rows.into_iter().skip(query.offset).take(query.limit).collect() }
 }
 
+// ---------------- 存档浏览预览（下拉选择存档 = 浏览，不切档） ----------------
+
+/// 预览指定存档的快照（仅供前端下拉浏览展示，不改变后端当前档/激活状态）。
+/// currentProfile 字段返回被浏览的存档名；激活仍需前端显式调 switch_profile。
+#[tauri::command]
+pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
+    let pm = state.pm.lock().unwrap();
+    let (prf_cfg, cur_group) = pm.preview_cfg(&name)?;
+    // 浏览档的存档 XML 快照路径与存在性（与激活档口径一致）。
+    let config_xml = cur_group.as_ref().map(|g| {
+        let path = crate::paths::group_xml_path(&pm.user_cfg_path(), &name, g);
+        ConfigXmlInfo { path: path.to_string_lossy().to_string(), exists: path.is_file() }
+    });
+    Ok(AppSnapshot {
+        profiles: pm.config.profile.keys().cloned().collect(),
+        current_profile: name, // 浏览口径：返回被浏览的存档名
+        groups: prf_cfg
+            .groups
+            .iter()
+            .map(|(dir, g)| GroupInfo { img_dir: dir.clone(), rtf: g.rtf.clone() })
+            .collect(),
+        current_group: cur_group.clone(),
+        current_rtf: cur_group
+            .as_ref()
+            .and_then(|g| prf_cfg.groups.get(g))
+            .map(|g| g.rtf.clone())
+            .unwrap_or_default(),
+        replacing: state.running.load(Ordering::SeqCst),
+        config_xml,
+        log_path: state.logger.path().to_string_lossy().to_string(),
+    })
+}
+
 // ---------------- 存档 XML 查看/定位（「当前任务」卡 config.xml 行） ----------------
 
 /// 当前组在存档资料中的 XML 快照路径（.user/<存档名>/<目录末段>.xml）；未选组报错。

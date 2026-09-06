@@ -98,9 +98,12 @@ impl ProfileManager {
             .or_else(|| cfg.groups.keys().next().cloned()) // 否则取第一个
     }
 
-    /// 存档配置文件路径（新布局）：<user_dir>/<存档名>/<存档名>.json——
-    /// 与该存档的 XML 快照同目录，存档资料集中在一个文件夹内，拷走即备份。
+    /// 存档配置文件路径：<user_dir>/<存档名>/<存档名>.json——与该存档的 XML 快照同目录。
+    /// 【例外】缺省档 'No Profile' 不套子目录，直接存 .user/No Profile.json。
     fn prf_path(user_dir: &Path, name: &str) -> PathBuf {
+        if name == "No Profile" {
+            return user_dir.join("No Profile.json");
+        }
         user_dir
             .join(crate::paths::sanitize(name))
             .join(format!("{}.json", crate::paths::sanitize(name)))
@@ -136,6 +139,13 @@ impl ProfileManager {
                         }
                         let cfg = PrfCfg::default();
                         json_store::save(&path, &cfg)?;
+                        // 兼容清理：此前版本为 No Profile 套过的子目录（现已回归根直存），空则移除。
+                        if name == "No Profile" {
+                            let legacy_dir = user_dir.join(crate::paths::sanitize(name));
+                            if legacy_dir.is_dir() {
+                                let _ = fs::remove_dir(&legacy_dir); // 非空保留，空则移除
+                            }
+                        }
                         return Ok(cfg);
                     }
                     Err(LoadError::Corrupt(e)) => return Err(e),
@@ -376,6 +386,9 @@ mod tests {
         assert!(dir.path().join(".user").join("cfg.json").is_file());
         // 默认配置：所有存档（含 No Profile）均为「未激活」。
         assert!(!pm.config.profile["No Profile"]);
+        // 缺省档 No Profile 的配置直接存 .user 根下，不套子目录。
+        assert!(dir.path().join(".user").join("No Profile.json").is_file());
+        assert!(!dir.path().join(".user").join("No Profile").exists());
     }
 
     #[test]

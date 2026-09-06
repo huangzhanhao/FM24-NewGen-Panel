@@ -29,6 +29,8 @@ export const api = {
   scanImages: () => invoke<ImageScanResult>('scan_images'),
   // 扫描RTF：解析当前 RTF 并填充名单预览缓存，结果写入后端日志。
   scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
+  // 打开模板规则目录（data/rules/）：编辑 template2/template3.json 后下次替换即生效。
+  openRulesDir: () => invoke<void>('open_rules_dir'),
   createMissingDirs: (imgDir: string, names: string[]) =>
     invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。

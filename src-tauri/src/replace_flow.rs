@@ -1,9 +1,11 @@
 //! 【新手导读】Replace Faces 流水线（自旧版 services/replace_service.py 移植）。
 //! 把「校验 RTF → 解析 → 映射 → 写 config.xml」四个阶段串成一条完整流程。
 //! 进度通过回调上报（值与 v1 对齐：20/40/80/90/100），取消经 AtomicBool 逐球员生效。
-use crate::assets::{ETH_CFG, NAT_TRANSLATION};
+use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack::PackLayout;
+use crate::pick_rules::IMPLEMENTED_TEMPLATES;
+use crate::rule_config::RuleConfig;
 use crate::rtf_parser::{PlayerRecord, RtfParser};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
@@ -19,6 +21,8 @@ pub struct ReplaceParams {
     pub save_backup: bool,      // 写入前是否备份
     /// 「扫描头像」命令缓存的包索引（按 img_dir 命中即复用，避免重复扫盘）；None = 现场新扫描。
     pub pre_scan: Option<crate::facepack::PackScan>,
+    /// 模板规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
+    pub rule_config: RuleConfig,
 }
 
 /// 流水线最终结果：成功 / 被取消 / 失败（带错误信息）。
@@ -63,23 +67,25 @@ pub fn run(params: &ReplaceParams, progress: &mut dyn FnMut(&str, u8), cancel: &
     // 阶段3：映射（40%）。优先用「扫描头像」的缓存索引建 mapper，否则现场扫描。
     progress("Mapping player to image...", 40);
     let mapper = match &params.pre_scan {
-        Some(scan) => FaceMapper::from_scan(&params.img_dir, scan.clone()),
-        None => FaceMapper::new(&params.img_dir),
+        Some(scan) => FaceMapper::from_scan(&params.img_dir, scan.clone(), &params.rule_config),
+        None => FaceMapper::new(&params.img_dir, &params.rule_config),
     };
     let mut mapper = match mapper {
         Ok(m) => m,
         Err(e) => return failed(&e),
     };
-    // 标准三（65 目录细分）的映射暂未实现：明确拦截，错误信息含"标准三"供前端提示。
-    if matches!(mapper.layout, PackLayout::Standard3 { .. }) {
-        return failed("标准三（65 目录细分）的替换映射暂未实现，当前仅支持标准一/标准二");
+    // 泛化拦截：模板规则清单外（尚未实现抽图规则）的模板明确报错（如未来的模板四/五/六）。
+    if let PackLayout::Standard { template, .. } = mapper.layout {
+        if !IMPLEMENTED_TEMPLATES.contains(&template) {
+            return failed(&format!("模板{template}的抽图规则暂未实现，请检查模板规则配置"));
+        }
     }
     let mapping = match mapper.generate_mapping(
         &rtf_data,
         params.mode,
         params.allow_duplicates,
         cancel,
-        &ETH_CFG,
+        &params.rule_config,
     ) {
         Some(m) => m,
         // 返回 None 可能是被取消，也可能是其他失败；根据 cancel 标志区分。
@@ -111,7 +117,7 @@ fn cancelled() -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
 
     fn setup() -> (tempfile::TempDir, String, String) {
@@ -140,6 +146,7 @@ mod tests {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
@@ -164,6 +171,7 @@ mod tests {
             img_dir: dir.path().to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
         let result = run(&params, &mut |_, _| {}, &cancel);
@@ -177,6 +185,7 @@ mod tests {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
         // 解析完成后立刻取消（在进度 40 时置位）
@@ -186,30 +195,52 @@ mod tests {
     }
 
     #[test]
-    fn standard3_pack_is_blocked() {
-        // 恰好 65 个细分目录 → replace_flow 必须明确失败并提示"标准三"。
+    fn standard3_pack_maps_via_mappings() {
+        // 模板三（FolderList 50 目录）+ Mappings 检索：配置 ESP 码 1 → Spain，映射进对应目录；
+        // 未配置国籍走 Fallback=random（递归全池随机），同样产出映射。
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("pack");
-        fs::create_dir_all(&img).unwrap();
-        for name in crate::facepack::FACEPACK_DIRS_65 {
+        let base = RuleConfig::builtin();
+        for name in &base.template3.folder_list {
             fs::create_dir_all(img.join(name)).unwrap();
         }
+        fs::write(img.join("Spain").join("sp1.png"), b"png").unwrap();
+        fs::write(img.join("Spain").join("sp2.png"), b"png").unwrap();
+        fs::write(img.join("France").join("fr1.png"), b"png").unwrap();
+        // Mappings：ESP 码 1 → Spain（演示 (国籍, 种族码) → 目录池 检索）。
+        let mut rule_config = base.clone();
+        rule_config.template3.mappings = BTreeMap::from([(
+            "ESP".to_string(),
+            BTreeMap::from([("1".to_string(), vec!["Spain".to_string()])]),
+        )]);
         let rtf = dir.path().join("list.rtf");
         fs::write(
             &rtf,
             "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
-             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n",
+             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
+             | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n",
         ).unwrap();
         let params = ReplaceParams {
             rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            rule_config,
         };
         let cancel = AtomicBool::new(false);
         let result = run(&params, &mut |_, _| {}, &cancel);
-        assert!(matches!(result.outcome, Outcome::Failed(ref m) if m.contains("标准三")));
-        assert!(!Path::new(&params.img_dir).join("config.xml").exists()); // 拦截在写入前
+        assert_eq!(result.outcome, Outcome::Finished);
+        assert_eq!(result.mapping.len(), 2);
+        // ESP 球员按 Mappings 精确命中 Spain 目录。
+        let esp = result.mapping.iter().find(|m| m.uid == "r-2000472008").unwrap();
+        assert_eq!(esp.ethnicity, "Spain");
+        assert!(["sp1", "sp2"].contains(&esp.image.as_str()));
+        // USA 未配置 → Fallback=random 仍映射（image 为包内真实文件）。
+        let usa = result.mapping.iter().find(|m| m.uid == "r-2000472009").unwrap();
+        assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), &usa.ethnicity, &usa.image).is_some());
+        // config.xml 解析回目录相对路径口径。
+        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        assert_eq!(xml["r-2000472008"].ethnicity, "Spain");
     }
 
     #[test]
@@ -235,6 +266,7 @@ mod tests {
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
         let result = run(&params, &mut |_, _| {}, &cancel);
@@ -279,6 +311,7 @@ mod tests {
             // 禁重复：池恰好 3 张、名单 3 人 → from 全集必等于递归池全集（确定性断言）。
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: false, save_backup: false,
             pre_scan: None,
+            rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
         let result = run(&params, &mut |_, _| {}, &cancel);

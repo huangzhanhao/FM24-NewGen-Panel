@@ -38,15 +38,11 @@
     if (!snap?.currentGroup) return;
     try {
       // 兜底校验：用户可能跳过配置卡的完整性检查，这里再查一次。
-      // 标准一（平铺）complete → 静默继续，不再被旧口径误建 14 个空目录。
+      // 模板归属由后端按规则 json 的 FolderList 判定；complete（含超集）→ 静默继续。
       const res = await api.checkIntegrity(snap.currentGroup);
-      if (res.standard === 3) {
-        await showError('标准三（65 目录）替换暂未实现，当前仅支持标准一/标准二');
-        return;
-      }
       if (res.status === 'fixable') {
         const ok = await ask(
-          `标准${res.standard === 3 ? '三(65)' : '二(14)'} 缺少 ${res.missing.length} 个目录，自动创建并继续？`,
+          `标准${res.standard} 缺少 ${res.missing.length} 个目录，自动创建并继续？`,
           { title: 'Missing Directories' },
         );
         if (!ok) return;
@@ -54,7 +50,7 @@
       } else if (res.status === 'unknown') {
         const ok = await ask('头像包结构无法识别，替换时将把包内所有图片（含子/孙目录）随机分配，仍要继续？', { title: 'Unrecognized Layout' });
         if (!ok) return;
-      } // complete（标准一/二齐全）→ 静默继续
+      } // complete（模板目录齐全，含多出未配置目录）→ 静默继续
       // 调后端启动替换（异步后台线程），随后刷新快照：replacing 变 true → 全局禁用。
       await api.startReplace({ mode, filterNewgan, allowDuplicates, saveBackup });
       await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效

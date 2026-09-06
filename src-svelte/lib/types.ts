@@ -22,11 +22,12 @@ export interface MappingEntry { uid: string; ethnicity: string; image: string; }
 export interface GroupInfo { imgDir: string; rtf: string; }
 
 /// 「检查完整性」结果（对应 Rust 的 IntegrityResult）。
-/// standard: 1=图片直铺 / 2=14 种族 / 3=65 细分；0=无法识别。
+/// standard: 命中的模板号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别。
 export interface IntegrityResult {
   standard: number;
   status: 'complete' | 'fixable' | 'unknown';
   missing: string[];
+  extra: string[];   // 包内多出、未在模板 FolderList 配置的目录（不参与抽图）
   found: number;
   expectedTotal: number;
 }

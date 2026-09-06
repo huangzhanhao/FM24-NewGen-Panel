@@ -12,11 +12,11 @@
 
   const snap = $derived(appStore.snapshot);
   const busy = $derived(!!snap?.replacing); // !! 把值强转为布尔（替换中时禁用按钮）
-  // 完整时按命中的标准给出中文标注（标准一/二/三）。
+  // 完整时按命中的模板号给出中文标注（目录总数来自模板 FolderList，用户可配置）。
   const completeLabel = $derived(
-    integrity?.standard === 1 ? '标准一：图片直铺，无种族子目录'
-    : integrity?.standard === 2 ? '标准二：14 个种族目录齐全'
-    : integrity?.standard === 3 ? '标准三：65 个种族目录齐全'
+    integrity?.standard === 1 ? '模板一：图片直铺，无种族子目录'
+    : integrity && integrity.standard >= 2
+      ? `模板${integrity.standard}：${integrity.expectedTotal} 个配置目录齐全`
     : '',
   );
 
@@ -39,10 +39,15 @@
     }
   }
 
-  /** 检查完整性：让后端识别头像包属于三套标准中的哪一套，并返回缺失目录。 */
+  /** 检查完整性：按规则 json 的 FolderList 识别头像包归属哪个模板（可能因用户改坏 json 报错）。 */
   async function checkIntegrity() {
     if (!snap?.currentGroup) return;
-    integrity = await api.checkIntegrity(snap.currentGroup);
+    try { integrity = await api.checkIntegrity(snap.currentGroup); } catch (e) { await showError(e); }
+  }
+
+  /** 打开模板规则目录（data/rules/）：编辑 template2/template3.json，保存后下次替换即生效。 */
+  async function openRulesDir() {
+    try { await api.openRulesDir(); } catch (e) { await showError(e); }
   }
 
   /** 扫描头像：建图片索引缓存（供替换复用），结果已在后端写入日志面板。 */
@@ -60,15 +65,14 @@
   /** 一键创建缺失目录（先弹确认框）；创建成功后重新检查，拿最新结论。 */
   async function fixMissing() {
     if (!snap?.currentGroup || !integrity || integrity.missing.length === 0) return;
-    const stdName = integrity.standard === 3 ? '标准三(65)' : '标准二(14)';
     const ok = await ask(
-      `${stdName} 缺少 ${integrity.missing.length} 个目录：\n${integrity.missing.join(', ')}\n\n自动创建？`,
+      `模板${integrity.standard} 缺少 ${integrity.missing.length} 个目录：\n${integrity.missing.join(', ')}\n\n自动创建？`,
       { title: 'Missing Directories' },
     );
     if (!ok) return; // 用户取消
     try {
       await api.createMissingDirs(snap.currentGroup, integrity.missing);
-      integrity = await api.checkIntegrity(snap.currentGroup); // 复校，得到权威结论
+      integrity = await api.checkIntegrity(snap.currentGroup); // 复检，得到权威结论
     } catch (e) { await showError(e); }
   }
 </script>
@@ -86,7 +90,7 @@
       <div class="path-actions">
         <!-- disabled 在忙碌或无选中组时置 true；title 根据情况给不同提示。 -->
         <button class="btn" onclick={checkIntegrity} disabled={busy || !snap.currentGroup}
-                title={snap.currentGroup ? '识别并校验三套标准：图片直铺 / 14 种族 / 65 细分' : '请先关联头像包目录'}>检查完整性</button>
+                title={snap.currentGroup ? '按规则 json 的 FolderList 识别头像包归属哪个模板' : '请先关联头像包目录'}>检查完整性</button>
         <button class="btn" onclick={scanImages} disabled={busy || !snap.currentGroup}
                 title="扫描头像包并缓存图片索引（结果写入日志）">扫描头像</button>
       </div>
@@ -103,18 +107,24 @@
                 title="解析 RTF 并填充名单预览（结果写入日志）">扫描RTF</button>
       </div>
     </div>
-    <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓；已检查且缺失→黄色警告 + 一键创建按钮。 -->
+    <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓（含多余目录提示）；已检查且缺失→黄色警告 + 一键创建按钮。 -->
     {#if !snap.currentGroup}
       <p class="muted small">先在左侧「头像包（组）」关联一个头像包目录，或点击已有组。</p>
     {:else if integrity !== null}
       {#if integrity.status === 'complete'}
-        <p class="ok-text small">✓ 头像包结构完整（{completeLabel}）</p>
+        <p class="ok-text small">✓ 头像包结构完整（{completeLabel}）{integrity.extra.length > 0 ? `；另含 ${integrity.extra.length} 个未配置目录（不参与抽图）` : ''}</p>
       {:else if integrity.status === 'fixable'}
-        <p class="warn-text small">标准{integrity.standard === 3 ? '三(65)' : '二(14)'}：缺少 {integrity.missing.length} 个目录（已有 {integrity.found}/{integrity.expectedTotal}）：{integrity.missing.join(', ')}</p>
+        <p class="warn-text small">模板{integrity.standard}：缺少 {integrity.missing.length} 个目录（已有 {integrity.found}/{integrity.expectedTotal}）：{integrity.missing.join(', ')}</p>
         <button class="btn primary" onclick={fixMissing} disabled={busy}>一键创建缺失目录</button>
       {:else}
-        <p class="warn-text small">⚠ 无法识别头像包结构：子目录既不属于标准二(14 种族)，也不属于标准三(65 细分)，请检查目录命名后重试。</p>
+        <p class="warn-text small">⚠ 无法识别头像包结构：子目录与任何模板的 FolderList 清单都不构成包含关系，替换时将把包内全部图片随机分配；也可在「规则配置」中调整模板目录清单。</p>
       {/if}
     {/if}
+    <!-- 模板规则入口：打开 data/rules/ 编辑 template2/template3.json（国籍→目录映射、FolderList 等）。 -->
+    <div class="row">
+      <button class="btn" onclick={openRulesDir} disabled={busy}
+              title="打开模板规则目录（template2/template3.json）：国籍→目录映射、FolderList 等，编辑保存后下次替换即生效">规则配置</button>
+      <span class="muted small">抽图规则来自规则 json（可编辑），保存后下次替换/检查完整性即生效</span>
+    </div>
   </div>
 {/if}

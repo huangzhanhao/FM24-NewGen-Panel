@@ -58,12 +58,12 @@ impl ProfileManager {
         fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
         let cfg_path = user_dir.join("cfg.json");
         // 加载全局配置：成功则用；缺失则写一份默认；损坏则报错（json_store 已自动备份 .corrupt）。
-        let config: GlobalCfg = match json_store::load(&cfg_path) {
+        let mut config: GlobalCfg = match json_store::load(&cfg_path) {
             Ok(c) => c,
             Err(LoadError::Missing) => {
-                // 首次运行：创建一个只含 'No Profile'（激活）的默认配置并落盘。
+                // 首次运行：创建一个只含 'No Profile'（未激活）的默认配置并落盘。
                 let c = GlobalCfg {
-                    profile: [("No Profile".to_string(), true)].into_iter().collect(),
+                    profile: [("No Profile".to_string(), false)].into_iter().collect(),
                 };
                 json_store::save(&cfg_path, &c)?;
                 c
@@ -72,11 +72,18 @@ impl ProfileManager {
         };
         // 【启动交互】程序启动固定从默认档（No Profile）开始，不自动恢复上次激活的存档，
         // 需要用户在下拉框手动选择。显式 name（内部调用/测试）仍可指定具体档。
-        // cfg.json 的激活位仅作记录（切换时更新），不影响启动选择。
+        // cfg.json 的激活位仅运行中记录当前档：启动时全部归零（所有存档「未激活」），
+        // 有残留激活位则落盘，保证后端状态与前端「未选择 Profile」的展示一致。
         let cur_prf = name
             .filter(|n| config.profile.contains_key(*n))
             .map(|n| n.to_string())
             .unwrap_or_else(|| "No Profile".to_string());
+        if config.profile.values().any(|v| *v) {
+            for v in config.profile.values_mut() {
+                *v = false;
+            }
+            json_store::save(&cfg_path, &config)?;
+        }
         // 加载当前存档的组配置，并选定当前组。
         let prf_cfg = Self::load_profile_cfg(&user_dir, &cur_prf)?;
         let cur_group = Self::pick_cur_group(&prf_cfg);
@@ -352,6 +359,8 @@ mod tests {
         let pm = ProfileManager::new(None, dir.path()).unwrap();
         assert_eq!(pm.cur_prf, "No Profile");
         assert!(dir.path().join(".user").join("cfg.json").is_file());
+        // 默认配置：所有存档（含 No Profile）均为「未激活」。
+        assert!(!pm.config.profile["No Profile"]);
     }
 
     #[test]
@@ -428,8 +437,9 @@ mod tests {
     #[test]
     fn restart_starts_at_no_profile() {
         // 启动交互：程序启动固定回到默认档（No Profile），不自动恢复上次激活的存档，
-        // 用户需在下拉框手动选择；存档本身仍保留（手动切换回来数据不丢）。
+        // 且持久化状态归零——cfg.json 中所有存档的激活位均为 false（全部「未激活」）。
         let dir = data_dir();
+        let user = dir.path().join(".user");
         {
             let mut pm = ProfileManager::new(None, dir.path()).unwrap();
             pm.create_profile("wer").unwrap();
@@ -437,7 +447,12 @@ mod tests {
         }
         let pm = ProfileManager::new(None, dir.path()).unwrap();
         assert_eq!(pm.cur_prf, "No Profile");
-        assert!(pm.config.profile.contains_key("wer"));
+        assert!(pm.config.profile.contains_key("wer")); // 存档保留
+        let cfg: GlobalCfg = match json_store::load(&user.join("cfg.json")) {
+            Ok(c) => c,
+            Err(_) => panic!("cfg.json 应可解析"),
+        };
+        assert!(cfg.profile.values().all(|v| !*v)); // 持久化激活位全部未激活
     }
 
     #[test]

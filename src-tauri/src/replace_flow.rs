@@ -207,12 +207,12 @@ mod tests {
         fs::write(img.join("Spain").join("sp1.png"), b"png").unwrap();
         fs::write(img.join("Spain").join("sp2.png"), b"png").unwrap();
         fs::write(img.join("France").join("fr1.png"), b"png").unwrap();
-        // Mappings：ESP 码 1 → Spain（演示 (国籍, 种族码) → 目录池 检索）。
+        // Mappings（Flat 形态：国籍→细分目录）：ESP → Spain；展开后码 1 命中。
         let mut rule_config = base.clone();
-        rule_config.template3.mappings = BTreeMap::from([(
-            "ESP".to_string(),
-            BTreeMap::from([("1".to_string(), vec!["Spain".to_string()])]),
-        )]);
+        rule_config.template3.mappings =
+            crate::rule_config::MappingsSpec::Flat(BTreeMap::from([
+                ("ESP".to_string(), "Spain".to_string()),
+            ]));
         let rtf = dir.path().join("list.rtf");
         fs::write(
             &rtf,

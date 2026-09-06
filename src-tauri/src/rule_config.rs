@@ -31,6 +31,44 @@ pub struct Template2Config {
     pub code_rules: BTreeMap<String, CodeRule>,      // "CodeRules"：FM 种族码修正
 }
 
+/// 模板三的 Mappings 两种形态（serde 自动识别，json 里写哪种都接受）：
+/// 【Flat】国籍三字码 → 细分目录（简洁，模板三内置默认的形态）；
+///         抽图检索时按 DefaultCodes 的码候选展开为三层检索表。
+/// 【Detailed】国籍 → 种族码 → 候选目录列表（完整形态，同国籍不同码可指向不同目录池）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MappingsSpec {
+    Detailed(BTreeMap<String, BTreeMap<String, Vec<String>>>),
+    Flat(BTreeMap<String, String>),
+}
+
+impl Default for MappingsSpec {
+    fn default() -> Self { MappingsSpec::Flat(BTreeMap::new()) }
+}
+
+impl MappingsSpec {
+    /// 展开为三层检索表：Flat 形态按 DefaultCodes 的码候选展开（无码候选的国籍跳过，走兜底）。
+    pub fn resolve(
+        &self,
+        default_codes: &BTreeMap<String, Vec<u8>>,
+    ) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+        match self {
+            MappingsSpec::Detailed(d) => d.clone(),
+            MappingsSpec::Flat(flat) => {
+                let mut out: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+                for (nat, dir) in flat {
+                    let Some(codes) = default_codes.get(nat) else { continue };
+                    let entry = out.entry(nat.clone()).or_default();
+                    for c in codes {
+                        entry.insert(c.to_string(), vec![dir.clone()]);
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
 /// 模板三（细分目录）规则配置。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -40,7 +78,7 @@ pub struct Template3Config {
     #[serde(default)]
     pub default_codes: BTreeMap<String, Vec<u8>>,    // "DefaultCodes"：国籍 → FM 种族码候选列表
     #[serde(default)]
-    pub mappings: BTreeMap<String, BTreeMap<String, Vec<String>>>, // "Mappings"：国籍 → 种族码 → 目录池
+    pub mappings: MappingsSpec,                      // "Mappings"：国籍 → 细分目录（Flat）或三层检索表（Detailed）
     #[serde(default)]
     pub fallback: Fallback,                          // "Fallback"：检索未命中时的兜底方式
 }
@@ -135,13 +173,24 @@ mod tests {
         for code in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] {
             assert!(cfg.template2.code_rules.contains_key(code), "缺码 {code}");
         }
-        // 模板三：50 目录清单 + DefaultCodes + Mappings 空 + Random 兜底。
+        // 模板三：50 目录清单 + DefaultCodes + Mappings（Flat：国籍→细分目录，240 条）+ Random 兜底。
         assert_eq!(cfg.template3.folder_list.len(), 50);
-        assert!(!cfg.template3.folder_list.contains(&"SouthConeSA".to_string())); // 50 清单不含 65 表的 SouthConeSA
+        assert!(!cfg.template3.folder_list.contains(&"SouthConeSA".to_string())); // 50 清单不含旧 65 表的 SouthConeSA
         assert!(cfg.template3.folder_list.contains(&"WestSlavic".to_string()));
         assert_eq!(cfg.template3.default_codes["ARG"], vec![1, 7]);
         assert_eq!(cfg.template3.default_codes["BRA"], vec![1, 3, 9]);
-        assert!(cfg.template3.mappings.is_empty());
+        match &cfg.template3.mappings {
+            MappingsSpec::Flat(m) => {
+                assert_eq!(m.len(), 240);
+                assert_eq!(m["CHN"], "China");
+                assert_eq!(m["ESP"], "Spain");
+                // 展开校验：DefaultCodes 的码候选 × 目录 → 三层检索表。
+                let resolved = cfg.template3.mappings.resolve(&cfg.template3.default_codes);
+                assert_eq!(resolved["ARG"]["1"], vec!["Mestizo".to_string()]);
+                assert_eq!(resolved["CHN"]["10"], vec!["China".to_string()]);
+            }
+            _ => panic!("内置 Mappings 应为 Flat 形态"),
+        }
         assert_eq!(cfg.template3.fallback, Fallback::Random);
     }
 

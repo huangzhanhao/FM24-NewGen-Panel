@@ -207,8 +207,10 @@ impl PickRule for EthnicRule {
 // ---------------- 模板三：Mappings[国籍][种族码] → 目录池 ----------------
 
 /// 模板三规则：按 json 的 Mappings 精确检索目录池；未命中按 Fallback 兜底。
+/// 检索表保持三层语义：Mappings[国籍三字码][球员 RTF 种族码] → 候选目录列表。
 pub struct Standard3Rule {
     pools: BTreeMap<String, BTreeSet<String>>,           // FolderList 过滤后的一级目录池
+    mappings: BTreeMap<String, BTreeMap<String, Vec<String>>>, // 展开后的三层检索表
     recursive_pools: BTreeMap<String, BTreeSet<String>>, // 兜底 random 用的递归全池
     fallback: Fallback,
 }
@@ -221,6 +223,7 @@ impl Standard3Rule {
     ) -> Self {
         Self {
             pools: filter_pools(faces_map, &cfg.folder_list),
+            mappings: cfg.mappings.resolve(&cfg.default_codes),
             recursive_pools: recursive_pools.clone(),
             fallback: cfg.fallback,
         }
@@ -241,15 +244,14 @@ impl PickRule for Standard3Rule {
         &mut self,
         player: &PlayerRecord,
         duplicates: bool,
-        config: &RuleConfig,
+        _config: &RuleConfig,
     ) -> Option<PickedImage> {
-        let t3 = &config.template3;
         // 精确检索：Mappings[国籍三字码][球员 RTF 种族码] → 候选目录列表。
-        if let Some(dirs) = t3.mappings
+        // 候选目录须在包内（FolderList 过滤后）且非空，随机取一个再从池中随机取图。
+        if let Some(dirs) = self.mappings
             .get(&player.primary_nat)
             .and_then(|m| m.get(&player.ethnicity_code))
         {
-            // 候选目录须在包内（FolderList 过滤后）且非空，随机取一个再从池中随机取图。
             let candidates: Vec<&String> = dirs.iter()
                 .filter(|d| self.pools.get(*d).map_or(false, |s| !s.is_empty()))
                 .collect();
@@ -297,6 +299,7 @@ impl PickRule for RecursiveRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rule_config::MappingsSpec;
     use crate::rtf_parser::PlayerRecord;
 
     fn player(uid: &str, nat: &str, code: &str) -> PlayerRecord {
@@ -422,16 +425,15 @@ mod tests {
             ("Spain".into(), sset(&["sp1", "sp2"])),
             ("Anglosphere".into(), sset(&["an1"])),
         ]);
-        // 自定义 Mappings：ESP 码 1 → Spain；AUS 码 0 → 缺失目录 NorthernSA（不在包内）。
+        // 自定义 Mappings（Flat 形态：国籍 → 细分目录）：ESP→Spain；AUS→NorthernSA（不在包内）。
         let mut t3 = cfg.template3.clone();
-        t3.mappings = BTreeMap::from([
-            ("ESP".to_string(), bmap_dirs(&[("1", &["Spain"])])),
-            ("AUS".to_string(), bmap_dirs(&[("0", &["NorthernSA"])])),
-            ("XXX".to_string(), bmap_dirs(&[("3", &["Spain"])])),
-        ]);
+        t3.mappings = MappingsSpec::Flat(BTreeMap::from([
+            ("ESP".to_string(), "Spain".to_string()),
+            ("AUS".to_string(), "NorthernSA".to_string()),
+        ]));
         let mut config = cfg.clone();
         config.template3 = t3.clone();
-        // 命中：ESP 码 1 → Spain 池随机。
+        // 命中：ESP（DefaultCodes [1] 展开后码 1 命中）→ Spain 池随机。
         let mut rule = Standard3Rule::new(&faces_map, &scan_recursive(&faces_map), &config.template3);
         let img = rule.pick(&player("r-1", "ESP", "1"), true, &config).unwrap();
         assert_eq!(img.dir, "Spain");
@@ -449,16 +451,22 @@ mod tests {
         config_skip.template3 = t3s;
         let mut rule = Standard3Rule::new(&faces_map, &scan_recursive(&faces_map), &config_skip.template3);
         assert!(rule.pick(&player("r-4", "ZZZ", "5"), true, &config_skip).is_none());
-        // XXX 码 3 配置的是 Spain（与码无关性验证）：命中 Spain 池。
-        let mut rule = Standard3Rule::new(&faces_map, &scan_recursive(&faces_map), &config.template3);
-        let img = rule.pick(&player("r-5", "XXX", "3"), true, &config).unwrap();
+        // Detailed 形态：同国籍不同码可指向不同目录池。
+        let mut t3d = cfg.template3.clone();
+        t3d.mappings = MappingsSpec::Detailed(BTreeMap::from([(
+            "ESP".to_string(),
+            BTreeMap::from([
+                ("1".to_string(), vec!["Spain".to_string()]),
+                ("3".to_string(), vec!["Anglosphere".to_string()]),
+            ]),
+        )]));
+        let mut config_d = cfg.clone();
+        config_d.template3 = t3d;
+        let mut rule = Standard3Rule::new(&faces_map, &scan_recursive(&faces_map), &config_d.template3);
+        let img = rule.pick(&player("r-5", "ESP", "1"), true, &config_d).unwrap();
         assert_eq!(img.dir, "Spain");
-    }
-
-    /// 测试辅助：把 (码 → 目录列表) 字面量转成 Mappings 内层结构。
-    fn bmap_dirs(v: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
-        v.iter().map(|(k, dirs)| (k.to_string(), dirs.iter().map(|s| s.to_string()).collect()))
-            .collect()
+        let img = rule.pick(&player("r-6", "ESP", "3"), true, &config_d).unwrap();
+        assert_eq!(img.dir, "Anglosphere");
     }
 
     /// 测试辅助：由一级目录图集构造递归池（根 + 各目录）。

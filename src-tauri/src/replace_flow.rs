@@ -111,6 +111,7 @@ fn cancelled() -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
 
     fn setup() -> (tempfile::TempDir, String, String) {
@@ -252,5 +253,48 @@ mod tests {
         let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
         assert_eq!(xml.len(), 3);
         assert!(xml.values().all(|e| e.ethnicity.is_empty()));
+    }
+
+    #[test]
+    fn unknown_nested_pack_end_to_end() {
+        // 无法识别布局（含孙目录）→ 递归全池全随机：
+        // from 统一写相对路径（根图 "r"、子目录 "weirdA/i"、孙目录 "weirdA/sub/j"），解析回相对目录。
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("pack");
+        fs::create_dir_all(img.join("weirdA/sub")).unwrap();
+        fs::write(img.join("weirdA/i.png"), b"png").unwrap();
+        fs::write(img.join("weirdA/sub/j.png"), b"png").unwrap();
+        fs::write(img.join("r.png"), b"png").unwrap();
+        let rtf = dir.path().join("list.rtf");
+        fs::write(
+            &rtf,
+            "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
+             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
+             | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n\
+             | 2000472010| FRA  |         | Pierre | 1  | 12 | 3 |\n",
+        ).unwrap();
+        let params = ReplaceParams {
+            rtf_path: rtf.to_string_lossy().to_string(),
+            img_dir: img.to_string_lossy().to_string(),
+            // 禁重复：池恰好 3 张、名单 3 人 → from 全集必等于递归池全集（确定性断言）。
+            mode: Mode::Generate, filter_newgen: true, allow_duplicates: false, save_backup: false,
+            pre_scan: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let result = run(&params, &mut |_, _| {}, &cancel);
+        assert_eq!(result.outcome, Outcome::Finished);
+        assert_eq!(result.mapping.len(), 3);
+        // 禁重复 + 池恰好 3 张 → from 全集 = 递归池全集（根/子/孙全部进入结果）。
+        let froms: BTreeSet<String> = result.mapping.iter()
+            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image)).collect();
+        assert_eq!(froms, BTreeSet::from([
+            "r".to_string(), "weirdA/i".to_string(), "weirdA/sub/j".to_string()
+        ]));
+        // config.xml 解析回 (相对目录, 词干)，且 resolve 能按同口径命中真实文件。
+        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        assert_eq!(xml.len(), 3);
+        for e in xml.values() {
+            assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), &e.ethnicity, &e.image).is_some());
+        }
     }
 }

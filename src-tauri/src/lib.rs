@@ -15,6 +15,7 @@ mod facepack;        // 头像包标准识别的唯一来源（常量 + 布局�
 mod json_store;      // JSON 配置的原子读写
 mod logger;          // 日志系统（环形缓冲 + 滚动文件 + 事件推送）
 mod paths;           // 路径规范化工具
+mod pick_rules;      // 抽图模板规则（按头像包模板分发的具体选图逻辑）
 mod profile_manager; // 存档（Profile）与头像包（组）管理
 mod replace_flow;    // 「Replace Faces」整条流水线
 mod rtf_parser;      // 解析 FM 导出的 RTF 球员名单

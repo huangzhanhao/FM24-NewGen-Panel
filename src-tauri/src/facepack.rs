@@ -74,8 +74,11 @@ pub fn classify(subdirs: &BTreeSet<String>, has_root_images: bool) -> PackLayout
 /// 一次目录扫描的产物：子目录图片索引 + 根图片索引 + 布局。
 #[derive(Debug, Clone)]
 pub struct PackScan {
-    pub faces_map: BTreeMap<String, BTreeSet<String>>, // 子目录名 → 图片名（去扩展名）
+    pub faces_map: BTreeMap<String, BTreeSet<String>>, // 一级子目录名 → 图片名（去扩展名，标准二口径）
     pub root_images: BTreeSet<String>,                 // 根目录图片名（去扩展名）
+    /// 递归全量池：相对目录路径（"" = 根，多级用 "/" 分隔）→ 该目录下全部图片词干。
+    /// 供 Unknown 模板的"全随机"规则使用；垃圾目录（is_junk_dir）整棵子树不收录。
+    pub recursive_pools: BTreeMap<String, BTreeSet<String>>,
     pub layout: PackLayout,
 }
 
@@ -88,16 +91,40 @@ fn is_image_ext(name: &str) -> bool {
 /// 仅用于过滤 classify 的输入；faces_map 仍原样收录，标准二 generic 路径行为不受影响。
 pub fn is_junk_dir(name: &str) -> bool { name.starts_with('.') || name == "__MACOSX" }
 
-/// 重扫描：建 faces_map + root_images，并调用 classify 得出 layout。
+/// 递归收集 dir 及其全部子/孙目录的图片（词干用 file_stem，跳过 `.` 开头文件）。
+/// 键为相对头像包根的目录路径（"" = 根，多级用 "/" 分隔）；垃圾目录整棵子树跳过。
+fn walk_recursive(dir: &Path, rel: String, pools: &mut BTreeMap<String, BTreeSet<String>>) {
+    let mut imgs = BTreeSet::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let fname = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if is_junk_dir(&fname) { continue; } // 垃圾目录整棵不入池
+                let child = if rel.is_empty() { fname } else { format!("{rel}/{fname}") };
+                walk_recursive(&p, child, pools);
+            } else if is_image_ext(&fname) && !fname.starts_with('.') {
+                let stem = Path::new(&fname).file_stem()
+                    .map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                if !stem.is_empty() { imgs.insert(stem); }
+            }
+        }
+    }
+    pools.insert(rel, imgs);
+}
+
+/// 重扫描：建 faces_map + root_images + 递归全量池，并调用 classify 得出 layout。
 pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
     let root = Path::new(img_dir);
     let mut faces_map = BTreeMap::new();
     let mut root_images = BTreeSet::new();
+    let mut recursive_pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for entry in std::fs::read_dir(root).map_err(|e| format!("读取头像包目录失败: {e}"))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let fname = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
+            // faces_map：一级子目录 → 其直接图片（保持旧 FaceMapper::new 口径，标准二专用）。
             let mut imgs = BTreeSet::new();
             if let Ok(files) = std::fs::read_dir(&path) {
                 for f in files.flatten() {
@@ -108,7 +135,11 @@ pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
                     }
                 }
             }
-            faces_map.insert(fname, imgs);
+            faces_map.insert(fname.clone(), imgs);
+            // 递归全量池：垃圾目录整棵跳过。
+            if !is_junk_dir(&fname) {
+                walk_recursive(&path, fname, &mut recursive_pools);
+            }
         } else if is_image_ext(&fname) && !fname.starts_with('.') {
             // 根图词干用 file_stem（与 parse_image_path_in_pack 同规则，"a.1.png"→"a.1"）；
             // 跳过 . 开头文件（macOS AppleDouble 的 ._x.png 会以 "._x" 入池、污染 resolve）。
@@ -117,11 +148,13 @@ pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
             if !stem.is_empty() { root_images.insert(stem); }
         }
     }
+    // 根目录图片也归入递归池（键 = 空串），Unknown/全随机规则据此连根图一起抽。
+    recursive_pools.entry(String::new()).or_default().extend(root_images.iter().cloned());
     // classify 输入剔除垃圾目录（如 __MACOSX），否则 Mac 打包的平铺包会被判 Unknown。
     let classify_input: BTreeSet<String> =
         faces_map.keys().filter(|n| !is_junk_dir(n)).cloned().collect();
     let layout = classify(&classify_input, !root_images.is_empty());
-    Ok(PackScan { faces_map, root_images, layout })
+    Ok(PackScan { faces_map, root_images, recursive_pools, layout })
 }
 
 #[cfg(test)]
@@ -176,6 +209,10 @@ mod tests {
         assert!(scan.faces_map.contains_key("__MACOSX"));
         assert!(scan.faces_map.contains_key(".git"));
         assert!(scan.faces_map["__MACOSX"].is_empty());
+        // 递归池：根图在 "" 键下；垃圾目录整棵不入池。
+        assert_eq!(scan.recursive_pools.get(""), Some(&scan.root_images));
+        assert!(!scan.recursive_pools.contains_key("__MACOSX"));
+        assert!(!scan.recursive_pools.contains_key(".git"));
     }
 
     #[test]
@@ -192,5 +229,30 @@ mod tests {
         assert_eq!(scan.faces_map.len(), 14);
         assert!(scan.faces_map.values().all(|s| s.len() == 2)); // e1 + e2（split 词干）
         assert!(scan.root_images.is_empty());
+        // 递归池 = 根池（空集，键恒存在）+ 14 个种族目录。
+        assert_eq!(scan.recursive_pools.len(), 15);
+        assert!(scan.recursive_pools.get("").unwrap().is_empty());
+        assert!(scan.recursive_pools.values().skip(1).all(|s| s.len() == 2));
+    }
+
+    #[test]
+    fn scan_pack_recursive_deep_nesting() {
+        // 子/孙目录全部图片进入递归池，键为 "/" 分隔的相对路径；垃圾子树跳过。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("weirdA/sub")).unwrap();
+        std::fs::create_dir_all(p.join("weirdA/__MACOSX")).unwrap();
+        std::fs::write(p.join("weirdA/i.png"), b"png").unwrap();
+        std::fs::write(p.join("weirdA/sub/j.1.png"), b"png").unwrap();
+        std::fs::write(p.join("weirdA/__MACOSX/x.png"), b"png").unwrap();
+        let scan = scan_pack(p.to_str().unwrap()).unwrap();
+        assert_eq!(scan.layout, PackLayout::Unknown); // 非法目录名 → Unknown
+        let pools = &scan.recursive_pools;
+        assert_eq!(pools.get("").map(|s| s.len()), Some(0)); // 根无图 → 空集（键存在）
+        assert_eq!(pools.get("weirdA").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+                   Some(vec!["i".to_string()]));
+        assert_eq!(pools.get("weirdA/sub").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+                   Some(vec!["j.1".to_string()]));
+        assert!(!pools.contains_key("weirdA/__MACOSX")); // 垃圾目录整棵跳过
     }
 }

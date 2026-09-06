@@ -324,11 +324,11 @@ fn layout_label(standard: u8) -> &'static str {
 /// 「扫描头像」核心（纯函数，便于单测）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
 fn scan_images_core(img_dir: &str) -> Result<(usize, u8, PackScan), String> {
     let scan = facepack::scan_pack(img_dir)?;
-    // 平铺包图片数 = 根图数；其余 = 各子目录图数之和。
+    // 平铺包图片数 = 根图数；其余（含 Unknown 的子/孙目录）= 递归全量池图片总数。
     let total = if scan.layout.is_flat() {
         scan.root_images.len()
     } else {
-        scan.faces_map.values().map(|s| s.len()).sum()
+        scan.recursive_pools.values().map(|s| s.len()).sum()
     };
     Ok((total, scan.layout.standard(), scan))
 }

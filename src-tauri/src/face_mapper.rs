@@ -2,9 +2,9 @@
 //! 这是整个应用的「大脑」：根据每个球员的国籍 + 种族码，算出该用头像包里哪个种族目录，
 //! 再从目录里选一张图片，最终得到一条「球员 UID → 图片」的映射。
 use crate::facepack::{scan_pack, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
+use crate::pick_rules::{self, PickRule};               // 抽图模板规则（按模板分发的具体选图逻辑）
 use crate::rtf_parser::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
-use rand::Rng;                          // 随机数库（从图片池里随机选一张）
 use std::collections::{BTreeMap, BTreeSet, HashMap}; // BTree* = 有序集合，保证行为可复现
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering}; // 原子布尔：跨线程读取「是否已取消」
@@ -30,16 +30,13 @@ impl Mode {
     }
 }
 
-/// 头像映射器。持有一个头像包目录的「子目录 → 图片名集合」索引。
+/// 头像映射器：持有扫描判定的布局与对应模板规则，负责按模式编排并组装映射条目。
 pub struct FaceMapper {
     pub img_dir: String,
-    /// 目录名 → 图片名集合（无扩展名）；BTreeMap/BTreeSet 保证行为可复现。
-    /// 【为何用有序集合】随机选图时需要按下标取元素，且有序保证同样输入产生同样结果（便于测试）。
-    pub faces_map: BTreeMap<String, BTreeSet<String>>,
-    /// 布局判定结果（facepack::classify），平铺分支据此早返回。
+    /// 布局判定结果（facepack::classify）；replace_flow 据此拦截模板三。
     pub layout: PackLayout,
-    /// 标准一平铺池：包根全部图片名（去扩展名）。仅 layout == Flat 时使用。
-    pub flat_pool: BTreeSet<String>,
+    /// 抽图模板规则（模板一平铺 / 模板二种族匹配 / Unknown 递归全池），池的所有权在规则内。
+    rule: Box<dyn PickRule>,
 }
 
 impl FaceMapper {
@@ -49,12 +46,12 @@ impl FaceMapper {
     }
 
     /// 用现成的扫描结果构造（「扫描头像」命令的缓存复用入口）。
+    /// 按布局分发到对应模板规则（pick_rules::for_layout），本结构只做编排。
     pub fn from_scan(img_dir: &str, scan: PackScan) -> Result<Self, String> {
         Ok(Self {
             img_dir: img_dir.to_string(),
-            faces_map: scan.faces_map,
-            flat_pool: scan.root_images,
             layout: scan.layout,
+            rule: pick_rules::for_layout(scan.layout, &scan),
         })
     }
 
@@ -80,17 +77,13 @@ impl FaceMapper {
             }
             Mode::Generate => HashMap::new(),
         };
-        // Preserve + 禁重复：从各池剔除 XML 已用图（避免新球员抽到已被占用的图）。
+        // Preserve + 禁重复：把现有 config.xml 已占用的图片从池中剔除（避免新球员抽到已被占用的图）。
+        // used 用 from 全路径做键（种族目录非空 → "种族/图名"，平铺 → "图名"），由规则内部精确比对。
         if !duplicates && mode == Mode::Preserve {
-            let used: BTreeSet<String> = xml_data.values().map(|e| e.image.clone()).collect();
-            for pool in self.faces_map.values_mut() {
-                // difference 取「在池中但不在 used 中」的部分，即剔除已用图。
-                *pool = pool.difference(&used).cloned().collect();
-            }
-            // 平铺池同理（标准一：旧 config.xml 的图名同样可能占用根池）。
-            if self.layout.is_flat() {
-                self.flat_pool = self.flat_pool.difference(&used).cloned().collect();
-            }
+            let used: BTreeSet<String> = xml_data.values()
+                .map(|e| xml_parser::record_from(&e.ethnicity, &e.image))
+                .collect();
+            self.rule.exclude_used(&used);
         }
         // 按模式分发到具体处理函数。
         match mode {
@@ -168,127 +161,18 @@ impl FaceMapper {
         Some(mapping)
     }
 
-    /// 单球员映射：双国籍查表 → 种族码修正 → 校验在包内 → 选图。
-    /// 【流程】这是把一个球员变成一条映射的核心步骤，返回 None 表示这个球员无法映射（跳过）。
+    /// 单球员映射：按扫描出的模板规则抽图（规则选择见 pick_rules::for_layout）。
+    /// 返回 None 表示该球员无法映射（跳过）。
     fn build_player_mapping(
         &mut self,
         p: &PlayerRecord,
         duplicates: bool,
         eth_cfg: &BTreeMap<String, String>,
     ) -> Option<MappingEntry> {
-        // 标准一平铺：忽略 RTF 国籍/种族码，从单一根池完全随机抽图。
-        // （早返回放在最前，Standard2/Empty/Unknown 一律走下方原有 faces_map 通用路径。）
-        if self.layout.is_flat() {
-            let image = self.pick_from_flat(duplicates)?;
-            return Some(MappingEntry { uid: p.uid.clone(), ethnicity: String::new(), image });
-        }
-        // e2 = 第二国籍对应的种族目录（没有第二国籍则为 None）。
-        let e2 = if p.sec_nat.is_empty() {
-            None
-        } else {
-            eth_cfg.get(&p.sec_nat).map(|s| s.as_str())
-        };
-        // e1 = 主国籍对应的种族目录；? 表示主国籍查不到就放弃这个球员。
-        let e1 = eth_cfg.get(&p.primary_nat)?;
-        // 根据种族码 + 两个候选种族目录，修正出最终种族目录。
-        let ethnicity = Self::correct_ethnic(&p.ethnicity_code, e1, e2);
-        if !self.faces_map.contains_key(&ethnicity) {
-            return None; // 头像包缺该种族目录（前置校验已保证存在）
-        }
-        // 确定从哪些目录（图片池）里选图，然后选一张。
-        let pools = self.image_pool_dirs(&ethnicity, &p.primary_nat);
-        let image = self.pick_image_from_pools(&pools, duplicates)?;
-        Some(MappingEntry { uid: p.uid.clone(), ethnicity, image })
-    }
-
-    /// 池优先级：国籍同名目录 > 种族目录 > 两者都不在包内时用全部目录。
-    /// 【含义】有些头像包会按国籍建目录（如 ESP），优先用；否则用种族目录；都没有则退而用全部。
-    fn image_pool_dirs(&self, ethnicity: &str, nationality: &str) -> Vec<String> {
-        let mut pools = Vec::new();
-        // nat_in / eth_in 判断对应目录是否存在且非空。
-        let nat_in = self.faces_map.get(nationality).map(|s| !s.is_empty()).unwrap_or(false);
-        let eth_in = self.faces_map.get(ethnicity).map(|s| !s.is_empty()).unwrap_or(false);
-        if nat_in {
-            pools.push(nationality.to_string()); // 国籍目录优先
-        }
-        if eth_in {
-            pools.push(ethnicity.to_string());   // 其次种族目录
-        }
-        // 若国籍和种族目录都不在包内，则用包里所有目录兑底（总比什么都不选强）。
-        if !self.faces_map.contains_key(nationality) && !self.faces_map.contains_key(ethnicity) {
-            pools.extend(self.faces_map.keys().cloned());
-        }
-        pools
-    }
-
-    /// 标准一平铺选图：从根池随机取一张；禁重复时移除所选（与 pick_image_from_pools 同款可复现取法）。
-    fn pick_from_flat(&mut self, duplicates: bool) -> Option<String> {
-        if self.flat_pool.is_empty() {
-            return None;
-        }
-        let idx = rand::rng().random_range(0..self.flat_pool.len());
-        let choice = self.flat_pool.iter().nth(idx).cloned()?;
-        if !duplicates {
-            self.flat_pool.remove(&choice); // 禁重复：选过的图不再出现
-        }
-        Some(choice)
-    }
-
-    /// 依序取第一个非空池随机选图；禁重复时从池中移除（对等旧版 pick_image_from_pools）。
-    /// &mut self：因为禁重复时需要修改池（移除已选图）。
-    pub fn pick_image_from_pools(&mut self, pools: &[String], duplicates: bool) -> Option<String> {
-        for dir in pools {
-            // get_mut 拿到可修改的池；let ... else 是「拿不到就 continue」的简洁写法。
-            let Some(pool) = self.faces_map.get_mut(dir) else { continue };
-            if pool.is_empty() {
-                continue; // 空池跳过，试下一个
-            }
-            // 生成随机下标，从有序集合里取第 idx 个元素（BTreeSet 不支持直接下标，用 nth）。
-            let mut rng = rand::rng();
-            let idx = rng.random_range(0..pool.len());
-            if let Some(choice) = pool.iter().nth(idx).cloned() {
-                if !duplicates {
-                    pool.remove(&choice); // 禁重复：选过的图从池里删掉，下次不会再选到
-                }
-                return Some(choice);
-            }
-        }
-        None // 所有池都空，无图可选
-    }
-
-    /// FM 种族码（0-10）在两个候选种族间修正归类（对等旧版 correct_ethnic，逐分支一致）。
-    /// 【为何需要】FM 的种族码比较粗糙，需要结合国籍把它修正到更准确的种族目录。
-    /// e1=主国籍种族，e2=第二国籍种族（可选）。hit 是个小闭包，判断某个种族名是否命中两个候选之一。
-    pub fn correct_ethnic(code: &str, e1: &str, e2: Option<&str>) -> String {
-        let hit = |name: &str| e1 == name || e2 == Some(name);
-        match code {
-            "0" => {
-                // 优先 Scandinavian，其次 Caucasian，都不命中则兑底 Central European。
-                if hit("Scandinavian") { "Scandinavian".into() }
-                else if hit("Caucasian") { "Caucasian".into() }
-                else { "Central European".into() }
-            }
-            "1" => ["Caucasian", "EECA", "Italmed", "SAMed", "SpanMed", "YugoGreek", "South American"]
-                .iter()
-                .find(|n| hit(n))            // 找第一个命中的候选
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "Central European".into()), // 都不命中则兑底
-            "2" => if hit("MESA") { "MESA".into() } else { "MENA".into() },
-            "3" | "9" => if hit("South American") { "South American".into() } else { "African".into() },
-            "6" => if hit("SAMed") { "SAMed".into() } else { "African".into() },
-            "8" => if hit("Seasian") { "Seasian".into() } else { "African".into() },
-            "4" => "MESA".into(),            // 固定值，不看国籍
-            "5" => "Seasian".into(),
-            "7" => "South American".into(),
-            "10" => {
-                // 链式兑底：MESA → Seasian → South American → Asian。
-                if hit("MESA") { "MESA".into() }
-                else if hit("Seasian") { "Seasian".into() }
-                else if hit("South American") { "South American".into() }
-                else { "Asian".into() }
-            }
-            _ => e1.to_string(), // 解析层已保证 0-10，防御性兑底
-        }
+        // PickedImage.dir = 图片相对头像包根的目录（"" = 根，可多级 "a/b"），原样写入 ethnicity 字段；
+        // config.xml 的 from 由 write_xml 经 record_from 拼成统一相对路径。
+        let img = self.rule.pick(p, duplicates, eth_cfg)?;
+        Some(MappingEntry { uid: p.uid.clone(), ethnicity: img.dir, image: img.stem })
     }
 }
 
@@ -319,34 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn correct_ethnic_all_codes() {
-        // 0：优先 Scandinavian > Caucasian > 兜底
-        assert_eq!(FaceMapper::correct_ethnic("0", "African", Some("Scandinavian")), "Scandinavian");
-        assert_eq!(FaceMapper::correct_ethnic("0", "African", Some("Caucasian")), "Caucasian");
-        assert_eq!(FaceMapper::correct_ethnic("0", "African", None), "Central European");
-        // 1：命中列表则用，否则兜底
-        assert_eq!(FaceMapper::correct_ethnic("1", "EECA", None), "EECA");
-        assert_eq!(FaceMapper::correct_ethnic("1", "MENA", None), "Central European");
-        // 2：MESA 命中否则 MENA
-        assert_eq!(FaceMapper::correct_ethnic("2", "MESA", None), "MESA");
-        assert_eq!(FaceMapper::correct_ethnic("2", "MENA", None), "MENA");
-        // 3/6/8/9：仅对应码命中，否则 African
-        assert_eq!(FaceMapper::correct_ethnic("6", "SAMed", None), "SAMed");
-        assert_eq!(FaceMapper::correct_ethnic("8", "Seasian", None), "Seasian");
-        assert_eq!(FaceMapper::correct_ethnic("3", "South American", None), "South American");
-        assert_eq!(FaceMapper::correct_ethnic("9", "South American", None), "South American");
-        assert_eq!(FaceMapper::correct_ethnic("3", "SAMed", None), "African");
-        // 固定值
-        assert_eq!(FaceMapper::correct_ethnic("4", "African", None), "MESA");
-        assert_eq!(FaceMapper::correct_ethnic("5", "African", None), "Seasian");
-        assert_eq!(FaceMapper::correct_ethnic("7", "African", None), "South American");
-        // 10：链式兜底到 Asian
-        assert_eq!(FaceMapper::correct_ethnic("10", "MESA", None), "MESA");
-        assert_eq!(FaceMapper::correct_ethnic("10", "African", Some("Seasian")), "Seasian");
-        assert_eq!(FaceMapper::correct_ethnic("10", "Asian", None), "Asian");
-    }
-
-    #[test]
     fn generate_mode_maps_into_ethnic_dir() {
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
@@ -362,9 +218,9 @@ mod tests {
         assert_eq!(mapping.len(), 2);
         assert_eq!(mapping[0].ethnicity, "SpanMed");
         assert_eq!(mapping[1].ethnicity, "Caucasian");
+        // 每条映射的图都能在对应种族目录下定位到真实文件。
         for m in &mapping {
-            let pool = &mapper.faces_map[&m.ethnicity];
-            assert!(pool.contains(&m.image));
+            assert!(xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some());
         }
     }
 
@@ -452,7 +308,7 @@ mod tests {
         assert_eq!(mapping[0].ethnicity, "SpanMed"); // 按 correct_ethnic 进种族目录
         assert_eq!(mapping[1].ethnicity, "Caucasian");
         for m in &mapping {
-            assert!(mapper.faces_map[&m.ethnicity].contains(&m.image));
+            assert!(xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some());
         }
     }
 
@@ -471,7 +327,6 @@ mod tests {
         assert_eq!(mapping.len(), 2);
         for m in &mapping {
             assert_eq!(m.ethnicity, "");
-            assert!(mapper.flat_pool.contains(&m.image)); // 允许复用时池不变
             // 每条映射的图名都能在包根命中真实文件（file_stem 贯通写入/解析/定位）。
             assert!(xml_parser::resolve_image_file(Path::new(&img), "", &m.image).is_some());
         }
@@ -511,5 +366,39 @@ mod tests {
         let e = mapping.iter().find(|m| m.uid == "r-3001").unwrap();
         assert_eq!((e.ethnicity.as_str(), e.image.as_str()), ("", "face0"));
         assert!(mapping.iter().any(|m| m.uid == "r-3002" && m.ethnicity.is_empty()));
+    }
+
+    #[test]
+    fn unknown_layout_uses_recursive_pool() {
+        // 无法识别的包（含孙目录）→ 递归全池全随机：子/孙目录图片都会被抽到，
+        // 映射的 ethnicity 为相对目录路径（可多级），from/resolve 全程用相对路径口径。
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().to_string_lossy().to_string();
+        std::fs::create_dir_all(dir.path().join("weirdA/sub")).unwrap();
+        std::fs::write(dir.path().join("weirdA/i.png"), b"png").unwrap();
+        std::fs::write(dir.path().join("weirdA/sub/j.png"), b"png").unwrap();
+        std::fs::write(dir.path().join("root.png"), b"png").unwrap();
+        let mut mapper = FaceMapper::new(&img).unwrap();
+        assert_eq!(mapper.layout, PackLayout::Unknown);
+        // 禁重复 + 池恰好 3 张、球员 3 名 → 必然抽完全部图片（确定性断言，不依赖随机）。
+        let data: Vec<PlayerRecord> =
+            (0..3).map(|i| player(&format!("r-50{i}"), "ZZZ", "1")).collect();
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &ETH_CFG)
+            .unwrap();
+        assert_eq!(mapping.len(), 3);
+        let froms: BTreeSet<String> = mapping
+            .iter()
+            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image))
+            .collect();
+        // 根、子、孙三个层级的图片全部进入抽图结果。
+        assert_eq!(froms, BTreeSet::from([
+            "root".to_string(), "weirdA/i".to_string(), "weirdA/sub/j".to_string()
+        ]));
+        // 相对路径口径：resolve 用同一 ethnicity 字符串即可命中真实文件。
+        for m in &mapping {
+            assert!(xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some());
+        }
     }
 }

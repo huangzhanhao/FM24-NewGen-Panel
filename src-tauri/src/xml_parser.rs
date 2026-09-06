@@ -40,15 +40,19 @@ pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
     let mut out = HashMap::new();
     // captures_iter 遍历所有匹配项；cap[1]/cap[2] 分别是第 1/2 个捕获组。
     for cap in RECORD_RE.captures_iter(&text) {
-        // from 的内容："SpanMed/img1"（标准二）或 "img1"（标准一平铺，无目录前缀）。
-        // 按 / 切分：两段及以上取种族/图名；只有一段则种族为空串（平铺）。
+        // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
+        // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
         let parts: Vec<&str> = cap[1].split('/').collect();
-        let (eth, img) = if parts.len() >= 2 { (parts[0], parts[1]) } else { ("", parts[0]) };
+        let (eth, img) = if parts.len() >= 2 {
+            (parts[..parts.len() - 1].join("/"), parts[parts.len() - 1])
+        } else {
+            (String::new(), parts[0])
+        };
         out.insert(
             cap[2].to_string(), // 以 UID 为键
             MappingEntry {
                 uid: cap[2].to_string(),
-                ethnicity: eth.to_string(),
+                ethnicity: eth,
                 image: img.to_string(),
             },
         );
@@ -144,7 +148,8 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 从用户选中的图片绝对路径反推 (种族目录, 图名)。平铺包（图片在 img_dir 根）→ 种族为空串。
+/// 从用户选中的图片绝对路径反推 (相对目录路径, 图名)。平铺包（图片在 img_dir 根）→ 目录为空串；
+/// 子/孙目录图片 → 相对 img_dir 的目录路径，多级用 "/" 分隔（如 "MENA/sub"）。
 /// 词干用 file_stem，与 facepack::scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
 pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(String, String)> {
     let p = Path::new(image_path);
@@ -154,24 +159,37 @@ pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(Stri
     if image.starts_with('.') { return None; }   // 拒收 ._x.png 等隐藏名，与池侧口径一致
     let parent = p.parent()?;
     let root = Path::new(img_dir);
-    // 优先 canonicalize（Windows 大小写/分隔符不敏感的权威比较）；失败（文件已删等）退回原样比较。
-    let same = parent.canonicalize().ok() == root.canonicalize().ok() || parent == root;
-    if same {
-        Some((String::new(), image))
+    // 优先 canonicalize（Windows 大小写/分隔符不敏感的权威比较），取父目录相对包根的路径。
+    let rel_dir = if let (Ok(p_abs), Ok(r_abs)) = (parent.canonicalize(), root.canonicalize()) {
+        match p_abs.strip_prefix(&r_abs) {
+            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            // 不同盘等无法取相对路径：退化为最后一级目录名（与旧版行为一致）。
+            Err(_) => match parent.file_name() {
+                Some(n) => n.to_string_lossy().to_string(),
+                None => return None,
+            },
+        }
+    } else if parent == root {
+        String::new()
     } else {
-        Some((parent.file_name()?.to_string_lossy().to_string(), image))
-    }
+        match parent.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => return None, // 裸相对文件名（无父目录）→ 不合法
+        }
+    };
+    Some((rel_dir, image))
 }
 
 /// 探测实际图片文件（.png/.jpg/.jpeg，对等旧版 PlayerService.resolve_image_file）。
 /// 【为何】config.xml 里只存图片名不存扩展名，需要按常见扩展名依次试找出真实文件。
-/// ethnicity 为空串表示标准一平铺包：图片直接在 img_dir 根下。
+/// ethnicity 为映射里的相对目录路径（"" = 包根，多级 "a/b" = 子/孙目录）。
 pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Option<String> {
-    let base = if ethnicity.is_empty() {
-        img_dir.to_path_buf()
-    } else {
-        img_dir.join(ethnicity)
-    };
+    let mut base = img_dir.to_path_buf();
+    if !ethnicity.is_empty() {
+        for seg in ethnicity.split('/') { // 相对路径逐级拼接（"/" 统一分隔符）
+            base = base.join(seg);
+        }
+    }
     for ext in ["png", "jpg", "jpeg"] {
         let p = base.join(format!("{image}.{ext}"));
         if p.is_file() {
@@ -298,6 +316,18 @@ mod tests {
         assert_eq!(
             parse_image_path_in_pack(&root_s, &eth.join("m9.png").to_string_lossy()),
             Some(("MENA".into(), "m9".into()))
+        );
+        // 孙目录：相对路径多级（"/" 分隔），resolve 同口径命中
+        let deep = dir.path().join("MENA").join("sub");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("d2.png"), b"png").unwrap();
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &deep.join("d2.png").to_string_lossy()),
+            Some(("MENA/sub".into(), "d2".into()))
+        );
+        assert_eq!(
+            resolve_image_file(dir.path(), "MENA/sub", "d2"),
+            Some(deep.join("d2.png").to_string_lossy().to_string())
         );
         // 平铺：父 == 根 → 种族为空串
         std::fs::write(dir.path().join("r1.png"), b"png").unwrap();

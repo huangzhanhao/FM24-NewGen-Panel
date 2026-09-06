@@ -52,7 +52,7 @@
         if (!ok) return;
         await api.createMissingDirs(snap.currentGroup, res.missing);
       } else if (res.status === 'unknown') {
-        const ok = await ask('头像包结构无法识别，仍要继续替换？', { title: 'Unrecognized Layout' });
+        const ok = await ask('头像包结构无法识别，替换时将把包内所有图片（含子/孙目录）随机分配，仍要继续？', { title: 'Unrecognized Layout' });
         if (!ok) return;
       } // complete（标准一/二齐全）→ 静默继续
       // 调后端启动替换（异步后台线程），随后刷新快照：replacing 变 true → 全局禁用。

@@ -40,18 +40,33 @@ pub fn sanitize(text: &str) -> String {
     if trimmed.is_empty() { "default".into() } else { trimmed }
 }
 
-/// 组映射快照路径（短命名）：<user_dir>/<profile>/<目录末段>.xml
-/// 【命名】profile 名作子目录 + 头像包目录末段作文件名——替代旧版「整个路径转义」
-/// 的超长命名，两端都保持可辨识。边界：同一存档下若两个组的目录末段同名
-/// （如 C:\a\GUNZO 与 D:\b\GUNZO），将共用同一快照文件。
+/// 快照文件词干：`graphics_<graphics 目录后的路径段>_snapshot`。
+/// 【命名】取头像包路径中 "graphics" 段之后的所有路径段（分隔符转 _，段匹配不区分
+/// 大小写），加 `_snapshot` 后缀——如 `...\FM2024\graphics\NG_Regens`
+/// → `graphics_NG_Regens_snapshot`。
+/// 【前提】头像包必然位于 graphics 目录下（FM 规范，否则头像包本身不生效），
+/// 因此不设目录末段回退；graphics 段缺失仅作防御——用整路径转义兜底（正常不触发）。
+fn snapshot_stem(img_dir: &str) -> String {
+    let sep = std::path::MAIN_SEPARATOR;
+    let norm = img_dir.replace('/', &sep.to_string());
+    let segs: Vec<&str> = norm.split(sep).filter(|s| !s.is_empty()).collect();
+    if let Some(pos) = segs.iter().rposition(|s| s.eq_ignore_ascii_case("graphics")) {
+        let tail = &segs[pos + 1..];
+        if !tail.is_empty() {
+            return format!("graphics_{}_snapshot", sanitize(&tail.join("_")));
+        }
+    }
+    format!("{}_snapshot", sanitize(&norm))
+}
+
+/// 组映射快照路径（短命名）：<user_dir>/<profile>/<快照词干>.xml
+/// 【命名】profile 名作子目录 + 「graphics 后路径段_snapshot」作文件名——
+/// 替代旧版「整个路径转义」的超长命名，两端都保持可辨识。
+/// 边界：同一存档下若两个组的快照词干同名（不同盘的 graphics\NG_Regens），将共用同一快照文件。
 pub fn group_xml_path(user_dir: &Path, profile: &str, img_dir: &str) -> PathBuf {
-    let tail = Path::new(img_dir)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
     user_dir
-        .join(sanitize(profile))                        // 存档名子目录
-        .join(format!("{}.xml", sanitize(&tail)))       // 目录末段作文件名
+        .join(sanitize(profile))                     // 存档名子目录
+        .join(format!("{}.xml", snapshot_stem(img_dir)))
 }
 
 // 【测试模块】#[cfg(test)] 表示这些代码只在 `cargo test` 时才编译，不会进入正式程序。
@@ -75,9 +90,18 @@ mod tests {
 
     #[test]
     fn group_xml_path_short_and_identifiable() {
-        // 短命名：profile 子目录 + 目录末段.xml（替代旧版「整路径转义」的超长命名）。
-        let long_dir = r"C:\Users\57552\Documents\Sports Interactive\Football Manager 2024\GUNZO 风格头像包";
-        let p = group_xml_path(Path::new("d"), "档1", long_dir);
-        assert_eq!(p, Path::new("d").join("档1").join("GUNZO 风格头像包.xml"));
+        // 主用例：头像包在 graphics 目录下 → 快照名 = graphics_<后段>_snapshot。
+        let dir = r"C:\Users\57552\Documents\Sports Interactive\Football Manager 2024\graphics\NG_Regens";
+        let p = group_xml_path(Path::new("d"), "档1", dir);
+        assert_eq!(p, Path::new("d").join("档1").join("graphics_NG_Regens_snapshot.xml"));
+        // 多级后段：分隔符转 _；大小写不敏感。
+        let p2 = group_xml_path(Path::new("d"), "档1", r"C:\fm\Graphics\faces\NG_Regens");
+        assert_eq!(
+            p2.file_name().unwrap().to_string_lossy(),
+            "graphics_faces_NG_Regens_snapshot.xml"
+        );
+        // 防御分支（正常不触发）：无 graphics 段 → 整路径转义兜底。
+        let p3 = group_xml_path(Path::new("d"), "档1", r"C:\pack\");
+        assert_eq!(p3.file_name().unwrap().to_string_lossy(), "C__pack__snapshot.xml");
     }
 }

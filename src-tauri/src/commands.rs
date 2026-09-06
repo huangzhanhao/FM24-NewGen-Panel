@@ -142,11 +142,15 @@ pub struct PlayerPreview {
 /// 【复用】几乎每个命令改完状态后都会调它，把最新状态回传前端，前端据此刷新界面。
 fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
     let pm = state.pm.lock().unwrap(); // 加锁读取存档管理器（lock 期间独占）
-    // 当前组的 config.xml 路径与存在性（前端渲染 config.xml 行；切组/替换后随快照自动刷新）。
-    let config_xml = pm.cur_group.as_ref().map(|g| {
-        let path = Path::new(g).join("config.xml");
-        ConfigXmlInfo { path: path.to_string_lossy().to_string(), exists: path.is_file() }
-    });
+    // 当前组的存档 XML 快照路径（.user/<存档名>/<目录末段>.xml，存档资料里的那份）。
+    // 切组/替换后随快照自动刷新；从未替换过的组无快照（exists=false）。
+    let config_xml = match pm.cur_group.as_ref() {
+        Some(g) => {
+            let path = crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, g);
+            Some(ConfigXmlInfo { path: path.to_string_lossy().to_string(), exists: path.is_file() })
+        }
+        None => None,
+    };
     AppSnapshot {
         profiles: pm.config.profile.keys().cloned().collect(),
         current_profile: pm.cur_prf.clone(),
@@ -608,12 +612,13 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
     PageResult { total, items: rows.into_iter().skip(query.offset).take(query.limit).collect() }
 }
 
-// ---------------- config.xml 查看/定位（「当前任务」卡 config.xml 行） ----------------
+// ---------------- 存档 XML 查看/定位（「当前任务」卡 config.xml 行） ----------------
 
-/// 当前组 config.xml 路径；未选组报错。
+/// 当前组在存档资料中的 XML 快照路径（.user/<存档名>/<目录末段>.xml）；未选组报错。
 fn cur_config_xml_path(state: &State<'_, AppState>) -> Result<PathBuf, String> {
-    let g = state.pm.lock().unwrap().cur_group.clone().ok_or("请先选择头像包目录")?;
-    Ok(Path::new(&g).join("config.xml"))
+    let pm = state.pm.lock().unwrap();
+    let g = pm.cur_group.clone().ok_or("请先选择头像包目录")?;
+    Ok(crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, &g))
 }
 
 /// 资源管理器定位文件（Windows 专用便携应用）。
@@ -625,19 +630,19 @@ fn explorer_select(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 读取当前组 config.xml 内容（供「查看XML」对话框展示）。
+/// 读取当前组存档 XML 快照内容（供「查看XML」对话框展示）。
 #[tauri::command]
 pub fn read_config_xml(state: State<'_, AppState>) -> Result<String, String> {
     let path = cur_config_xml_path(&state)?;
-    std::fs::read_to_string(&path).map_err(|e| format!("读取 config.xml 失败: {e}"))
+    std::fs::read_to_string(&path).map_err(|e| format!("读取存档 XML 失败: {e}"))
 }
 
-/// 在资源管理器中定位当前组 config.xml（「所在位置」按钮）。
+/// 在资源管理器中定位当前组存档 XML 快照（「所在位置」按钮）。
 #[tauri::command]
 pub fn reveal_config_xml(state: State<'_, AppState>) -> Result<(), String> {
     let path = cur_config_xml_path(&state)?;
     if !path.is_file() {
-        return Err("config.xml 不存在（请先执行一次替换）".into());
+        return Err("存档 XML 不存在（请先执行一次替换）".into());
     }
     explorer_select(&path)
 }

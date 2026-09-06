@@ -120,26 +120,56 @@ impl ProfileManager {
             .or_else(|| cfg.groups.keys().next().cloned()) // 否则取第一个
     }
 
-    /// 存档配置文件路径：.user/<存档名>.json。
+    /// 存档配置文件路径（新布局）：<user_dir>/<存档名>/<存档名>.json——
+    /// 与该存档的 XML 快照同目录，存档资料集中在一个文件夹内，拷走即备份。
     fn prf_path(user_dir: &Path, name: &str) -> PathBuf {
+        user_dir
+            .join(crate::paths::sanitize(name))
+            .join(format!("{}.json", crate::paths::sanitize(name)))
+    }
+
+    /// 旧版存档配置文件路径（迁移前）：<user_dir>/<存档名>.json（位于 .user 根下）。
+    fn legacy_prf_path(user_dir: &Path, name: &str) -> PathBuf {
         user_dir.join(format!("{name}.json"))
     }
 
     /// 加载档配置；缺失兑底空配置；旧版单档格式自动升级（含快照迁移）。
-    /// 【关键】这里处理了从旧版（只有一个 img_dir/rtf）到新版（多组 groups）的数据升级。
+    /// 【位置迁移】存档 json 已统一移入存档子目录（与 XML 快照同目录）：
+    /// 发现旧位置 <user>/<存档名>.json 时自动迁移到 <user>/<存档名>/<存档名>.json。
     fn load_profile_cfg(user_dir: &Path, name: &str) -> Result<PrfCfg, String> {
         let path = Self::prf_path(user_dir, name);
-        // 先读成通用 JSON 值（serde_json::Value），以便先判断是新格式还是旧格式。
+        // 先按位置取原始 JSON 值：新路径 → 旧路径（迁移）→ 缺失（写默认）。
+        let mut migrated = false; // 本次是否从旧位置迁来（迁移内容必须写入新位置，否则重启即丢）
         let raw = match json_store::load::<serde_json::Value>(&path) {
-            Ok(v) => v,
+            Ok(v) => Some(v),
             Err(LoadError::Missing) => {
-                // 文件不存在：写一份空配置并返回。
-                let cfg = PrfCfg::default();
-                json_store::save(&path, &cfg)?;
-                return Ok(cfg);
+                let legacy = Self::legacy_prf_path(user_dir, name);
+                match json_store::load::<serde_json::Value>(&legacy) {
+                    // 旧位置有文件：读出内容并删除旧文件（新位置在下方处理完成后写入）。
+                    Ok(v) => {
+                        migrated = true;
+                        let _ = fs::remove_file(&legacy);
+                        Some(v)
+                    }
+                    Err(LoadError::Missing) => {
+                        // 全新存档：确保子目录存在并写默认配置。
+                        if let Some(p) = path.parent() {
+                            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+                        }
+                        let cfg = PrfCfg::default();
+                        json_store::save(&path, &cfg)?;
+                        return Ok(cfg);
+                    }
+                    Err(LoadError::Corrupt(e)) => return Err(e),
+                }
             }
             Err(LoadError::Corrupt(e)) => return Err(e),
         };
+        let raw = raw.expect("上方已保证 raw 存在");
+        // 确保存档子目录存在（json 与 XML 快照同目录）。
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
         // 旧版单档格式：{"img_dir": "X", "rtf": "Y"} 且无 groups → 升级为新的多组格式。
         if raw.get("img_dir").is_some() && raw.get("groups").is_none() {
             let img_dir = norm_dir(raw["img_dir"].as_str().unwrap_or(""));
@@ -166,8 +196,12 @@ impl ProfileManager {
             }
             return Ok(cfg);
         }
-        // 新格式：直接从 JSON 值反序列化为 PrfCfg。
-        serde_json::from_value(raw).map_err(|e| e.to_string())
+        // 新格式：反序列化；若是位置迁移场景，把内容写入新位置（否则旧文件已删、配置会丢）。
+        let cfg: PrfCfg = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        if migrated {
+            json_store::save(&path, &cfg)?;
+        }
+        Ok(cfg)
     }
 
     // ---------------- Profile 管理 ----------------
@@ -183,7 +217,10 @@ impl ProfileManager {
         }
         self.config.profile.insert(name.to_string(), true); // 加入全局配置
         json_store::save(&self.user_dir.join("cfg.json"), &self.config)?; // 落盘全局配置
-        json_store::save(&Self::prf_path(&self.user_dir, name), &PrfCfg::default())?; // 建空档文件
+        // 建空档文件（存档子目录下，与 XML 快照同目录）。
+        let dir = self.user_dir.join(crate::paths::sanitize(name));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        json_store::save(&Self::prf_path(&self.user_dir, name), &PrfCfg::default())?;
         self.load_profile(name) // 立即切到新档
     }
 
@@ -193,8 +230,9 @@ impl ProfileManager {
             return Ok(false);
         }
         self.config.profile.remove(name); // 从全局配置移除
-        let _ = fs::remove_file(Self::prf_path(&self.user_dir, name)); // 删档配置文件
-        let _ = fs::remove_dir_all(self.user_dir.join(crate::paths::sanitize(name))); // 删快照目录
+        let _ = fs::remove_file(Self::prf_path(&self.user_dir, name)); // 删档配置文件（新位置）
+        let _ = fs::remove_file(Self::legacy_prf_path(&self.user_dir, name)); // 兼容删除旧位置档 json
+        let _ = fs::remove_dir_all(self.user_dir.join(crate::paths::sanitize(name))); // 删快照目录（含 XML 与 json）
         json_store::save(&self.user_dir.join("cfg.json"), &self.config)?;
         self.load_profile("No Profile")?; // 回到默认档
         Ok(true)
@@ -471,5 +509,26 @@ mod tests {
         // 旧快照已迁移到新位置
         assert!(group_xml_path(&user, "档旧", &norm_dir(r"C:\pack")).is_file());
         assert!(!user.join("档旧.xml").is_file());
+        // 存档 json 也已位于存档子目录（与 XML 快照同目录）
+        assert!(user.join("档旧").join("档旧.json").is_file());
+    }
+
+    #[test]
+    fn legacy_prf_json_moved_into_profile_dir() {
+        // 旧布局（.user 根下 <存档>.json）→ 加载后自动迁移到 <user>/<存档>/<存档>.json
+        // （与该存档的 XML 快照同目录），组与 RTF 配置原样保留。
+        let dir = data_dir();
+        let user = dir.path().join(".user");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(user.join("cfg.json"), r#"{"Profile": {"档A": true}}"#).unwrap();
+        fs::write(
+            user.join("档A.json"),
+            r#"{"cur_group": "C:\\pack\\", "groups": {"C:\\pack\\": {"rtf": "C:\\l.rtf"}}}"#,
+        ).unwrap();
+        let pm = ProfileManager::new(None, dir.path()).unwrap();
+        assert_eq!(pm.get_cur_rtf(), r"C:\l.rtf"); // 配置内容原样保留
+        let new_path = user.join("档A").join("档A.json");
+        assert!(new_path.is_file(), "存档 json 应移入存档子目录");
+        assert!(!user.join("档A.json").is_file(), "旧位置不应保留");
     }
 }

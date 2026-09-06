@@ -58,7 +58,7 @@ impl ProfileManager {
         fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
         let cfg_path = user_dir.join("cfg.json");
         // 加载全局配置：成功则用；缺失则写一份默认；损坏则报错（json_store 已自动备份 .corrupt）。
-        let mut config: GlobalCfg = match json_store::load(&cfg_path) {
+        let config: GlobalCfg = match json_store::load(&cfg_path) {
             Ok(c) => c,
             Err(LoadError::Missing) => {
                 // 首次运行：创建一个只含 'No Profile'（激活）的默认配置并落盘。
@@ -70,42 +70,13 @@ impl ProfileManager {
             }
             Err(LoadError::Corrupt(e)) => return Err(e),
         };
-        // 对等 v1：name 缺失/无效时回退到 cfg.json 中激活的档（get_latest_prf 语义）。
-        // 【防御】历史上新建存档的落盘时序缺陷可能留下多个激活位（如 No Profile 与新档同时 true），
-        // 此时优先选「非 No Profile」的激活档（用户创建的档优先于默认档），避免重启回到默认档。
+        // 【启动交互】程序启动固定从默认档（No Profile）开始，不自动恢复上次激活的存档，
+        // 需要用户在下拉框手动选择。显式 name（内部调用/测试）仍可指定具体档。
+        // cfg.json 的激活位仅作记录（切换时更新），不影响启动选择。
         let cur_prf = name
             .filter(|n| config.profile.contains_key(*n))
             .map(|n| n.to_string())
-            .or_else(|| {
-                let actives: Vec<&String> = config
-                    .profile
-                    .iter()
-                    .filter(|(_, v)| **v)
-                    .map(|(k, _)| k)
-                    .collect();
-                match actives.len() {
-                    1 => Some((*actives[0]).clone()),
-                    2.. => actives
-                        .iter()
-                        .find(|k| k.as_str() != "No Profile")
-                        .or_else(|| actives.first())
-                        .map(|k| (*k).clone()),
-                    _ => None,
-                }
-            })
             .unwrap_or_else(|| "No Profile".to_string());
-        // 激活位归一化（修复历史双 true 脏数据）：只保留当前档为激活，有变化才落盘。
-        let mut dirty = false;
-        for (k, v) in config.profile.iter_mut() {
-            let target = *k == cur_prf;
-            if *v != target {
-                *v = target;
-                dirty = true;
-            }
-        }
-        if dirty {
-            json_store::save(&cfg_path, &config)?;
-        }
         // 加载当前存档的组配置，并选定当前组。
         let prf_cfg = Self::load_profile_cfg(&user_dir, &cur_prf)?;
         let cur_group = Self::pick_cur_group(&prf_cfg);
@@ -455,9 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn created_profile_survives_restart() {
-        // 复现并锁定修复：新建存档后重启（new(None)），应回到用户创建的档而非 No Profile。
-        // （历史缺陷：create_profile 落盘发生在激活位更新之前，cfg.json 留下双 true。）
+    fn restart_starts_at_no_profile() {
+        // 启动交互：程序启动固定回到默认档（No Profile），不自动恢复上次激活的存档，
+        // 用户需在下拉框手动选择；存档本身仍保留（手动切换回来数据不丢）。
         let dir = data_dir();
         {
             let mut pm = ProfileManager::new(None, dir.path()).unwrap();
@@ -465,27 +436,8 @@ mod tests {
             assert_eq!(pm.cur_prf, "wer");
         }
         let pm = ProfileManager::new(None, dir.path()).unwrap();
-        assert_eq!(pm.cur_prf, "wer"); // 重启后仍是用户创建的档
-    }
-
-    #[test]
-    fn duplicated_active_flags_normalized() {
-        // 历史脏数据：cfg.json 出现多个激活位 → 启动归一化为用户创建的档，并修正落盘。
-        let dir = data_dir();
-        let user = dir.path().join(".user");
-        fs::create_dir_all(&user).unwrap();
-        fs::write(
-            user.join("cfg.json"),
-            r#"{"Profile": {"No Profile": true, "wer": true}}"#,
-        ).unwrap();
-        let pm = ProfileManager::new(None, dir.path()).unwrap();
-        assert_eq!(pm.cur_prf, "wer"); // 用户创建的档优先于默认档
-        let cfg: GlobalCfg = match json_store::load(&user.join("cfg.json")) {
-            Ok(c) => c,
-            Err(_) => panic!("cfg.json 应可解析"),
-        };
-        assert!(cfg.profile["wer"]);
-        assert!(!cfg.profile["No Profile"]); // 激活位已归一化（单 true）
+        assert_eq!(pm.cur_prf, "No Profile");
+        assert!(pm.config.profile.contains_key("wer"));
     }
 
     #[test]
@@ -502,7 +454,8 @@ mod tests {
             r#"{"img_dir": "C:\\pack", "rtf": "C:\\l.rtf"}"#,
         ).unwrap();
         fs::write(user.join("档旧.xml"), "snapshot-content").unwrap();
-        let pm = ProfileManager::new(None, dir.path()).unwrap();
+        // 显式指定档名：本用例验证「旧格式升级与迁移」，与「启动默认 No Profile」交互解耦。
+        let pm = ProfileManager::new(Some("档旧"), dir.path()).unwrap();
         assert_eq!(pm.cur_prf, "档旧");
         assert_eq!(pm.cur_group.clone().unwrap(), norm_dir(r"C:\pack"));
         assert_eq!(pm.get_cur_rtf(), r"C:\l.rtf");
@@ -525,7 +478,8 @@ mod tests {
             user.join("档A.json"),
             r#"{"cur_group": "C:\\pack\\", "groups": {"C:\\pack\\": {"rtf": "C:\\l.rtf"}}}"#,
         ).unwrap();
-        let pm = ProfileManager::new(None, dir.path()).unwrap();
+        // 显式指定档名：本用例验证「旧布局 json 位置迁移」，与启动默认档交互解耦。
+        let pm = ProfileManager::new(Some("档A"), dir.path()).unwrap();
         assert_eq!(pm.get_cur_rtf(), r"C:\l.rtf"); // 配置内容原样保留
         let new_path = user.join("档A").join("档A.json");
         assert!(new_path.is_file(), "存档 json 应移入存档子目录");

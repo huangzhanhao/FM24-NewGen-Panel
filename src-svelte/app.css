@@ -57,12 +57,13 @@ body { margin: 0; background: var(--bg); color: var(--text); font-size: 14px; }
   width: auto; display: inline-flex; align-items: center; gap: 6px;
   text-align: left; color: var(--text); white-space: nowrap; cursor: pointer;
 }
-/* 路径行：label / 输入框 / 按钮组三列；按钮组用 flex 容纳多个按钮（检查完整性+扫描头像 等） */
+/* 路径行：label / 输入框 / 按钮组三列；按钮组用 flex 容纳两个按钮。
+   按钮定宽（96px ≥ 最宽的「检查完整性」92px），保证上下两行的按钮列严格对齐。 */
 .path-row { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 6px 0; }
 .path-row label { text-align: right; color: var(--muted); }
 .path-row input { width: 100%; min-width: 0; }
 .path-row .path-actions { display: flex; gap: 6px; }
-.path-row .btn { padding: 6px 10px; white-space: nowrap; }
+.path-row .path-actions .btn { width: 96px; padding: 6px 10px; white-space: nowrap; }
 input[type='text'], select { padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; background: var(--panel); }
 input[readonly] { background: var(--input-bg); }
 input[type='text']:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }

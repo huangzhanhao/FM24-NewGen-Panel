@@ -190,8 +190,7 @@ pub fn run() {
             commands::scan_rtf,             // 扫描RTF：解析名单并填充预览缓存，结果写日志
             commands::open_rules_dir,       // 打开模板规则目录（data/rules/，用户编辑 templateN.json）
             commands::preview_profile,      // 预览指定存档（下拉浏览展示，不切换当前档）
-            commands::read_config_xml,      // 读取当前组 config.xml 内容（查看XML）
-            commands::reveal_config_xml,    // 资源管理器定位当前组 config.xml（所在位置）
+            commands::read_config_xml,      // 读取存档 XML 快照内容（查看XML）
             commands::read_rule_file,       // 读取模板规则文件内容（规则编辑对话框）
             commands::save_rule_file,       // 保存模板规则文件（先校验 schema 再原子写回）
             commands::start_replace,        // 启动批量替换（后台线程）

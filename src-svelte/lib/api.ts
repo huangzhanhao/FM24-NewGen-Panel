@@ -35,8 +35,6 @@ export const api = {
   previewProfile: (name: string) => invoke<AppSnapshot>('preview_profile', { name }),
   // 读取当前组 config.xml 内容（查看XML 对话框）。
   readConfigXml: () => invoke<string>('read_config_xml'),
-  // 资源管理器定位当前组 config.xml（所在位置）。
-  revealConfigXml: () => invoke<void>('reveal_config_xml'),
   // 读取/保存模板规则文件（name ∈ template2|template3；保存时后端先按模板 schema 校验）。
   readRuleFile: (name: 'template2' | 'template3') => invoke<string>('read_rule_file', { name }),
   saveRuleFile: (name: 'template2' | 'template3', content: string) =>

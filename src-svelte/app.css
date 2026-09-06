@@ -39,6 +39,8 @@ body { margin: 0; background: var(--bg); color: var(--text); font-size: 14px; }
 .side-foot { margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .prf-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .prf-actions .btn { flex: 1 1 auto; min-width: 0; padding: 6px 8px; white-space: nowrap; }
+/* 删除按钮固定宽度：切换存档时「删除当前 Profile」/「无法删除No Profile」文案宽度不同，固定避免跳动 */
+.prf-actions .btn.danger-solid { flex: 0 0 146px; }
 
 /* ---- 卡片（主区基本单元） ---- */
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px 14px; }

@@ -67,11 +67,6 @@
     } catch (e) { await showError(e); }
   }
 
-  /** 在资源管理器中定位 config.xml。 */
-  async function revealConfigXml() {
-    try { await api.revealConfigXml(); } catch (e) { await showError(e); }
-  }
-
   /** 扫描头像：建图片索引缓存（供替换复用），结果已在后端写入日志面板。 */
   async function scanImages() {
     if (!snap?.currentGroup) return;
@@ -138,9 +133,7 @@
              use:pinScrollEnd={snap.configXml?.path ?? ''} />
       <div class="path-actions">
         <button class="btn" onclick={viewConfigXml} disabled={busy || !snap.configXml?.exists}
-                title={snap.configXml?.exists ? '查看 config.xml 内容' : 'config.xml 尚未生成（请先执行一次替换）'}>查看XML</button>
-        <button class="btn" onclick={revealConfigXml} disabled={busy || !snap.configXml?.exists}
-                title={snap.configXml?.exists ? '在资源管理器中定位 config.xml' : 'config.xml 尚未生成（请先执行一次替换）'}>所在位置</button>
+                title={snap.configXml?.exists ? '查看存档 XML 内容' : '存档 XML 尚未生成（请先执行一次替换）'}>查看XML</button>
       </div>
     </div>
     <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓（含多余目录提示）；已检查且缺失→黄色警告 + 一键创建按钮。 -->

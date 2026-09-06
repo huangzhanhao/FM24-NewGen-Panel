@@ -75,9 +75,9 @@
     if (!ok) return;
     try {
       await applySnapshot(await api.deleteProfile(target));
-      // 选中项回退到当前激活档，浏览态结束
-      appStore.selectedProfile = appStore.snapshot?.currentProfile ?? 'No Profile';
-      appStore.profilePreview = null;
+      // 下拉固定切回 No Profile 并预览其（空）资料；其他存档的激活状态不受影响
+      appStore.selectedProfile = 'No Profile';
+      appStore.profilePreview = await api.previewProfile('No Profile');
     } catch (e) { await showError(e); }
   }
 
@@ -135,16 +135,20 @@
       {/each}
     </select>
     <div class="prf-actions">
-      <!-- 激活按钮：浏览未激活存档时蓝色可点；选中项即激活档时灰色不可点（状态由按钮本身表达）。 -->
-      {#if browseMode}
+      <!-- No Profile（缺省档）：固定「未激活」+「无法删除No Profile」，均不可点。 -->
+      {#if appStore.selectedProfile === 'No Profile'}
+        <button class="btn" disabled title="No Profile 为启动缺省档，未激活">未激活</button>
+        <button class="btn danger-solid" disabled
+                title="No Profile 为缺省档，无法删除">无法删除No Profile</button>
+      {:else if browseMode}
+        <!-- 浏览未激活存档：蓝色「激活」可点 + 删除按钮。 -->
         <button class="btn primary" onclick={activateProfile} disabled={busy}
                 title="激活存档「{appStore.selectedProfile}」并切换其组配置与映射">激活</button>
+        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
       {:else}
+        <!-- 选中项已激活：灰色「已激活」不可点 + 删除按钮。 -->
         <button class="btn" disabled title="当前已激活该存档">已激活</button>
-      {/if}
-      <!-- 删除按钮：选中的是真实存档（非 No Profile）时始终显示；删除的是下拉当前选中的存档。 -->
-      {#if appStore.selectedProfile !== 'No Profile'}
-        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除 Profile</button>
+        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
       {/if}
     </div>
   </section>
@@ -163,13 +167,16 @@
         <!-- {#each ... as g (g.imgDir)}：以目录为键；class:current 高亮当前组。 -->
         {#each snap.groups as g (g.imgDir)}
           <li class:current={snap.currentGroup === g.imgDir}>
-            <!-- 点组名切为当前组；title 显示完整路径；g-rtf 显示是否已设 RTF（class:ok 变绿）。 -->
-            <button class="group-item" onclick={() => selectGroup(g.imgDir)} disabled={busy} title={g.imgDir}>
+            <!-- 点组名切为当前组（浏览态禁用——切组写后端当前档）；title 显示完整路径；g-rtf 显示是否已设 RTF。 -->
+            <button class="group-item" onclick={() => selectGroup(g.imgDir)}
+                    disabled={busy || browseMode}
+                    title={browseMode ? '请先点击「激活」后再切换当前组（当前为浏览预览）' : g.imgDir}>
               <span class="g-name">{basename(g.imgDir)}</span>
               <span class="g-rtf" class:ok={!!g.rtf}>{g.rtf ? 'RTF ✓' : '未设置 RTF'}</span>
             </button>
-            <!-- 删除组按钮（×）。 -->
-            <button class="icon-btn danger" title="删除组" onclick={() => deleteGroup(g.imgDir)} disabled={busy}>×</button>
+            <!-- 删除组按钮（×）：浏览态禁用。 -->
+            <button class="icon-btn danger" title={browseMode ? '请先激活后再删除组' : '删除组'}
+                    onclick={() => deleteGroup(g.imgDir)} disabled={busy || browseMode}>×</button>
           </li>
         {/each}
       </ul>

@@ -389,8 +389,9 @@ fn scan_rtf_core(rtf_path: &str) -> Result<(RtfScanResult, Vec<PlayerRecord>), S
 }
 
 /// 「扫描头像」：扫描当前组头像包、缓存索引（供替换复用），结果写日志。
+/// 【async】重扫描（递归遍历包内全部目录）跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
-pub fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, String> {
+pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, String> {
     let img_dir = { state.pm.lock().unwrap().cur_group.clone().ok_or("请先选择头像包目录")? };
     let config = RuleConfig::load(&state.data_dir)?; // 用户改坏规则 json → 报错提示
     let (total, standard, scan) = scan_images_core(&img_dir, &config)?;
@@ -400,8 +401,9 @@ pub fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, String
 }
 
 /// 「扫描RTF」：解析当前组 RTF 并填充名单预览缓存（无需先 Replace），结果写日志。
+/// 【async】大名单解析跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
-pub fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, String> {
+pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, String> {
     let rtf = { state.pm.lock().unwrap().get_cur_rtf() };
     if rtf.is_empty() { return Err("请先选择 RTF 名单".into()); }
     let (summary, data) = scan_rtf_core(&rtf)?;
@@ -645,7 +647,7 @@ pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSn
     })
 }
 
-// ---------------- 存档 XML 查看/定位（「当前任务」卡 config.xml 行） ----------------
+// ---------------- 存档 XML 查看（「当前任务」卡 config.xml 行） ----------------
 
 /// 当前组在存档资料中的 XML 快照路径（.user/<存档名>/<目录末段>.xml）；未选组报错。
 fn cur_config_xml_path(state: &State<'_, AppState>) -> Result<PathBuf, String> {
@@ -654,30 +656,11 @@ fn cur_config_xml_path(state: &State<'_, AppState>) -> Result<PathBuf, String> {
     Ok(crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, &g))
 }
 
-/// 资源管理器定位文件（Windows 专用便携应用）。
-fn explorer_select(path: &Path) -> Result<(), String> {
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
-        .spawn()
-        .map_err(|e| format!("打开资源管理器失败: {e}"))?;
-    Ok(())
-}
-
 /// 读取当前组存档 XML 快照内容（供「查看XML」对话框展示）。
 #[tauri::command]
 pub fn read_config_xml(state: State<'_, AppState>) -> Result<String, String> {
     let path = cur_config_xml_path(&state)?;
     std::fs::read_to_string(&path).map_err(|e| format!("读取存档 XML 失败: {e}"))
-}
-
-/// 在资源管理器中定位当前组存档 XML 快照（「所在位置」按钮）。
-#[tauri::command]
-pub fn reveal_config_xml(state: State<'_, AppState>) -> Result<(), String> {
-    let path = cur_config_xml_path(&state)?;
-    if !path.is_file() {
-        return Err("存档 XML 不存在（请先执行一次替换）".into());
-    }
-    explorer_select(&path)
 }
 
 // ---------------- 模板规则文件的查看/保存（规则编辑对话框） ----------------

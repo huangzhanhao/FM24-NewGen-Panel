@@ -40,7 +40,7 @@
     if (!snap?.currentGroup) return;
     try {
       // 兜底校验：用户可能跳过配置卡的完整性检查，这里再查一次。
-      // 模板归属由后端按规则 json 的 FolderList 判定；complete（含超集）→ 静默继续。
+      // 标准归属由后端按规则 json 的 FolderList 判定；complete（含超集）→ 静默继续。
       const res = await api.checkIntegrity(snap.currentGroup);
       if (res.status === 'fixable') {
         const ok = await ask(
@@ -52,7 +52,7 @@
       } else if (res.status === 'unknown') {
         const ok = await ask(t.replace.unknownConfirm, { title: t.replace.unknownTitle });
         if (!ok) return;
-      } // complete（模板目录齐全，含多出未配置目录）→ 静默继续
+      } // complete（标准目录齐全，含多出未配置目录）→ 静默继续
       // 调后端启动替换（异步后台线程），随后刷新快照：replacing 变 true → 全局禁用。
       await api.startReplace({ mode, filterNewgan, allowDuplicates, saveBackup });
       await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效

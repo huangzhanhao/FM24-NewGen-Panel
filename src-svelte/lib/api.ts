@@ -29,7 +29,7 @@ export const api = {
   scanImages: () => invoke<ImageScanResult>('scan_images'),
   // 扫描RTF：解析当前 RTF 并填充名单预览缓存，结果写入后端日志。
   scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
-  // 打开模板规则目录（data/rules/）：编辑 template2/template3.json 后下次替换即生效。
+  // 打开标准规则目录（data/rules/）：编辑 standard2/standard3.json 后下次替换即生效。
   openRulesDir: () => invoke<void>('open_rules_dir'),
   // 预览指定存档（下拉浏览展示，不切换后端当前档/激活状态）。
   previewProfile: (name: string) => invoke<AppSnapshot>('preview_profile', { name }),
@@ -37,9 +37,9 @@ export const api = {
   openPackConfigDir: (imgDir: string) => invoke<void>('open_pack_config_dir', { imgDir }),
   // 用资源管理器打开当前展示档的存档 XML 快照所在目录（查看快照）。
   openSnapshotDir: (path: string) => invoke<void>('open_snapshot_dir', { path }),
-  // 读取/保存模板规则文件（name ∈ template2|template3；保存时后端先按模板 schema 校验）。
-  readRuleFile: (name: 'template2' | 'template3') => invoke<string>('read_rule_file', { name }),
-  saveRuleFile: (name: 'template2' | 'template3', content: string) =>
+  // 读取/保存标准规则文件（name ∈ standard2|standard3；保存时后端先按该标准 schema 校验）。
+  readRuleFile: (name: 'standard2' | 'standard3') => invoke<string>('read_rule_file', { name }),
+  saveRuleFile: (name: 'standard2' | 'standard3', content: string) =>
     invoke<void>('save_rule_file', { name, content }),
   createMissingDirs: (imgDir: string, names: string[]) =>
     invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值

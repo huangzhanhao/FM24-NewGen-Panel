@@ -7,11 +7,10 @@
 use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::Mode;
 use crate::facepack::{self, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
-use crate::json_store;
 use crate::logger::{LogPage, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
-use crate::rule_config::{self, RuleConfig};
+use crate::templates::{self, RuleConfig};
 use crate::rtf_parser::{PlayerRecord, RtfParser, NEWGAN_UID_PREFIX};
 use crate::xml_parser::{self, MappingEntry};
 use serde::{Deserialize, Serialize};
@@ -20,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State}; // AppHandle=应用句柄（发事件用）；Emitter 提供 emit；State 注入托管状态
 
-// 模板二的 14 目录常量保留在此 re-export（validate_image_dirs 与既有测试引用路径不变）；
-// 模板三目录清单已由 rule_config 的 template3.json（FolderList）取代，不再有硬编码常量。
+// 标准二的 14 目录常量保留在此 re-export（validate_image_dirs 与既有测试引用路径不变）；
+// 标准三目录清单已由 rule_config 的 standard3.json（FolderList）取代，不再有硬编码常量。
 pub use crate::facepack::FACEPACK_DIRS;
 
 /// 应用全局状态（在 lib.rs 的 setup 里用 app.manage 交给 Tauri 托管）。
@@ -35,7 +34,7 @@ pub struct AppState {
     pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>,   // 最近一次解析的球员缓存
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>,   // 「扫描头像」的包索引缓存（替换可复用）
-    pub data_dir: PathBuf,               // 便携数据目录（模板规则 data/rules/ 在其下）
+    pub data_dir: PathBuf,               // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
 /// 「扫描头像」产出的索引缓存：目录 + 完整扫描结果（仅按 img_dir 命中，切组即失效）。
@@ -74,16 +73,16 @@ pub struct AppSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ProgressPayload { pub status: String, pub value: u8 }
 
-/// 「检查完整性」结果：头像包命中的模板 + 可修复的缺失目录（供 check_integrity 命令返回）。
+/// 「检查完整性」结果：头像包命中的标准 + 可修复的缺失目录（供 check_integrity 命令返回）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrityResult {
-    pub standard: u8,          // 命中的模板号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别
+    pub standard: u8,          // 命中的标准号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别
     pub status: String,        // "complete" | "fixable" | "unknown"
-    pub missing: Vec<String>,  // fixable 时可一键创建的缺失目录（按模板 FolderList 原顺序）
-    pub extra: Vec<String>,    // 包内多出、未在模板 FolderList 配置的目录（不参与抽图）
+    pub missing: Vec<String>,  // fixable 时可一键创建的缺失目录（按标准 FolderList 原顺序）
+    pub extra: Vec<String>,    // 包内多出、未在标准 FolderList 配置的目录（不参与抽图）
     pub found: usize,          // 已命中的子目录数
-    pub expected_total: usize, // 该模板 FolderList 的目录总数（模板一/无法识别为 0）
+    pub expected_total: usize, // 该标准 FolderList 的目录总数（标准一/无法识别为 0）
 }
 
 /// 「扫描头像」返回摘要：图片总数 + 命中的标准号（0=无法识别）。
@@ -274,7 +273,7 @@ pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
         .collect()
 }
 
-/// 「检查完整性」：按 rule_config 的 FolderList（用户可配置）识别头像包归属哪个模板，
+/// 「检查完整性」：按 templates 的 FolderList（用户可配置）识别头像包归属哪个标准，
 /// 并给出可一键补全的缺失目录与未配置的多余目录。轻扫描：只列子目录名 + 探测根是否有图。
 #[tauri::command]
 pub fn check_integrity(state: State<'_, AppState>, img_dir: String) -> Result<IntegrityResult, String> {
@@ -283,7 +282,7 @@ pub fn check_integrity(state: State<'_, AppState>, img_dir: String) -> Result<In
 }
 
 /// 检查完整性核心（纯函数，便于单测）：轻扫描 + classify + 汇总缺失/多余目录。
-/// 判定与缺失/多余计算全部以模板 FolderList 为基准（用户改 json 即改变判定口径）。
+/// 判定与缺失/多余计算全部以标准 FolderList 为基准（用户改 json 即改变判定口径）。
 fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
     let mut subdirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut has_images = false;
@@ -310,12 +309,12 @@ fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
         PackLayout::Standard { complete: true, .. } => "complete",
         PackLayout::Standard { .. } => "fixable",
     };
-    // missing / extra / expected_total 按归属模板的 FolderList 计算：
+    // missing / extra / expected_total 按归属标准的 FolderList 计算：
     // missing = FolderList 中尚未出现的目录（可一键补全）；extra = 包内多出的未配置目录（不进抽图池）。
     let (missing, extra, expected_total) = match &layout {
-        PackLayout::Standard { template, .. } => {
+        PackLayout::Standard { standard: n, .. } => {
             let folders = config.folder_lists().into_iter()
-                .find(|(t, _)| t == template)
+                .find(|(t, _)| t == n)
                 .map(|(_, f)| f.clone())
                 .unwrap_or_default();
             let missing = folders.iter().filter(|d| !subdirs.contains(*d)).cloned().collect();
@@ -325,7 +324,7 @@ fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
         }
         _ => (Vec::new(), Vec::new(), 0),
     };
-    // 模板一/无法识别的 found 与现状一致：模板一记 0，其余记命中的子目录数。
+    // 标准一/无法识别的 found 与现状一致：标准一记 0，其余记命中的子目录数。
     let found = if standard == 1 { 0 } else { subdirs.len() };
     IntegrityResult { standard, status: status.into(), missing, extra, found, expected_total }
 }
@@ -342,18 +341,20 @@ pub fn create_missing_dirs(img_dir: String, names: Vec<String>) -> Result<(), St
 
 // ---------------- 扫描（「扫描头像 / 扫描RTF」按钮） ----------------
 
-/// 标准号的中文标注（写日志用）。
-fn layout_label(standard: u8) -> &'static str {
+/// 标准号的中文标注（写日志用）。目录数取自规则配置的 FolderList，不在这里硬编码。
+fn layout_label(standard: u8, config: &RuleConfig) -> String {
+    let dirs = |n: u8| config.folder_lists().into_iter()
+        .find(|(t, _)| *t == n).map(|(_, f)| f.len()).unwrap_or(0);
     match standard {
-        1 => "标准一/图片直铺",
-        2 => "标准二/14 目录",
-        3 => "标准三/65 目录",
-        _ => "无法识别",
+        1 => "标准一/图片直铺".to_string(),
+        2 => format!("标准二/{} 目录", dirs(2)),
+        3 => format!("标准三/{} 目录", dirs(3)),
+        _ => "无法识别".to_string(),
     }
 }
 
 /// 「扫描头像」核心（纯函数，便于单测）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
-/// 标准号按 rule_config 的 FolderList 判定（用户可配置，不再硬编码）。
+/// 标准号按 templates 的 FolderList 判定（用户可配置，不再硬编码）。
 fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, PackScan), String> {
     let scan = facepack::scan_pack(img_dir)?;
     // 布局判定与 FaceMapper::from_scan 同口径（垃圾目录不参与判定）。
@@ -397,7 +398,7 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
     let (total, standard, scan) = scan_images_core(&img_dir, &config)?;
     // Arc 包一层入缓存：替换复用时只涨引用计数，不复制整份图片索引。
     *state.faces_cache.lock().unwrap() = Some(FaceIndex { img_dir, scan: Arc::new(scan) });
-    state.logger.info("scan", format!("扫描头像完成：{total} 张图片（{}）", layout_label(standard)));
+    state.logger.info("scan", format!("扫描头像完成：{total} 张图片（{}）", layout_label(standard, &config)));
     Ok(ImageScanResult { total, standard })
 }
 
@@ -429,11 +430,11 @@ fn explorer_open(dir: &Path, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 打开模板规则目录（data/rules/）供用户编辑 template2/template3.json；
+/// 打开标准规则目录（data/rules/）供用户编辑 standard2/standard3.json；
 /// 目录或文件缺失时先导出内置默认。编辑保存后下次替换/检查完整性即生效。
 #[tauri::command]
 pub fn open_rules_dir(state: State<'_, AppState>) -> Result<(), String> {
-    rule_config::ensure_user_files(&state.data_dir)?;
+    templates::ensure_user_files(&state.data_dir)?;
     let dir = state.data_dir.join("rules");
     explorer_open(&dir, "规则目录")
 }
@@ -472,7 +473,7 @@ pub fn start_replace(
             return Err(e);
         }
     };
-    // 加载模板规则配置（data/rules/templateN.json，用户改坏 json → 报错中止，错误含文件路径）。
+    // 加载标准规则配置（data/rules/standardN.json，用户改坏 json → 报错中止，错误含文件路径）。
     let rule_config = match RuleConfig::load(&state.data_dir) {
         Ok(c) => c,
         Err(e) => {
@@ -688,44 +689,36 @@ pub fn open_snapshot_dir(path: String) -> Result<(), String> {
     explorer_open(dir, "存档快照目录")
 }
 
-// ---------------- 模板规则文件的查看/保存（规则编辑对话框） ----------------
+// ---------------- 标准规则文件的查看/保存（规则编辑对话框） ----------------
 
-/// 模板规则文件路径（name 白名单：template2|template3）。
-fn rule_file_path(data_dir: &Path, name: &str) -> Result<PathBuf, String> {
-    match name {
-        "template2" | "template3" => Ok(data_dir.join("rules").join(format!("{name}.json"))),
-        _ => Err(format!("未知规则文件: {name}")),
-    }
+/// 按前端传来的 name 查规则文件登记表（唯一白名单来源：`templates::rule_files()`）。
+/// 【为什么不在这里 match】每加一个标准就要在此处加一个分支，还容易漏挂结构校验；
+/// 登记表由各标准模块自己提供「路径 + 解析校验 + 写回」，命令层只负责查表与转发。
+fn rule_file(name: &str) -> Result<&'static templates::RuleFile, String> {
+    // 表在首次调用时构造一次并常驻，换来命令层零 match（新增标准时本文件不用改）。
+    static TABLE: std::sync::LazyLock<Vec<templates::RuleFile>> =
+        std::sync::LazyLock::new(templates::rule_files);
+    TABLE.iter().find(|f| f.name == name).ok_or_else(|| format!("未知规则文件: {name}"))
 }
 
-/// 读取模板规则文件内容（供规则编辑对话框；缺失时先导出内置默认）。
+/// 读取标准规则文件内容（供规则编辑对话框；缺失时先导出内置默认）。
 #[tauri::command]
 pub fn read_rule_file(state: State<'_, AppState>, name: String) -> Result<String, String> {
-    let path = rule_file_path(&state.data_dir, &name)?;
+    let rf = rule_file(&name)?;
+    let path = (rf.path)(&state.data_dir);
     if !path.is_file() {
-        rule_config::ensure_user_files(&state.data_dir)?;
+        templates::ensure_user_files(&state.data_dir)?;
     }
     std::fs::read_to_string(&path).map_err(|e| format!("读取规则文件失败: {e}"))
 }
 
-/// 保存模板规则文件：先按对应模板结构解析校验（schema 即接口），
-/// 合法才原子写回（json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
+/// 保存标准规则文件：先按该标准的结构解析并校验，合法才原子写回
+/// （json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
 #[tauri::command]
 pub fn save_rule_file(state: State<'_, AppState>, name: String, content: String) -> Result<(), String> {
-    let path = rule_file_path(&state.data_dir, &name)?;
-    match name.as_str() {
-        "template2" => {
-            let cfg: crate::rule_config::Template2Config =
-                serde_json::from_str(&content).map_err(|e| format!("JSON 格式错误（模板二）：{e}"))?;
-            json_store::save(&path, &cfg)
-        }
-        "template3" => {
-            let cfg: crate::rule_config::Template3Config =
-                serde_json::from_str(&content).map_err(|e| format!("JSON 格式错误（模板三）：{e}"))?;
-            json_store::save(&path, &cfg)
-        }
-        _ => Err(format!("未知规则文件: {name}")),
-    }
+    let rf = rule_file(&name)?;
+    let path = (rf.path)(&state.data_dir);
+    (rf.save)(&path, &content)
 }
 
 /// 读取预览图片字节（前端转 blob URL 显示）。
@@ -790,26 +783,26 @@ mod tests {
     #[test]
     fn standard3_exact() {
         let tmp = tempfile::tempdir().unwrap();
-        // 按内置模板三 FolderList（50 目录）建包 → 恰好相等 → complete。
+        // 按内置标准三 FolderList（62 目录）建包 → 恰好相等 → complete。
         let cfg = RuleConfig::builtin();
-        mk_dirs(tmp.path(), &cfg.template3.folder_list.iter().map(String::as_str).collect::<Vec<_>>());
+        mk_dirs(tmp.path(), &cfg.standard3.folder_list.iter().map(String::as_str).collect::<Vec<_>>());
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &cfg);
-        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 50));
+        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 62));
         assert!(r.extra.is_empty());
     }
 
     #[test]
     fn standard3_superset_still_matches_with_extra() {
-        // 50 目录全在 + 多出旧 65 表的目录 → 仍判模板三 complete；多余目录进 extra、不参与抽图。
+        // 62 目录全在 + 多出清单外的未使用目录 → 仍判标准三 complete；多余目录进 extra、不参与抽图。
         let tmp = tempfile::tempdir().unwrap();
         let cfg = RuleConfig::builtin();
-        let mut dirs: Vec<String> = cfg.template3.folder_list.clone();
-        dirs.push("Denmark".into()); // 旧 65 表成员，50 清单未配置
-        dirs.push("Norway".into());
+        let mut dirs: Vec<String> = cfg.standard3.folder_list.clone();
+        dirs.push("Scandinavian".into());   // 清单外
+        dirs.push("SomeUnusedDir".into());  // 清单外
         mk_dirs(tmp.path(), &dirs.iter().map(String::as_str).collect::<Vec<_>>());
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &cfg);
-        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 50));
-        assert_eq!(r.extra, vec!["Denmark".to_string(), "Norway".to_string()]);
+        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 62));
+        assert_eq!(r.extra, vec!["Scandinavian".to_string(), "SomeUnusedDir".to_string()]);
     }
 
     #[test]
@@ -826,10 +819,10 @@ mod tests {
     #[test]
     fn standard3_fixable_subset() {
         let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 模板三 FolderList(50)
+        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 标准三 FolderList(62)
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.found, r.expected_total), (3, "fixable", 3, 50));
-        assert_eq!(r.missing.len(), 47); // 50 - 3
+        assert_eq!((r.standard, r.status.as_str(), r.found, r.expected_total), (3, "fixable", 3, 62));
+        assert_eq!(r.missing.len(), 59); // 62 - 3
         assert!(!r.missing.contains(&"China".to_string()));
     }
 
@@ -872,7 +865,7 @@ mod tests {
         mk_dirs(tmp.path(), &["China", "Japan", "Korea"]);
         drop_aux_files(tmp.path());
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "fixable", 50));
+        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "fixable", 62));
     }
 
     #[test]

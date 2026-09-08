@@ -7,8 +7,7 @@ use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack::PackLayout;
 use crate::logger::Logger;
-use crate::pick_rules::IMPLEMENTED_TEMPLATES;
-use crate::rule_config::RuleConfig;
+use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
 use crate::rtf_parser::{PlayerRecord, RtfParser};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
@@ -27,7 +26,7 @@ pub struct ReplaceParams {
     /// 「扫描头像」命令缓存的包索引（按 img_dir 命中即复用，避免重复扫盘）。
     /// Arc 共享缓存里的同一份——克隆只涨引用计数，不复制数万图片名表；None = 现场新扫描。
     pub pre_scan: Option<Arc<crate::facepack::PackScan>>,
-    /// 模板规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
+    /// 标准规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
     pub rule_config: RuleConfig,
 }
 
@@ -124,7 +123,7 @@ fn parse_stage(
     Ok(rtf_data)
 }
 
-/// 阶段3：识别头像包布局 → 拦截未实现模板 → 逐球员抽图（40%）。
+/// 阶段3：识别头像包布局 → 拦截未实现标准 → 逐球员抽图（40%）。
 fn map_stage(
     params: &ReplaceParams,
     rtf_data: &[PlayerRecord],
@@ -141,15 +140,15 @@ fn map_stage(
     }
     .map_err(|e| failed(&e))?;
     logger.info("replace", format!("头像包识别：{}", layout_label(&mapper.layout)));
-    // 泛化拦截：模板规则清单外（尚未实现抽图规则）的模板明确报错（如未来的模板四/五/六）。
-    if let PackLayout::Standard { template, .. } = mapper.layout {
-        if !IMPLEMENTED_TEMPLATES.contains(&template) {
-            return Err(failed(&format!("模板{template}的抽图规则暂未实现，请检查模板规则配置")));
+    // 泛化拦截：标准规则清单外（尚未实现抽图规则）的标准明确报错（如未来的标准四/五/六）。
+    if let PackLayout::Standard { standard, .. } = mapper.layout {
+        if !IMPLEMENTED_STANDARDS.contains(&standard) {
+            return Err(failed(&format!("标准{standard}的抽图规则暂未实现，请检查标准规则配置")));
         }
     }
     // 逐球员抽图（内部同样逐项检查 cancel）；返回 None 可能是被取消，也可能是其他失败，据标志区分。
     let mapping = mapper
-        .generate_mapping(rtf_data, params.mode, params.allow_duplicates, cancel, &params.rule_config)
+        .generate_mapping(rtf_data, params.mode, params.allow_duplicates, cancel)
         .ok_or_else(|| if is_cancelled(cancel) { cancelled() } else { failed("映射失败") })?;
     logger.info("replace", format!(
         "映射完成：{} 条（模式「{}」），耗时 {:.1?}", mapping.len(), mode_label(&params.mode), t.elapsed()));
@@ -192,12 +191,12 @@ fn mode_label(mode: &Mode) -> &'static str {
 /// 布局判定的中文描述（日志用）。
 fn layout_label(layout: &PackLayout) -> String {
     match layout {
-        PackLayout::Flat => "模板一：图片平铺，无种族子目录".into(),
+        PackLayout::Flat => "标准一：图片平铺，无种族子目录".into(),
         PackLayout::Empty => "空包（无子目录且无图片）".into(),
-        PackLayout::Standard { template, complete } => format!(
-            "模板{template}，{}",
+        PackLayout::Standard { standard, complete } => format!(
+            "标准{standard}，{}",
             if *complete { "配置目录齐全" } else { "配置目录不全" }),
-        PackLayout::Unknown => "无法识别模板：子目录与 FolderList 均不匹配，将递归全池随机抽图".into(),
+        PackLayout::Unknown => "无法识别标准：子目录与 FolderList 均不匹配，将递归全池随机抽图".into(),
     }
 }
 
@@ -218,7 +217,7 @@ fn cancelled() -> RunResult {
 mod tests {
     use super::*;
     use crate::logger::{LogLine, Logger};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use std::fs;
 
     fn setup() -> (tempfile::TempDir, String, String) {
@@ -323,30 +322,29 @@ mod tests {
     }
 
     #[test]
-    fn standard3_pack_maps_via_mappings() {
-        // 模板三（FolderList 50 目录）+ Mappings 检索：配置 ESP 码 1 → Spain，映射进对应目录；
-        // 未配置国籍走 Fallback=random（递归全池随机），同样产出映射。
+    fn standard3_pack_maps_via_rule_blocks() {
+        // 标准三（FolderList 62 目录）+ 规则块检索，三条路径各覆盖一名球员：
+        //   ESP 码 1 → 国家块的 "default" → 本国基础池 Spain；
+        //   JAM 码 1 → 族群块 Afrocaribbean 的 directly → Mestizo；
+        //   USA 码 0 → 族群块 CaucasianNA 的 "default" → CaucasianNA（包内该目录为空）
+        //              → 第一级回退仍是它 → 第二级 Fallback=random，从递归全池抽到图。
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("pack");
-        let base = RuleConfig::builtin();
-        for name in &base.template3.folder_list {
+        let rule_config = RuleConfig::builtin();
+        for name in &rule_config.standard3.folder_list {
             fs::create_dir_all(img.join(name)).unwrap();
         }
         fs::write(img.join("Spain").join("sp1.png"), b"png").unwrap();
         fs::write(img.join("Spain").join("sp2.png"), b"png").unwrap();
+        fs::write(img.join("Mestizo").join("me1.png"), b"png").unwrap();
         fs::write(img.join("France").join("fr1.png"), b"png").unwrap();
-        // Mappings（Flat 形态：国籍→细分目录）：ESP → Spain；展开后码 1 命中。
-        let mut rule_config = base.clone();
-        rule_config.template3.mappings =
-            crate::rule_config::MappingsSpec::Flat(BTreeMap::from([
-                ("ESP".to_string(), "Spain".to_string()),
-            ]));
         let rtf = dir.path().join("list.rtf");
         fs::write(
             &rtf,
             "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
              | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
-             | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n",
+             | 2000472009| JAM  |         | John   | 1  | 12 | 1 |\n\
+             | 2000472010| USA  |         | Jack   | 1  | 12 | 0 |\n",
         ).unwrap();
         let params = ReplaceParams {
             rtf_path: rtf.to_string_lossy().to_string(),
@@ -359,17 +357,23 @@ mod tests {
         let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
         let result = run(&params, &mut |_, _| {}, &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Finished);
-        assert_eq!(result.mapping.len(), 2);
-        // ESP 球员按 Mappings 精确命中 Spain 目录。
-        let esp = result.mapping.iter().find(|m| m.uid == "r-2000472008").unwrap();
+        assert_eq!(result.mapping.len(), 3);
+        let by_uid = |u: &str| result.mapping.iter().find(|m| m.uid == u).unwrap().clone();
+        // 国家块 "default" → 本国基础池。
+        let esp = by_uid("r-2000472008");
         assert_eq!(esp.ethnicity, "Spain");
         assert!(["sp1", "sp2"].contains(&esp.image.as_str()));
-        // USA 未配置 → Fallback=random 仍映射（image 为包内真实文件）。
-        let usa = result.mapping.iter().find(|m| m.uid == "r-2000472009").unwrap();
+        // 族群块 directly → 指定目录。
+        assert_eq!(by_uid("r-2000472009").ethnicity, "Mestizo");
+        // 目标目录为空 → 回退链末端 Fallback=random，仍产出可定位的真实文件。
+        let usa = by_uid("r-2000472010");
+        assert!(["Spain", "Mestizo", "France"].contains(&usa.ethnicity.as_str()),
+                "兜底只应在有图的目录里抽，实际：{}", usa.ethnicity);
         assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), &usa.ethnicity, &usa.image).is_some());
         // config.xml 解析回目录相对路径口径。
         let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
         assert_eq!(xml["r-2000472008"].ethnicity, "Spain");
+        assert_eq!(xml["r-2000472009"].ethnicity, "Mestizo");
     }
 
     #[test]

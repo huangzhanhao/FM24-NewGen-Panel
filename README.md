@@ -208,6 +208,8 @@ src-tauri/assets/
   eth_cfg.json          国籍（英文三字码）→ 种族目录 对照表
   nat_translation.json  中文国籍 → 英文三字码 对照表（解析中文 RTF 用）
   config_template       config.xml 的固定头尾模板，[players] 为占位符
+  standard2.json        标准二规则出厂默认（14 种族目录 + 国籍映射 + 种族码修正）
+  standard3.json        标准三规则出厂默认（62 图像池 + 族群映射规则块）
 
 # 用户数据目录（开发：<项目根>/data/；安装后：<安装目录>/data/）
 .user/
@@ -215,9 +217,62 @@ src-tauri/assets/
   <Profile>.json        单个 Profile 的头像包目录（组）与 RTF 设置
   <Profile>/
     <sanitized_dir>.xml 组映射快照（切换 Profile / 组时交换）
+rules/
+  standard2.json        标准二规则的用户副本（首次启动从出厂默认导出，改完下次替换即生效）
+  standard3.json        标准三规则的用户副本（同上）
 webview/                WebView2 浏览器数据（缓存/localStorage，已重定向，不写 C 盘）
 newgan.log              运行日志（10 MB × 3 滚动）
 ```
+
+---
+
+## 头像包标准与抽图规则
+
+程序扫描头像包根目录后自动判定它属于哪个「标准」，再用该标准配套的抽图模型给每名球员选图。一个标准 = 一套目录组织约定 + 一份规则 json + 一个抽图模型，三者互不干涉。
+
+| 标准 | 包结构 | 抽图逻辑 | 规则文件 |
+| :--- | :--- | :--- | :--- |
+| 标准一 | 图片直铺在根目录，无子目录 | 完全随机（忽略国籍与种族码） | 无（没有可配数据） |
+| 标准二 | 14 个种族/大区目录 | 国籍查表 → 种族码修正 → 目录池随机 | `standard2.json` |
+| 标准三 | 细分目录（国籍级 + 族群级，62 个图像池） | 规则块检索（见下） | `standard3.json` |
+| 无法识别 / 空包 | 目录名与任何标准的清单都不构成包含关系 | 递归全池随机（包内所有子/孙目录 + 根目录图片） | 无 |
+
+判定只看目录名：包内目录**包含**某标准 `FolderList` 的全部条目 → 归该标准（多出的目录不进抽图池，只在「检查完整性」里列为多余）；包内目录全部**落在**某标准清单内但有缺失 → 也归该标准，状态为可修复，可一键创建缺失目录。
+
+### 标准三：三级规则块
+
+按优先级选出规则块，再取块里球员种族码（0–10）对应的那条规则：
+
+1. **国家块**：规则表里以该国籍三字码为键（如 `BRA`）；
+2. **族群块**：以该国基础池目录名为键（如 `Mestizo`、`Afrocaribbean`）；
+3. **全局默认块** `_DEFAULT_`：其余所有国籍。
+
+每条规则有四种形态：
+
+| 写法 | 含义 |
+| :--- | :--- |
+| `"default"` | 用归属者自己的目录（三级块下都等于该国的基础池 `Ethnics[国籍]`） |
+| `{"typeOfMapping":"directly","directory":"Spain"}` | 直接映射到单一目录 |
+| `{"typeOfMapping":"random","directory":["Japan","China"]}` | 等概率随机取一个 |
+| `{"typeOfMapping":"randomWithWeight","directory":{"ethnicities":["Mestizo","NorthernSA"],"weights":[66,33]}}` | 按权重随机（权重按总和归一，不要求恰好 100） |
+
+解析出的目录若在头像包里不存在或为空，按两级回退处理：**先退到该国基础池** `Ethnics[国籍]`，仍不可用再按 `Fallback` 字段处理（`random` = 从包内递归全池随机抽，默认值；`skip` = 跳过该球员不生成映射）。
+
+### 编辑规则
+
+界面里点「规则配置」直接改并保存，或用资源管理器打开 `data/rules/` 改 `standardN.json`（改完下次替换即生效）。保存与加载都会做结构校验：版本必须是 4、规则块键必须是国籍码或清单内目录名、每个块必须 0–10 全枚举、规则指向的目录必须在 `FolderList` 内、加权两列必须等长且全为正数。非法内容不会写盘，加载失败会报错并指明文件路径（不静默回退出厂默认，避免用改坏的规则抽图而不自知）。
+
+`data/rules/template2.json` 这类旧命名文件会在启动时自动改名续用；已作废的旧标准三规则文件会被直接删除。
+
+### 新增一个标准
+
+判定层完全数据驱动，新增标准不用改判定代码，六步即可：`assets/standardN.json` → `src-tauri/src/templates/standardN.rs`（规则结构体 + 校验 + 抽图模型 + 单测，只依赖 `templates/mod.rs` 的接口）→ `assets.rs` 内嵌 → `templates/mod.rs` 登记（配置字段、加载导出、`folder_lists()`、`for_layout` 分支、`rule_files()`、已实现标准清单）→ 前端加一个 chip。命名一律跟着标准号走：`standardN.rs` ↔ `standardN.json` ↔ 类型 `StandardNConfig` / `StandardNRule`。
+
+注意各标准的 `FolderList` 不能互相包含，否则判定会先命中先赢；加载时会校验这一点并报错。完整设计与验收清单见 `docs/模板三抽图模型重构计划.md`。
+
+### 目录名不在清单里的老头像包
+
+若包里的目录（例如 `Scandinavian`）不在标准三的 62 目录清单内，判定结果是「无法识别」，替换时走递归全池随机：仍然能出图，但不按国籍与种族码路由。想恢复精确路由有两条路——在 `data/rules/standard3.json` 的 `FolderList` 里补上你包里的目录名，或点「一键创建缺失目录」把清单补齐。
 
 ---
 
@@ -230,6 +285,7 @@ newgan.log              运行日志（10 MB × 3 滚动）
 | `The RTF file is invalid!` | RTF 表头/列顺序不符，或用了其他分隔符导出。用本仓库 `views/` 视图重新导出；日志会写明识别到的语言 |
 | `The RTF file doesn't exist!` | 文件被移动或改名，重新在配置卡中 `选择文件` |
 | `缺少 N 个种族目录` | 头像包缺该种族目录；点 `一键创建缺失目录`，或确认选的是头像包**根目录** |
+| `标准三规则无效：…` / `标准规则文件无法解析：…` | `data/rules/standardN.json` 被改坏（版本不符、块缺码、目录不在 `FolderList` 内、加权两列不等长等）。错误信息会指明文件与具体键；也可删掉该文件让程序重新导出一份出厂默认 |
 | 大量 `primary nationality ... is None - skipping` | 映射表缺该国籍码（如 FM 用了非英文三字码），提 issue 反馈；也可修改 `src-tauri/assets/eth_cfg.json` 后自行构建 |
 | 中文 RTF 中国籍未翻译 | `nat_translation.json` 缺该条目，提 issue 反馈；也可修改 `src-tauri/assets/nat_translation.json` 后自行构建 |
 | 名单里一个人都没换 | 勾了 `仅随机人` 但 RTF 无「是否为随机人」列，或该列全为 `No`；关掉开关，或改用 14 列视图导出 |

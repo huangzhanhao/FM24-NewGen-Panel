@@ -8,18 +8,17 @@
 
 // 下面这些 `mod xxx;` 声明「本 crate 包含哪些模块」，每个对应同目录下的一个 .rs 文件。
 // 只有在这里声明过的模块，才能被 crate 内部使用（Rust 的模块需要显式声明）。
-mod assets;          // 编译期内嵌的只读映射表（国籍翻译、config.xml 模板、模板规则默认数据）
+mod assets;          // 编译期内嵌的只读映射表（国籍翻译、config.xml 模板、标准规则默认数据）
 mod commands;        // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper;     // 核心算法：球员 → 头像图片的映射
-mod facepack;        // 头像包扫描与模板判定（FolderList 来自 rule_config，不硬编码）
+mod facepack;        // 头像包扫描与标准判定（FolderList 来自 templates，不硬编码）
 mod json_store;      // JSON 配置的原子读写
 mod logger;          // 日志系统（环形缓冲 + 滚动文件 + 事件推送）
 mod paths;           // 路径规范化工具
-mod pick_rules;      // 抽图模板规则（按模板分发的具体选图逻辑）
 mod profile_manager; // 存档（Profile）与头像包（组）管理
-mod rule_config;     // 模板规则配置（内置默认 + 用户可编辑 json 的加载/导出）
 mod replace_flow;    // 「Replace Faces」整条流水线
 mod rtf_parser;      // 解析 FM 导出的 RTF 球员名单
+mod templates;       // 头像包标准与抽图模型（一个标准一个自包含模块 + 规则配置聚合）
 mod xml_parser;      // 读写 config.xml（FM 认的头像映射配置）
 
 use commands::AppState;                 // 应用全局状态（被 Tauri 托管，命令里通过 State 取用）
@@ -146,10 +145,10 @@ pub fn run() {
             // 5) 初始化存档管理器（ProfileManager），读取或创建用户配置。
             let pm = profile_manager::ProfileManager::new(None, &data_dir)?;
 
-            // 5.5) 模板规则：首次运行把内置默认（assets/templateN.json）导出为用户可编辑文件
-            //      （data/rules/templateN.json，已存在不覆盖）。失败不阻断启动，仅记警告。
-            if let Err(e) = rule_config::ensure_user_files(&data_dir) {
-                logger.warn("rules", format!("导出模板规则默认文件失败: {e}"));
+            // 5.5) 标准规则：首次运行把内置默认（assets/standardN.json）导出为用户可编辑文件
+            //      （data/rules/standardN.json，已存在不覆盖）。失败不阻断启动，仅记警告。
+            if let Err(e) = templates::ensure_user_files(&data_dir) {
+                logger.warn("rules", format!("导出标准规则默认文件失败: {e}"));
             }
 
             // 6) app.manage(...) 把全局状态交给 Tauri 托管。
@@ -163,7 +162,7 @@ pub fn run() {
                 rtf_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次解析的 RTF 球员缓存
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)),     // 「扫描头像」的包索引缓存（初始为空）
-                data_dir,                                    // 便携数据目录（模板规则在其下 rules/）
+                data_dir,                                    // 便携数据目录（标准规则在其下 rules/）
             });
 
             // 7) 启动一个后台线程，把日志按批通过事件（log:batch）推给前端。
@@ -188,12 +187,12 @@ pub fn run() {
             commands::create_missing_dirs,  // 批量创建缺失目录
             commands::scan_images,          // 扫描头像：建图片索引缓存（供替换复用），结果写日志
             commands::scan_rtf,             // 扫描RTF：解析名单并填充预览缓存，结果写日志
-            commands::open_rules_dir,       // 打开模板规则目录（data/rules/，用户编辑 templateN.json）
+            commands::open_rules_dir,       // 打开标准规则目录（data/rules/，用户编辑 templateN.json）
             commands::open_pack_config_dir, // 打开头像包目录（config.xml 所在目录，查看config）
             commands::open_snapshot_dir,    // 打开存档 XML 快照所在目录（查看快照）
             commands::preview_profile,      // 预览指定存档（下拉浏览展示，不切换当前档）
-            commands::read_rule_file,       // 读取模板规则文件内容（规则编辑对话框）
-            commands::save_rule_file,       // 保存模板规则文件（先校验 schema 再原子写回）
+            commands::read_rule_file,       // 读取标准规则文件内容（规则编辑对话框）
+            commands::save_rule_file,       // 保存标准规则文件（先校验 schema 再原子写回）
             commands::start_replace,        // 启动批量替换（后台线程）
             commands::cancel_replace,       // 请求取消正在进行的替换
             commands::query_players,        // 分页查询名单（预览）

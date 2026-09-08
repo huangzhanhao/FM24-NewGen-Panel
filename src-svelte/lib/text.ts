@@ -67,7 +67,7 @@ export const t = {
     xmlPlaceholder: '未关联头像包（执行替换后生成）',
     noGroupHint: '请先关联头像包目录',
     checkIntegrityBtn: '检查完整性',
-    checkIntegrityHint: '按规则 json 的 FolderList 识别头像包归属哪个模板',
+    checkIntegrityHint: '按规则 json 的 FolderList 识别头像包归属哪个标准',
     scanImagesBtn: '扫描头像',
     scanImagesHint: '扫描头像包并缓存图片索引（结果写入日志）',
     selectRtfBtn: '选择RTF',
@@ -81,19 +81,19 @@ export const t = {
     viewSnapshotBtn: '查看快照',
     viewSnapshotHint: '打开存档 XML 快照所在目录',
     noGroupGuide: '先在左侧「头像包（组）」关联一个头像包目录，或点击已有组。',
-    tpl1Complete: '模板一：图片直铺，无种族子目录',
-    tplComplete: (standard: number, total: number) => `模板${standard}：${total} 个配置目录齐全`,
+    tpl1Complete: '标准一：图片直铺，无种族子目录',
+    tplComplete: (standard: number, total: number) => `标准${standard}：${total} 个配置目录齐全`,
     integrityOk: (label: string) => `✓ 头像包结构完整（${label}）`,
     extraDirsNote: (n: number) => (n > 0 ? `；另含 ${n} 个未配置目录（不参与抽图）` : ''),
     integrityFixable: (standard: number, missing: number, found: number, total: number, list: string) =>
-      `模板${standard}：缺少 ${missing} 个目录（已有 ${found}/${total}）：${list}`,
+      `标准${standard}：缺少 ${missing} 个目录（已有 ${found}/${total}）：${list}`,
     createMissingBtn: '一键创建缺失目录',
     missingDirsTitle: '缺失目录',
     missingDirsConfirm: (standard: number, count: number, list: string) =>
-      `模板${standard} 缺少 ${count} 个目录：\n${list}\n\n自动创建？`,
-    integrityUnknown: '⚠ 无法识别头像包结构：子目录与任何模板的 FolderList 清单都不构成包含关系，替换时将把包内全部图片随机分配；也可在「规则配置」中调整模板目录清单。',
+      `标准${standard} 缺少 ${count} 个目录：\n${list}\n\n自动创建？`,
+    integrityUnknown: '⚠ 无法识别头像包结构：子目录与任何标准的 FolderList 清单都不构成包含关系，替换时将把包内全部图片随机分配；也可在「规则配置」中调整标准目录清单。',
     ruleConfigBtn: '规则配置',
-    ruleConfigHint: '直接查看、修改并保存模板规则文件（国籍→目录映射、FolderList 等），保存时自动校验 JSON 格式',
+    ruleConfigHint: '直接查看、修改并保存标准规则文件（国籍→目录映射、FolderList 等），保存时自动校验 JSON 格式',
     ruleConfigNote: '抽图规则来自规则 json（可编辑），保存后下次替换/检查完整性即生效',
   },
 
@@ -205,10 +205,10 @@ export const t = {
     closeAria: '关闭日志面板',
   },
 
-  /** 模板规则编辑对话框 */
+  /** 标准规则编辑对话框 */
   ruleEditor: {
-    tpl2Label: '模板二（14 种族目录）',
-    tpl3Label: '模板三（细分目录）',
+    std2Label: '标准二（14 种族目录）',
+    std3Label: '标准三（细分目录）',
     saveBtn: '保存',
     closeBtn: '关闭',
     saveHint: '保存前会校验 JSON 格式，非法内容不会被写入',
@@ -216,6 +216,6 @@ export const t = {
     unsavedTitle: '未保存修改',
     unsavedSwitch: (label: string) => `${label} 有未保存的修改，确定放弃并切换？`,
     unsavedClose: (label: string) => `${label} 有未保存的修改，确定关闭？`,
-    editorAria: '模板规则内容',
+    editorAria: '标准规则内容',
   },
 } as const;

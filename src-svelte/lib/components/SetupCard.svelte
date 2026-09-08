@@ -20,7 +20,7 @@
   const browseMode = $derived(
     !!snap && appStore.selectedProfile !== (appStore.snapshot?.currentProfile ?? ''),
   );
-  // 完整时按命中的模板号给出中文标注（目录总数来自模板 FolderList，用户可配置）。
+  // 完整时按命中的标准号给出中文标注（目录总数来自标准 FolderList，用户可配置）。
   const completeLabel = $derived(
     integrity?.standard === 1 ? t.setup.tpl1Complete
     : integrity && integrity.standard >= 2
@@ -47,13 +47,13 @@
     }
   }
 
-  /** 检查完整性：按规则 json 的 FolderList 识别头像包归属哪个模板（可能因用户改坏 json 报错）。 */
+  /** 检查完整性：按规则 json 的 FolderList 识别头像包归属哪个标准（可能因用户改坏 json 报错）。 */
   async function checkIntegrity() {
     if (!snap?.currentGroup) return;
     try { integrity = await api.checkIntegrity(snap.currentGroup); } catch (e) { await showError(e); }
   }
 
-  /** 打开模板规则目录（data/rules/）：编辑 template2/template3.json，保存后下次替换即生效。 */
+  /** 打开标准规则目录（data/rules/）：编辑 standard2/standard3.json，保存后下次替换即生效。 */
   async function openRulesDir() {
     try { await api.openRulesDir(); } catch (e) { await showError(e); }
   }
@@ -154,7 +154,7 @@
         <p class="warn-text small">{t.setup.integrityUnknown}</p>
       {/if}
     {/if}
-    <!-- 模板规则入口：打开规则编辑对话框（查看/修改/保存 template2|template3.json）。 -->
+    <!-- 标准规则入口：打开规则编辑对话框（查看/修改/保存 standard2|standard3.json）。 -->
     <div class="row">
       <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy}
               title={t.setup.ruleConfigHint}>{t.setup.ruleConfigBtn}</button>

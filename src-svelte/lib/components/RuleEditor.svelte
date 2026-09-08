@@ -1,6 +1,6 @@
-<!-- 【新手导读】模板规则编辑对话框：直接查看/修改/保存 data/rules/ 下的 template2|template3.json。
-     模板二/三用顶部 chip 切换；切换与关闭前若有未保存修改会弹确认；
-     保存时后端先按模板 schema 校验（非法 JSON 直接报错，不会写入坏规则）。 -->
+<!-- 【新手导读】标准规则编辑对话框：直接查看/修改/保存 data/rules/ 下的 standard2|standard3.json。
+     标准二/三用顶部 chip 切换；切换与关闭前若有未保存修改会弹确认；
+     保存时后端先按该标准 schema 校验（非法 JSON 直接报错，不会写入坏规则）。 -->
 <script lang="ts">
   import { ask } from '@tauri-apps/plugin-dialog';
   import { api } from '../api';
@@ -8,22 +8,22 @@
   import { t } from '../text'; // 全局文案常量
   import { appStore, refreshSnapshot } from '../stores/app.svelte';
 
-  type RuleName = 'template2' | 'template3';
+  type RuleName = 'standard2' | 'standard3';
   const LABELS: Record<RuleName, string> = {
-    template2: t.ruleEditor.tpl2Label,
-    template3: t.ruleEditor.tpl3Label,
+    standard2: t.ruleEditor.std2Label,
+    standard3: t.ruleEditor.std3Label,
   };
-  const NAMES: RuleName[] = ['template2', 'template3'];
+  const NAMES: RuleName[] = ['standard2', 'standard3'];
 
   let open = $state(false);
-  let active = $state<RuleName>('template2');
+  let active = $state<RuleName>('standard2');
   let text = $state('');      // 编辑区内容
   let baseline = $state('');  // 载入时的内容（用于判断有无未保存修改）
   let status = $state('');    // 行内提示（保存成功等）
 
   const dirty = $derived(text !== baseline);
 
-  /** 由父组件调用（bind:this 后 openEditor()）打开对话框并载入当前模板内容。 */
+  /** 由父组件调用（bind:this 后 openEditor()）打开对话框并载入当前标准内容。 */
   export function openEditor() {
     open = true;
     void load(active);

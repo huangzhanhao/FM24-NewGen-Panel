@@ -2,8 +2,7 @@
 //! 这是整个应用的「大脑」：根据每个球员的国籍 + 种族码，算出该用头像包里哪个种族目录，
 //! 再从目录里选一张图片，最终得到一条「球员 UID → 图片」的映射。
 use crate::facepack::{self, scan_pack, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
-use crate::pick_rules::{self, PickRule};               // 抽图模板规则（按模板分发的具体选图逻辑）
-use crate::rule_config::RuleConfig;                    // 模板规则配置（json 固化，用户可配置）
+use crate::templates::{self, PickRule, RuleConfig};           // 抽图模型（一个标准一套）+ 规则配置聚合
 use crate::rtf_parser::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
 use std::collections::{BTreeSet, HashMap}; // BTreeSet = 有序集合，保证行为可复现
@@ -31,17 +30,17 @@ impl Mode {
     }
 }
 
-/// 头像映射器：持有扫描判定的布局与对应模板规则，负责按模式编排并组装映射条目。
+/// 头像映射器：持有扫描判定的布局与对应标准的抽图模型，负责按模式编排并组装映射条目。
 pub struct FaceMapper {
     pub img_dir: String,
-    /// 布局判定结果（facepack::classify 按 rule_config 的 FolderList 判定）；replace_flow 据此拦截未实现模板。
+    /// 布局判定结果（facepack::classify 按 templates 的 FolderList 判定）；replace_flow 据此拦截未实现标准。
     pub layout: PackLayout,
-    /// 抽图模板规则（模板一平铺 / 模板二种族匹配 / 模板三 Mappings 检索 / Unknown 递归全池），池的所有权在规则内。
+    /// 抽图模型（标准一平铺 / 标准二种族匹配 / 标准三细分目录检索 / 退化布局递归全池），池的所有权在模型内。
     rule: Box<dyn PickRule>,
 }
 
 impl FaceMapper {
-    /// 扫描头像包并建立索引（对等 v1 __init__）。扫描交给 facepack::scan_pack，模板判定用 rule_config。
+    /// 扫描头像包并建立索引。扫描交给 facepack::scan_pack，标准判定与模型选择交给 templates。
     pub fn new(img_dir: &str, config: &RuleConfig) -> Result<Self, String> {
         let scan = scan_pack(img_dir)?;
         Self::from_scan(img_dir, &scan, config)
@@ -60,7 +59,7 @@ impl FaceMapper {
         Ok(Self {
             img_dir: img_dir.to_string(),
             layout,
-            rule: pick_rules::for_layout(layout, scan, config),
+            rule: templates::for_layout(layout, scan, config),
         })
     }
 
@@ -72,7 +71,6 @@ impl FaceMapper {
         mode: Mode,
         duplicates: bool,      // 是否允许图片复用
         cancel: &AtomicBool,
-        config: &RuleConfig,   // 模板规则配置（国籍映射/码修正/Mappings 检索，json 固化）
     ) -> Option<Vec<MappingEntry>> {
         // 开始前先看一眼是否已取消（Ordering::Relaxed 是最宽松的内存顺序，这里只需原子性）。
         if cancel.load(Ordering::Relaxed) {
@@ -96,9 +94,9 @@ impl FaceMapper {
         }
         // 按模式分发到具体处理函数。
         match mode {
-            Mode::Preserve => self.process_preserve(rtf_data, &xml_data, duplicates, cancel, config),
-            Mode::Overwrite => self.process_overwrite(rtf_data, &xml_data, duplicates, cancel, config),
-            Mode::Generate => self.process_generate(rtf_data, duplicates, cancel, config),
+            Mode::Preserve => self.process_preserve(rtf_data, &xml_data, duplicates, cancel),
+            Mode::Overwrite => self.process_overwrite(rtf_data, &xml_data, duplicates, cancel),
+            Mode::Generate => self.process_generate(rtf_data, duplicates, cancel),
         }
     }
 
@@ -109,7 +107,6 @@ impl FaceMapper {
         xml_data: &HashMap<String, MappingEntry>,
         duplicates: bool,
         cancel: &AtomicBool,
-        config: &RuleConfig,
     ) -> Option<Vec<MappingEntry>> {
         let mut mapping = Vec::new();
         // filter 只留下 XML 中还没有的 UID（即新球员）。
@@ -117,7 +114,7 @@ impl FaceMapper {
             if cancel.load(Ordering::Relaxed) {
                 return None; // 逐项检查取消，及时中断
             }
-            if let Some(m) = self.build_player_mapping(p, duplicates, config) {
+            if let Some(m) = self.build_player_mapping(p, duplicates) {
                 mapping.push(m);
             }
         }
@@ -133,7 +130,6 @@ impl FaceMapper {
         xml_data: &HashMap<String, MappingEntry>,
         duplicates: bool,
         cancel: &AtomicBool,
-        config: &RuleConfig,
     ) -> Option<Vec<MappingEntry>> {
         let mut rest = xml_data.clone(); // 先把旧映射全部拷贝一份，后续逐个剔除名单内的
         let mut mapping = Vec::new();
@@ -141,7 +137,7 @@ impl FaceMapper {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            if let Some(m) = self.build_player_mapping(p, duplicates, config) {
+            if let Some(m) = self.build_player_mapping(p, duplicates) {
                 mapping.push(m);
                 rest.remove(&p.uid); // 名单内球员全部重抽（从 rest 中移除旧的）
             }
@@ -156,31 +152,29 @@ impl FaceMapper {
         rtf_data: &[PlayerRecord],
         duplicates: bool,
         cancel: &AtomicBool,
-        config: &RuleConfig,
     ) -> Option<Vec<MappingEntry>> {
         let mut mapping = Vec::new();
         for p in rtf_data {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            if let Some(m) = self.build_player_mapping(p, duplicates, config) {
+            if let Some(m) = self.build_player_mapping(p, duplicates) {
                 mapping.push(m);
             }
         }
         Some(mapping)
     }
 
-    /// 单球员映射：按扫描出的模板规则抽图（规则选择见 pick_rules::for_layout）。
+    /// 单球员映射：按扫描出的标准规则抽图（规则选择见 templates::for_layout）。
     /// 返回 None 表示该球员无法映射（跳过）。
     fn build_player_mapping(
         &mut self,
         p: &PlayerRecord,
         duplicates: bool,
-        config: &RuleConfig,
     ) -> Option<MappingEntry> {
         // PickedImage.dir = 图片相对头像包根的目录（"" = 根，可多级 "a/b"），原样写入 ethnicity 字段；
         // config.xml 的 from 由 write_xml 经 record_from 拼成统一相对路径。
-        let img = self.rule.pick(p, duplicates, config)?;
+        let img = self.rule.pick(p, duplicates)?;
         Some(MappingEntry { uid: p.uid.clone(), ethnicity: img.dir, image: img.stem })
     }
 }
@@ -188,7 +182,7 @@ impl FaceMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rule_config::RuleConfig;
+    use crate::templates::RuleConfig;
 
     /// 测试用规则配置：内置出厂默认。
     fn config() -> RuleConfig {
@@ -227,7 +221,7 @@ mod tests {
         ];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, true, &cancel, &config())
+            .generate_mapping(&data, Mode::Generate, true, &cancel)
             .unwrap();
         assert_eq!(mapping.len(), 2);
         assert_eq!(mapping[0].ethnicity, "SpanMed");
@@ -241,8 +235,8 @@ mod tests {
     #[test]
     fn no_duplicates_exhausts_pool() {
         let dir = tempfile::tempdir().unwrap();
-        // {ESP, SpanMed} 混合目录包：ESP 不在模板二 FolderList → 判 Unknown → 递归全池规则。
-        // 禁重复 + 6 张图、3 名球员：断言 3 条互不重复的映射（无重复语义与模板无关）。
+        // {ESP, SpanMed} 混合目录包：ESP 不在标准二 FolderList → 判 Unknown → 递归全池规则。
+        // 禁重复 + 6 张图、3 名球员：断言 3 条互不重复的映射（无重复语义与标准无关）。
         let nat_dir = dir.path().join("ESP");
         std::fs::create_dir_all(&nat_dir).unwrap();
         for i in 0..3 {
@@ -258,7 +252,7 @@ mod tests {
         let data: Vec<PlayerRecord> = (0..3).map(|i| player(&format!("r-30{i}"), "ESP", "1")).collect();
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, false, &cancel, &config())
+            .generate_mapping(&data, Mode::Generate, false, &cancel)
             .unwrap();
         assert_eq!(mapping.len(), 3);
         let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
@@ -278,7 +272,7 @@ mod tests {
         let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "ESP", "1")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Preserve, true, &cancel, &config())
+            .generate_mapping(&data, Mode::Preserve, true, &cancel)
             .unwrap();
         // r-2001 保留旧映射，r-2002 新建
         let e = mapping.iter().find(|m| m.uid == "r-2001").unwrap();
@@ -293,7 +287,7 @@ mod tests {
         let mut mapper = FaceMapper::new(&img, &config()).unwrap();
         let cancel = AtomicBool::new(true); // 已取消
         let data = vec![player("r-2001", "ESP", "1")];
-        assert!(mapper.generate_mapping(&data, Mode::Generate, true, &cancel, &config()).is_none());
+        assert!(mapper.generate_mapping(&data, Mode::Generate, true, &cancel).is_none());
     }
 
     /// 标准一平铺包 fixture：根目录 5 张普通图 + 1 张点号文件名（锁定 file_stem 词干规则）。
@@ -307,15 +301,15 @@ mod tests {
 
     #[test]
     fn standard2_pack_classified_and_maps_by_ethnic() {
-        // facepack() 恰为 14 个合法种族目录 → 按内置 FolderList 判模板二且走种族匹配规则。
+        // facepack() 恰为 14 个合法种族目录 → 按内置 FolderList 判标准二且走种族匹配规则。
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
         let mut mapper = FaceMapper::new(&img, &config()).unwrap();
-        assert_eq!(mapper.layout, PackLayout::Standard { template: 2, complete: true });
+        assert_eq!(mapper.layout, PackLayout::Standard { standard: 2, complete: true });
         let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "USA", "0")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, true, &cancel, &config())
+            .generate_mapping(&data, Mode::Generate, true, &cancel)
             .unwrap();
         assert_eq!(mapping.len(), 2);
         assert_eq!(mapping[0].ethnicity, "SpanMed"); // 按 correct_ethnic 进种族目录
@@ -331,11 +325,11 @@ mod tests {
         let img = flatpack(&dir);
         let mut mapper = FaceMapper::new(&img, &config()).unwrap();
         assert_eq!(mapper.layout, PackLayout::Flat);
-        // ZZZ 不在模板映射：平铺必须忽略国籍/种族码，未知国籍球员同样被映射。
+        // ZZZ 不在标准映射：平铺必须忽略国籍/种族码，未知国籍球员同样被映射。
         let data = vec![player("r-3001", "ZZZ", "1"), player("r-3002", "ESP", "9")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, true, &cancel, &config())
+            .generate_mapping(&data, Mode::Generate, true, &cancel)
             .unwrap();
         assert_eq!(mapping.len(), 2);
         for m in &mapping {
@@ -353,7 +347,7 @@ mod tests {
         let data: Vec<PlayerRecord> = (0..8).map(|i| player(&format!("r-40{i}"), "ESP", "1")).collect();
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, false, &cancel, &config())
+            .generate_mapping(&data, Mode::Generate, false, &cancel)
             .unwrap();
         assert_eq!(mapping.len(), 6); // 池耗尽后其余球员被跳过
         let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
@@ -373,7 +367,7 @@ mod tests {
         let data = vec![player("r-3001", "ESP", "1"), player("r-3002", "ESP", "1")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Preserve, true, &cancel, &config())
+            .generate_mapping(&data, Mode::Preserve, true, &cancel)
             .unwrap();
         // r-3001 保留旧平铺映射；r-3002 新建且种族为空。
         let e = mapping.iter().find(|m| m.uid == "r-3001").unwrap();
@@ -398,7 +392,7 @@ mod tests {
             (0..3).map(|i| player(&format!("r-50{i}"), "ZZZ", "1")).collect();
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, false, &cancel, &config())
+            .generate_mapping(&data, Mode::Generate, false, &cancel)
             .unwrap();
         assert_eq!(mapping.len(), 3);
         let froms: BTreeSet<String> = mapping

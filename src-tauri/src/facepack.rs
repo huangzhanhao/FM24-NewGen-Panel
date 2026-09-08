@@ -1,14 +1,15 @@
 //! 【新手导读】头像包布局扫描与判定。
-//! 社区头像包有多套组织"模板"（模板一：图片直铺；模板二：14 种族目录；模板三：细分目录；
-//! 未来可扩展模板四/五/六……）。本模块职责：
+//! 社区头像包有多套组织"标准"（标准一：图片直铺；标准二：14 种族目录；标准三：细分目录；
+//! 未来可扩展标准四/五/六……）。本模块职责：
 //!   1. 扫描：scan_pack 一次遍历建立图片索引（纯收集，不做判定）；
-//!   2. 判定：classify 按「各模板 json 的 FolderList」推断包属于哪个模板——
-//!      超集（含全部目录、可多出）或子集（有缺失）都算归属该模板，交叉/未知名 → Unknown。
-//! FolderList 来自 rule_config（用户可配置），本模块不再硬编码任何目录清单。
+//!   2. 判定：classify 按「各标准 json 的 FolderList」推断包属于哪个标准——
+//!      超集（含全部目录、可多出）或子集（有缺失）都算归属该标准，交叉/未知名 → Unknown。
+//!
+//! FolderList 来自 templates（用户可配置），本模块不再硬编码任何目录清单。
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// 14 个种族目录（模板二出厂默认的 FolderList 数据，也是 validate_image_dirs 的对照基准）。
+/// 14 个种族目录（标准二出厂默认的 FolderList 数据，也是 validate_image_dirs 的对照基准）。
 pub const FACEPACK_DIRS: [&str; 14] = [
     "African", "Asian", "Caucasian", "Central European", "EECA", "Italmed",
     "MENA", "MESA", "SAMed", "Scandinavian", "Seasian", "South American",
@@ -16,32 +17,32 @@ pub const FACEPACK_DIRS: [&str; 14] = [
 ];
 
 /// 头像包布局判定结果。
-/// 【泛化】Standard 携带模板号而非固定枚举二/三——新增模板四/五/六时判定层零改动。
+/// 【泛化】Standard 携带标准号而非固定枚举二/三——新增标准四/五/六时判定层零改动。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackLayout {
-    Flat,                                   // 模板一：无子目录 + 根目录有图片
+    Flat,                                   // 标准一：无子目录 + 根目录有图片
     Empty,                                  // 无子目录且无图片（空包）
-    Standard { template: u8, complete: bool }, // 归属模板号 template；complete = FolderList 目录全部存在（可有 extra）
-    Unknown,                                // 与任何模板的 FolderList 都不构成包含关系
+    Standard { standard: u8, complete: bool }, // 归属标准号；complete = FolderList 目录全部存在（可有 extra）
+    Unknown,                                // 与任何标准的 FolderList 都不构成包含关系
 }
 
 impl PackLayout {
-    /// 映射为对外的"标准号"：模板号原样返回；模板一/空包 → 1；无法识别 → 0。
+    /// 映射为对外的"标准号"：标准号原样返回；标准一/空包 → 1；无法识别 → 0。
     pub fn standard(&self) -> u8 {
         match self {
             PackLayout::Flat | PackLayout::Empty => 1,
-            PackLayout::Standard { template, .. } => *template,
+            PackLayout::Standard { standard, .. } => *standard,
             PackLayout::Unknown => 0,
         }
     }
     pub fn is_flat(&self) -> bool { matches!(self, PackLayout::Flat) }
 }
 
-/// 唯一的模板判定入口（纯函数，不读盘）。
-/// folder_lists：各模板的 (标准号, FolderList)，来自 rule_config（用户可配置），按模板号序传入。
-/// 判定顺序：**超集优先**（S ⊇ F，含全部目录、可多出 → 归属该模板，complete = 恰好相等），
-/// 其次**子集**（S ⊂ F，有缺失 → fixable；多个模板同时子集命中时按传入顺序，
-/// 仅 {Scandinavian} 一名重合的历史包因此归模板二），交叉/未知名 → Unknown。
+/// 唯一的标准判定入口（纯函数，不读盘）。
+/// folder_lists：各标准的 (标准号, FolderList)，来自 templates（用户可配置），按登记顺序传入。
+/// 判定顺序：**超集优先**（S ⊇ F，含全部目录、可多出 → 归属该标准，complete = 恰好相等），
+/// 其次**子集**（S ⊂ F，有缺失 → fixable；多个标准同时子集命中时按传入顺序，
+/// 仅 {Scandinavian} 一名重合的历史包因此归标准二），交叉/未知名 → Unknown。
 pub fn classify(
     subdirs: &BTreeSet<String>,
     has_root_images: bool,
@@ -51,19 +52,19 @@ pub fn classify(
         return if has_root_images { PackLayout::Flat } else { PackLayout::Empty };
     }
     let names: BTreeSet<&str> = subdirs.iter().map(String::as_str).collect();
-    // 第一轮：超集判定（包含某模板全部目录 → 归属且视为完整；超集间互斥——各模板清单互不包含）。
-    // complete = 模板配置的全部目录都在包内（S 可以多出 extra 目录，由调用方按 FolderList 排除）。
-    for (template, folders) in folder_lists {
+    // 第一轮：超集判定（包含某标准全部目录 → 归属且视为完整；超集间互斥——各标准清单互不包含）。
+    // complete = 标准配置的全部目录都在包内（S 可以多出 extra 目录，由调用方按 FolderList 排除）。
+    for (n, folders) in folder_lists {
         let f: BTreeSet<&str> = folders.iter().map(String::as_str).collect();
         if !f.is_empty() && f.is_subset(&names) {
-            return PackLayout::Standard { template: *template, complete: true };
+            return PackLayout::Standard { standard: *n, complete: true };
         }
     }
-    // 第二轮：子集判定（观察到的目录全部落在某模板清单内 → 就近归属，可补全缺失目录）。
-    for (template, folders) in folder_lists {
+    // 第二轮：子集判定（观察到的目录全部落在某标准清单内 → 就近归属，可补全缺失目录）。
+    for (n, folders) in folder_lists {
         let f: BTreeSet<&str> = folders.iter().map(String::as_str).collect();
         if names.is_subset(&f) {
-            return PackLayout::Standard { template: *template, complete: false };
+            return PackLayout::Standard { standard: *n, complete: false };
         }
     }
     PackLayout::Unknown
@@ -156,12 +157,12 @@ mod tests {
 
     fn names(v: &[&str]) -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() }
 
-    /// 构造与内置 template2/template3 默认 FolderList 对应的判定输入。
+    /// 构造与内置 standard2/standard3 默认 FolderList 对应的判定输入。
     fn folder_lists() -> Vec<(u8, Vec<String>)> {
-        let cfg = crate::rule_config::RuleConfig::builtin();
+        let cfg = crate::templates::RuleConfig::builtin();
         vec![
-            (2, cfg.template2.folder_list.clone()),
-            (3, cfg.template3.folder_list.clone()),
+            (2, cfg.standard2.folder_list.clone()),
+            (3, cfg.standard3.folder_list.clone()),
         ]
     }
 
@@ -183,34 +184,34 @@ mod tests {
         // 恰好 14 个 → complete
         let all: Vec<&str> = FACEPACK_DIRS.to_vec();
         assert_eq!(classify_with(&all, false),
-                   PackLayout::Standard { template: 2, complete: true });
+                   PackLayout::Standard { standard: 2, complete: true });
         // 子集（缺 1 个）→ fixable
         assert_eq!(classify_with(&all[..13], false),
-                   PackLayout::Standard { template: 2, complete: false });
-        // 超集（14 全在 + 多出目录，甚至含其他模板的目录名）→ 仍归模板二、complete，
+                   PackLayout::Standard { standard: 2, complete: false });
+        // 超集（14 全在 + 多出目录，甚至含其他标准的目录名）→ 仍归标准二、complete，
         // 多余目录由规则构造时按 FolderList 过滤、不进抽图池。
         let mut superset: Vec<&str> = FACEPACK_DIRS.to_vec();
         superset.push("Spain");
         superset.push("Extra1");
         assert_eq!(classify_with(&superset, false),
-                   PackLayout::Standard { template: 2, complete: true });
+                   PackLayout::Standard { standard: 2, complete: true });
     }
 
     #[test]
     fn classify_standard3_exact_and_superset() {
-        let cfg = crate::rule_config::RuleConfig::builtin();
-        let f3: Vec<&str> = cfg.template3.folder_list.iter().map(String::as_str).collect();
+        let cfg = crate::templates::RuleConfig::builtin();
+        let f3: Vec<&str> = cfg.standard3.folder_list.iter().map(String::as_str).collect();
         assert_eq!(classify_with(&f3, false),
-                   PackLayout::Standard { template: 3, complete: true });
+                   PackLayout::Standard { standard: 3, complete: true });
         // 子集
         assert_eq!(classify_with(&["China", "Japan", "Korea"], false),
-                   PackLayout::Standard { template: 3, complete: false });
-        // 超集：50 清单全在 + 旧 65 表的 Denmark/Norway 等多出目录 → 仍归模板三
+                   PackLayout::Standard { standard: 3, complete: false });
+        // 超集：62 清单全在 + 多出清单外的目录（用户包里常见的未使用目录）→ 仍归标准三
         let mut superset = f3.clone();
-        superset.push("Denmark");
-        superset.push("Norway");
+        superset.push("Scandinavian");
+        superset.push("SomeUnusedDir");
         assert_eq!(classify_with(&superset, false),
-                   PackLayout::Standard { template: 3, complete: true });
+                   PackLayout::Standard { standard: 3, complete: true });
     }
 
     #[test]
@@ -218,9 +219,9 @@ mod tests {
         assert_eq!(classify_with(&["African", "NotARealRace"], false), PackLayout::Unknown);
         // 跨两套混用（非超集、非任何子集）→ Unknown
         assert_eq!(classify_with(&["African", "China"], false), PackLayout::Unknown);
-        // 仅 Scandinavian（两套清单重合名）→ 子集判定按模板号序优先模板二。
+        // 仅 Scandinavian（只属于标准二清单）→ 子集判定归标准二、目录不全。
         assert_eq!(classify_with(&["Scandinavian"], false),
-                   PackLayout::Standard { template: 2, complete: false });
+                   PackLayout::Standard { standard: 2, complete: false });
     }
 
     #[test]

@@ -3,6 +3,7 @@
 <script lang="ts">
   import { api } from '../api';
   import { appStore } from '../stores/app.svelte';
+  import { t } from '../text'; // 全局文案常量
   import type { PageResult, PlayerRecord } from '../types';
 
   const PAGE_SIZE = 200; // 每页条数
@@ -44,14 +45,14 @@
   const hasDetailed = $derived(!!result?.items.some((r) => r.detailed));
 </script>
 
-<h3>Players Preview <span class="muted">{result ? `${result.total} records` : ''}</span></h3>
+<h3>{t.table.title} <span class="muted">{result ? t.table.recordCount(result.total) : ''}</span></h3>
 
 <!-- 搜索框 + 上一页/下一页。bind:value 把输入框与 search 双向绑定。 -->
 <div class="row">
-  <input type="text" placeholder="Search UID / name / nationality..." bind:value={search} class="flex-1" style="max-width:360px" />
-  <button class="btn" onclick={() => (page = 0)} disabled={page === 0}>‹ Prev</button>
-  <span class="muted">Page {page + 1} / {totalPages}</span>
-  <button class="btn" onclick={() => (page += 1)} disabled={page + 1 >= totalPages}>Next ›</button>
+  <input type="text" placeholder={t.table.searchPlaceholder} bind:value={search} class="flex-1" style="max-width:360px" />
+  <button class="btn" onclick={() => (page = 0)} disabled={page === 0}>{t.table.prevPage}</button>
+  <span class="muted">{t.table.pageOf(page + 1, totalPages)}</span>
+  <button class="btn" onclick={() => (page += 1)} disabled={page + 1 >= totalPages}>{t.table.nextPage}</button>
 </div>
 
 <!-- 有数据时渲染表格；否则显示引导提示。 -->
@@ -60,17 +61,18 @@
     <table class="grid">
       <thead>
         <tr>
-          <!-- 可排序的表头绑 onclick=sortBy；arrow() 拼接升降序箭头。 -->
-          <th onclick={() => sortBy('uid')}>UID{arrow('uid')}</th>
-          <th onclick={() => sortBy('primaryNat')}>Nat{arrow('primaryNat')}</th>
-          <th>2nd Nat</th>
-          <th onclick={() => sortBy('name')}>Name{arrow('name')}</th>
-          <th>Hair</th>
-          <th>Color</th>
-          <th onclick={() => sortBy('ethnicityCode')}>Eth{arrow('ethnicityCode')}</th>
+          <!-- 可排序的表头绑 onclick=sortBy；arrow() 拼接升降序箭头。
+               排序键（'uid'/'primaryNat'/'name'/'ethnicityCode'）是发往后端的协议值，勿改。 -->
+          <th onclick={() => sortBy('uid')}>{t.table.colUid}{arrow('uid')}</th>
+          <th onclick={() => sortBy('primaryNat')}>{t.table.colNat}{arrow('primaryNat')}</th>
+          <th>{t.table.col2ndNat}</th>
+          <th onclick={() => sortBy('name')}>{t.table.colName}{arrow('name')}</th>
+          <th>{t.table.colHair}</th>
+          <th>{t.table.colColor}</th>
+          <th onclick={() => sortBy('ethnicityCode')}>{t.table.colEth}{arrow('ethnicityCode')}</th>
           <!-- 仅当名单含详细信息时才多渲染这几列。 -->
           {#if hasDetailed}
-            <th>Skin</th><th>Club</th><th>Age</th><th>Height</th><th>Weight</th><th>NewGAN</th>
+            <th>{t.table.colSkin}</th><th>{t.table.colClub}</th><th>{t.table.colAge}</th><th>{t.table.colHeight}</th><th>{t.table.colWeight}</th><th>{t.table.colNewgan}</th>
           {/if}
         </tr>
       </thead>
@@ -100,5 +102,5 @@
     </table>
   </div>
 {:else}
-  <p class="muted">执行 Replace Faces 或「扫描RTF」后可在此预览名单（最近一次解析结果）。</p>
+  <p class="muted">{t.table.emptyHint}</p>
 {/if}

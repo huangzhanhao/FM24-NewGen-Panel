@@ -6,6 +6,7 @@
   import { openUrl } from '@tauri-apps/plugin-opener';   // 用默认浏览器打开外部链接
   import { api } from '../api';
   import { showError } from '../dialog';
+  import { t } from '../text'; // 全局文案常量
   import { appStore, applySnapshot } from '../stores/app.svelte';
 
   let newProfileName = $state('');   // 新建存档输入框的值
@@ -69,8 +70,8 @@
     const target = appStore.selectedProfile;
     if (!target || target === 'No Profile') return;
     const ok = await ask(
-      `删除 Profile「${target}」及其全部组配置与映射备份？`,
-      { title: 'Delete Profile' },
+      t.sidebar.deleteProfileConfirm(target),
+      { title: t.sidebar.deleteProfileTitle },
     );
     if (!ok) return;
     try {
@@ -83,7 +84,7 @@
 
   /** 关联头像包目录：选一个目录，后端自动建组并设为当前组。 */
   async function linkFacepack() {
-    const dir = await open({ directory: true, title: '关联头像包目录' }); // directory:true 表示选文件夹
+    const dir = await open({ directory: true, title: t.sidebar.linkDialogTitle }); // directory:true 表示选文件夹
     if (typeof dir === 'string') {
       try { await applySnapshot(await api.selectImageDirectory(dir)); }
       catch (e) { await showError(e); }
@@ -98,7 +99,7 @@
 
   /** 删除组（先弹确认框）。 */
   async function deleteGroup(imgDir: string) {
-    const ok = await ask(`删除组及其映射备份？\n${imgDir}`, { title: 'Delete Group' });
+    const ok = await ask(t.sidebar.deleteGroupConfirm(imgDir), { title: t.sidebar.deleteGroupTitle });
     if (!ok) return;
     try { await applySnapshot(await api.deleteGroup(imgDir)); }
     catch (e) { await showError(e); }
@@ -109,21 +110,21 @@
 </script>
 
 <aside class="sidebar">
-  <div class="brand">NewGAN Manager</div>
+  <div class="brand">{t.brand}</div>
 
   <!-- 区域一：存档（Profile）管理。 -->
   <section>
     <div class="side-head">
-      <span>存档资料</span>
+      <span>{t.sidebar.profileSection}</span>
       <!-- ＋按钮切换 creating（展开/收起新建行）。 -->
-      <button class="icon-btn" title="新建 Profile" onclick={() => (creating = !creating)}>＋</button>
+      <button class="icon-btn" title={t.sidebar.newProfileBtn} onclick={() => (creating = !creating)}>＋</button>
     </div>
     <!-- 新建行：仅当 creating 为真时显示（输入框 + 创建按钮）。 -->
     {#if creating}
       <div class="row">
-        <input type="text" placeholder="新 Profile 名称" bind:value={newProfileName} class="w-full" />
+        <input type="text" placeholder={t.sidebar.newProfilePlaceholder} bind:value={newProfileName} class="w-full" />
         <!-- 输入为空时禁用创建按钮。 -->
-        <button class="btn" onclick={createProfile} disabled={!newProfileName.trim()}>创建</button>
+        <button class="btn" onclick={createProfile} disabled={!newProfileName.trim()}>{t.sidebar.createBtn}</button>
       </div>
     {/if}
     <!-- 存档下拉框：选中即「浏览」（组列表/当前任务卡随选中项刷新），不切档；
@@ -137,18 +138,18 @@
     <div class="prf-actions">
       <!-- No Profile（缺省档）：固定「未激活」+「无法删除No Profile」，均不可点。 -->
       {#if appStore.selectedProfile === 'No Profile'}
-        <button class="btn" disabled title="No Profile 为启动缺省档，未激活">未激活</button>
+        <button class="btn" disabled title={t.sidebar.noProfileNoActivate}>{t.sidebar.notActivated}</button>
         <button class="btn danger-solid" disabled
-                title="No Profile 为缺省档，无法删除">无法删除No Profile</button>
+                title={t.sidebar.noProfileNoDelete}>{t.sidebar.noProfileNoDelete}</button>
       {:else if browseMode}
         <!-- 浏览未激活存档：蓝色「激活」可点 + 删除按钮。 -->
         <button class="btn primary" onclick={activateProfile} disabled={busy}
-                title="激活存档「{appStore.selectedProfile}」并切换其组配置与映射">激活</button>
-        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
+                title={t.sidebar.activateHint(appStore.selectedProfile)}>{t.sidebar.activateBtn}</button>
+        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>{t.sidebar.deleteCurrentProfile}</button>
       {:else}
         <!-- 选中项已激活：灰色「已激活」不可点 + 删除按钮。 -->
-        <button class="btn" disabled title="当前已激活该存档">已激活</button>
-        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>删除当前 Profile</button>
+        <button class="btn" disabled title={t.sidebar.activeAlreadyHint}>{t.sidebar.activated}</button>
+        <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}>{t.sidebar.deleteCurrentProfile}</button>
       {/if}
     </div>
   </section>
@@ -156,9 +157,9 @@
   <!-- 区域二：头像包（组）管理。 -->
   <section>
     <div class="side-head">
-      <span>头像包（组）</span>
+      <span>{t.sidebar.groupSection}</span>
       <!-- 关联新目录按钮：忙碌或选中项未激活（浏览态）时禁用——组操作仅对激活档可用。 -->
-      <button class="icon-btn" title={browseMode ? '请先点击「激活」后再关联头像包' : '关联新的头像包目录'}
+      <button class="icon-btn" title={browseMode ? t.sidebar.linkBrowseHint : t.sidebar.linkNewHint}
               onclick={linkFacepack} disabled={busy || !hasProfile}>＋</button>
     </div>
     <!-- 有组时渲染列表；否则显示空状态提示。 -->
@@ -170,26 +171,26 @@
             <!-- 点组名切为当前组（浏览态禁用——切组写后端当前档）；title 显示完整路径；g-rtf 显示是否已设 RTF。 -->
             <button class="group-item" onclick={() => selectGroup(g.imgDir)}
                     disabled={busy || browseMode}
-                    title={browseMode ? '请先点击「激活」后再切换当前组（当前为浏览预览）' : g.imgDir}>
+                    title={browseMode ? t.sidebar.selectGroupBrowseHint : g.imgDir}>
               <span class="g-name">{basename(g.imgDir)}</span>
-              <span class="g-rtf" class:ok={!!g.rtf}>{g.rtf ? 'RTF ✓' : '未设置 RTF'}</span>
+              <span class="g-rtf" class:ok={!!g.rtf}>{g.rtf ? t.sidebar.rtfSet : t.sidebar.rtfUnset}</span>
             </button>
             <!-- 删除组按钮（×）：浏览态禁用。 -->
-            <button class="icon-btn danger" title={browseMode ? '请先激活后再删除组' : '删除组'}
+            <button class="icon-btn danger" title={browseMode ? t.sidebar.deleteGroupBrowseHint : t.sidebar.deleteGroupBtn}
                     onclick={() => deleteGroup(g.imgDir)} disabled={busy || browseMode}>×</button>
           </li>
         {/each}
       </ul>
     {:else}
-      <p class="muted small">暂无头像包。点上方 ＋ 关联头像包目录。</p>
+      <p class="muted small">{t.sidebar.emptyGroups}</p>
     {/if}
   </section>
 
   <!-- 底部外部链接：用 openUrl 在默认浏览器打开（教程/故障排查/FAQ/Discord）。 -->
   <div class="side-foot">
-    <button class="link small" onclick={() => openUrl('https://www.bilibili.com/video/BV1ew411h759')}>教程</button>
-    <button class="link small" onclick={() => openUrl('https://github.com/Maradonna90/NewGAN-Manager/wiki/Troubleshooting')}>故障排查</button>
-    <button class="link small" onclick={() => openUrl('https://github.com/Maradonna90/NewGAN-Manager/wiki/FAQ')}>FAQ</button>
-    <button class="link small" onclick={() => openUrl('https://discord.gg/UfRpJVc')}>Discord</button>
+    <button class="link small" onclick={() => openUrl('https://www.bilibili.com/video/BV1ew411h759')}>{t.sidebar.linkTutorial}</button>
+    <button class="link small" onclick={() => openUrl('https://github.com/Maradonna90/NewGAN-Manager/wiki/Troubleshooting')}>{t.sidebar.linkTroubleshooting}</button>
+    <button class="link small" onclick={() => openUrl('https://github.com/Maradonna90/NewGAN-Manager/wiki/FAQ')}>{t.sidebar.linkFaq}</button>
+    <button class="link small" onclick={() => openUrl('https://discord.gg/UfRpJVc')}>{t.sidebar.linkDiscord}</button>
   </div>
 </aside>

@@ -3,6 +3,7 @@
 <script lang="ts">
   import PlayersTable from './PlayersTable.svelte';
   import PlayerViewer from './PlayerViewer.svelte';
+  import { t } from '../text'; // 全局文案常量
 
   // $state 创建响应式变量：view 变化时，下面的 {#if} 会重新求值，自动切换显示的子组件。
   // 'table' | 'viewer' 是字面量联合类型，限定 view 只能是这两个值之一。
@@ -13,8 +14,8 @@
 <div class="card grow">
   <!-- 顶部两个分段按钮；class:active 是 Svelte 的“条件类名”：表达式为真时才加上 active 类。 -->
   <div class="seg-tabs">
-    <button class:active={view === 'table'} onclick={() => (view = 'table')}>名单预览</button>
-    <button class:active={view === 'viewer'} onclick={() => (view = 'viewer')}>单人微调</button>
+    <button class:active={view === 'table'} onclick={() => (view = 'table')}>{t.results.tabTable}</button>
+    <button class:active={view === 'viewer'} onclick={() => (view = 'viewer')}>{t.results.tabViewer}</button>
   </div>
   <div class="card-body">
     <!-- {#if}/{:else}：根据 view 只渲染其中一个子组件（另一个从 DOM 中移除）。 -->

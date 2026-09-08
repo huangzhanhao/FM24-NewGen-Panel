@@ -4,6 +4,7 @@
   import { open, ask } from '@tauri-apps/plugin-dialog'; // open=文件/目录选择框；ask=确认框
   import { api } from '../api';
   import { showError } from '../dialog';
+  import { t } from '../text'; // 全局文案常量
   import { pinScrollEnd } from '../actions'; // 把长路径钉到最右的 action
   import { appStore, applySnapshot } from '../stores/app.svelte';
   import type { IntegrityResult } from '../types';
@@ -21,9 +22,9 @@
   );
   // 完整时按命中的模板号给出中文标注（目录总数来自模板 FolderList，用户可配置）。
   const completeLabel = $derived(
-    integrity?.standard === 1 ? '模板一：图片直铺，无种族子目录'
+    integrity?.standard === 1 ? t.setup.tpl1Complete
     : integrity && integrity.standard >= 2
-      ? `模板${integrity.standard}：${integrity.expectedTotal} 个配置目录齐全`
+      ? t.setup.tplComplete(integrity.standard, integrity.expectedTotal)
     : '',
   );
 
@@ -38,7 +39,7 @@
 
   /** 浏览并选择 RTF 文件。open 返回选中路径（字符串）或 null（取消）。 */
   async function browseRtf() {
-    const file = await open({ filters: [{ name: 'RTF', extensions: ['rtf'] }], title: '选择 RTF 名单' });
+    const file = await open({ filters: [{ name: 'RTF', extensions: ['rtf'] }], title: t.setup.selectRtfDialogTitle });
     if (typeof file === 'string') {
       // 调后端设置 RTF，并用返回的快照刷新界面；成功后清掉检查结论。
       try { await applySnapshot(await api.setCurrentRtf(file)); integrity = null; }
@@ -85,8 +86,8 @@
   async function fixMissing() {
     if (!snap?.currentGroup || !integrity || integrity.missing.length === 0) return;
     const ok = await ask(
-      `模板${integrity.standard} 缺少 ${integrity.missing.length} 个目录：\n${integrity.missing.join(', ')}\n\n自动创建？`,
-      { title: 'Missing Directories' },
+      t.setup.missingDirsConfirm(integrity.standard, integrity.missing.length, integrity.missing.join(', ')),
+      { title: t.setup.missingDirsTitle },
     );
     if (!ok) return; // 用户取消
     try {
@@ -99,65 +100,65 @@
 <!-- {#if snap}：快照未加载时不渲染整张卡片（避免读 snap.xxx 报错）。 -->
 {#if snap}
   <div class="card">
-    <div class="card-title">当前任务 <span class="muted small">{snap.currentProfile}</span></div>
+    <div class="card-title">{t.setup.cardTitle} <span class="muted small">{snap.currentProfile}</span></div>
     <!-- 头像包路径行：只读输入框 + [检查完整性 | 扫描头像] 按钮组。use:pinScrollEnd 把长路径钉到最右。 -->
     <div class="path-row">
-      <label for="sc-group">头像包：</label>
+      <label for="sc-group">{t.setup.imgDirLabel}</label>
       <input id="sc-group" type="text" readonly value={snap.currentGroup ?? ''}
-             placeholder="未关联头像包目录" title={snap.currentGroup ?? ''}
+             placeholder={t.setup.imgDirPlaceholder} title={snap.currentGroup ?? ''}
              use:pinScrollEnd={snap.currentGroup ?? ''} />
       <div class="path-actions">
         <!-- disabled 在忙碌或无选中组时置 true；title 根据情况给不同提示。 -->
         <button class="btn" onclick={checkIntegrity} disabled={busy || !snap.currentGroup}
-                title={snap.currentGroup ? '按规则 json 的 FolderList 识别头像包归属哪个模板' : '请先关联头像包目录'}>检查完整性</button>
+                title={snap.currentGroup ? t.setup.checkIntegrityHint : t.setup.noGroupHint}>{t.setup.checkIntegrityBtn}</button>
         <button class="btn" onclick={scanImages} disabled={busy || !snap.currentGroup}
-                title="扫描头像包并缓存图片索引（结果写入日志）">扫描头像</button>
+                title={t.setup.scanImagesHint}>{t.setup.scanImagesBtn}</button>
       </div>
     </div>
     <!-- RTF 名单路径行：只读输入框 + [选择RTF | 扫描RTF] 按钮组。 -->
     <div class="path-row">
-      <label for="sc-rtf">RTF 名单：</label>
-      <input id="sc-rtf" type="text" readonly value={snap.currentRtf || '未设置'} title={snap.currentRtf}
+      <label for="sc-rtf">{t.setup.rtfLabel}</label>
+      <input id="sc-rtf" type="text" readonly value={snap.currentRtf || t.setup.rtfUnsetValue} title={snap.currentRtf}
              use:pinScrollEnd={snap.currentRtf} />
       <div class="path-actions">
         <button class="btn" onclick={browseRtf} disabled={busy || browseMode || !snap.currentGroup}
-                title={browseMode ? '请先点击「激活」后再设置 RTF（当前为浏览预览）'
-                      : snap.currentGroup ? '选择 FM 导出的 RTF 名单' : '请先关联头像包目录'}>选择RTF</button>
+                title={browseMode ? t.setup.selectRtfBrowseHint
+                      : snap.currentGroup ? t.setup.selectRtfHint : t.setup.noGroupHint}>{t.setup.selectRtfBtn}</button>
         <button class="btn" onclick={scanRtf} disabled={busy || !snap.currentRtf}
-                title="解析 RTF 并填充名单预览（结果写入日志）">扫描RTF</button>
+                title={t.setup.scanRtfHint}>{t.setup.scanRtfBtn}</button>
       </div>
     </div>
     <!-- config.xml 行：当前组的映射配置文件路径 + [查看config | 查看快照]（左 config 右快照）。 -->
     <div class="path-row">
-      <label for="sc-xml">config.xml：</label>
+      <label for="sc-xml">{t.setup.xmlLabel}</label>
       <input id="sc-xml" type="text" readonly value={snap.configXml?.path ?? ''}
-             placeholder="未关联头像包（执行替换后生成）" title={snap.configXml?.path ?? ''}
+             placeholder={t.setup.xmlPlaceholder} title={snap.configXml?.path ?? ''}
              use:pinScrollEnd={snap.configXml?.path ?? ''} />
       <div class="path-actions">
         <button class="btn" onclick={openPackConfig} disabled={busy || !snap.currentGroup}
-                title={snap.currentGroup ? '打开头像包目录（config.xml 所在目录）' : '请先关联头像包目录'}>查看config</button>
+                title={snap.currentGroup ? t.setup.viewConfigHint : t.setup.noGroupHint}>{t.setup.viewConfigBtn}</button>
         <button class="btn" onclick={openSnapshot} disabled={busy || !snap.configXml?.exists}
-                title="打开存档 XML 快照所在目录">查看快照</button>
+                title={t.setup.viewSnapshotHint}>{t.setup.viewSnapshotBtn}</button>
       </div>
     </div>
     <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓（含多余目录提示）；已检查且缺失→黄色警告 + 一键创建按钮。 -->
     {#if !snap.currentGroup}
-      <p class="muted small">先在左侧「头像包（组）」关联一个头像包目录，或点击已有组。</p>
+      <p class="muted small">{t.setup.noGroupGuide}</p>
     {:else if integrity !== null}
       {#if integrity.status === 'complete'}
-        <p class="ok-text small">✓ 头像包结构完整（{completeLabel}）{integrity.extra.length > 0 ? `；另含 ${integrity.extra.length} 个未配置目录（不参与抽图）` : ''}</p>
+        <p class="ok-text small">{t.setup.integrityOk(completeLabel)}{t.setup.extraDirsNote(integrity.extra.length)}</p>
       {:else if integrity.status === 'fixable'}
-        <p class="warn-text small">模板{integrity.standard}：缺少 {integrity.missing.length} 个目录（已有 {integrity.found}/{integrity.expectedTotal}）：{integrity.missing.join(', ')}</p>
-        <button class="btn primary" onclick={fixMissing} disabled={busy}>一键创建缺失目录</button>
+        <p class="warn-text small">{t.setup.integrityFixable(integrity.standard, integrity.missing.length, integrity.found, integrity.expectedTotal, integrity.missing.join(', '))}</p>
+        <button class="btn primary" onclick={fixMissing} disabled={busy}>{t.setup.createMissingBtn}</button>
       {:else}
-        <p class="warn-text small">⚠ 无法识别头像包结构：子目录与任何模板的 FolderList 清单都不构成包含关系，替换时将把包内全部图片随机分配；也可在「规则配置」中调整模板目录清单。</p>
+        <p class="warn-text small">{t.setup.integrityUnknown}</p>
       {/if}
     {/if}
     <!-- 模板规则入口：打开规则编辑对话框（查看/修改/保存 template2|template3.json）。 -->
     <div class="row">
       <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy}
-              title="直接查看、修改并保存模板规则文件（国籍→目录映射、FolderList 等），保存时自动校验 JSON 格式">规则配置</button>
-      <span class="muted small">抽图规则来自规则 json（可编辑），保存后下次替换/检查完整性即生效</span>
+              title={t.setup.ruleConfigHint}>{t.setup.ruleConfigBtn}</button>
+      <span class="muted small">{t.setup.ruleConfigNote}</span>
     </div>
   </div>
 {/if}

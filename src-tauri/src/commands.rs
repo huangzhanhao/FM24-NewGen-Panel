@@ -39,7 +39,7 @@ pub struct AppState {
 }
 
 /// 「扫描头像」产出的索引缓存：目录 + 完整扫描结果（仅按 img_dir 命中，切组即失效）。
-pub struct FaceIndex { pub img_dir: String, pub scan: PackScan }
+pub struct FaceIndex { pub img_dir: String, pub scan: Arc<PackScan> }
 
 // ---------------- 传给前端的类型（统一 camelCase） ----------------
 // 【说明】下面这些结构体是「前后端的数据契约」：Rust 端用蛇形命名，通过 serde 自动转成前端的驼峰命名。
@@ -188,7 +188,7 @@ pub fn create_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
 pub fn delete_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
     if !pm.delete_profile(&name)? {
-        return Err("Can't delete 'No Profile'".into());
+        return Err("无法删除缺省档 No Profile".into());
     }
     drop(pm); // 显式释放锁（因为后面 snapshot() 会再次加锁，不先释放会死锁）
     Ok(snapshot(&state))
@@ -395,7 +395,8 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
     let img_dir = { state.pm.lock().unwrap().cur_group.clone().ok_or("请先选择头像包目录")? };
     let config = RuleConfig::load(&state.data_dir)?; // 用户改坏规则 json → 报错提示
     let (total, standard, scan) = scan_images_core(&img_dir, &config)?;
-    *state.faces_cache.lock().unwrap() = Some(FaceIndex { img_dir, scan });
+    // Arc 包一层入缓存：替换复用时只涨引用计数，不复制整份图片索引。
+    *state.faces_cache.lock().unwrap() = Some(FaceIndex { img_dir, scan: Arc::new(scan) });
     state.logger.info("scan", format!("扫描头像完成：{total} 张图片（{}）", layout_label(standard)));
     Ok(ImageScanResult { total, standard })
 }
@@ -500,12 +501,14 @@ pub fn start_replace(
     std::thread::spawn(move || {
         let emit_app = app.clone();
         // 跑流水线；progress 回调里通过 emit 把进度发给前端（事件名 replace:progress）。
+        // 流水线关键步骤的日志经 logger 记录，由 log:batch 事件实时回显前端日志面板。
         let result = replace_flow::run(
             &params,
             &mut |status: &str, value: u8| {
                 let _ = emit_app.emit("replace:progress", ProgressPayload { status: status.into(), value });
             },
             &cancel,
+            &logger,
         );
         // 把解析结果与映射写入缓存（供后续预览/分页查询使用）。
         *rtf_cache.lock().unwrap() = result.rtf_data.clone();

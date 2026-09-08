@@ -6,6 +6,7 @@
   import { appStore, reloadLogs } from '../stores/app.svelte';
   import { clearDisplay, filterLines, LEVELS, logStore } from '../stores/log.svelte';
   import { ui } from '../stores/ui.svelte';
+  import { t } from '../text'; // 全局文案常量
   import type { LogLine } from '../types';
 
   // 抽屉打开期间，过滤条件变化 → 从 Rust 环形缓冲重查（前端缓冲仅承接事件增量）。
@@ -29,19 +30,19 @@
 <!-- {#if ui.logOpen}：只有抽屉打开时才渲染以下所有内容。 -->
 {#if ui.logOpen}
   <!-- 半透明遮罩：点它或按 Esc 关闭抽屉。role/tabindex/aria-label 是为了无障碍与键盘可聚焦。 -->
-  <div class="drawer-backdrop" role="button" tabindex={0} aria-label="关闭日志面板" onclick={() => (ui.logOpen = false)} onkeydown={(e) => e.key === 'Escape' && (ui.logOpen = false)}></div>
+  <div class="drawer-backdrop" role="button" tabindex={0} aria-label={t.log.closeAria} onclick={() => (ui.logOpen = false)} onkeydown={(e) => e.key === 'Escape' && (ui.logOpen = false)}></div>
   <aside class="drawer">
     <!-- 顶部工具条：标题 + “仅该级别”复选框 + 级别下拉 + 打开文件/清空/关闭按钮。 -->
     <div class="row">
-      <strong>运行日志</strong>
-      <label class="small"><input type="checkbox" bind:checked={logStore.only} /> 仅该级别</label>
-      <!-- bind:value 把下拉选中值与 logStore.level 双向绑定。 -->
+      <strong>{t.log.title}</strong>
+      <label class="small"><input type="checkbox" bind:checked={logStore.only} /> {t.log.onlyLevel}</label>
+      <!-- bind:value 把下拉选中值与 logStore.level 双向绑定。级别值（DEBUG/INFO…）是过滤协议值，勿改。 -->
       <select bind:value={logStore.level}>
         {#each LEVELS as l}<option value={l}>{l}</option>{/each}
       </select>
       <span class="flex-1"></span>
-      <button class="btn" onclick={openLogFile}>打开日志文件</button>
-      <button class="btn" onclick={clearDisplay}>清空显示</button>
+      <button class="btn" onclick={openLogFile}>{t.log.openFileBtn}</button>
+      <button class="btn" onclick={clearDisplay}>{t.log.clearBtn}</button>
       <button class="icon-btn" onclick={() => (ui.logOpen = false)}>×</button>
     </div>
     <div class="drawer-body">

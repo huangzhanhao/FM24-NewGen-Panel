@@ -36,6 +36,8 @@ venv/
 .vscode/
 *.code-workspace
 .qoder
+.design-qa/
+.zcode/
 .idea/
 *.iml
 *.sublime-project

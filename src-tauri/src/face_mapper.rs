@@ -43,12 +43,14 @@ pub struct FaceMapper {
 impl FaceMapper {
     /// 扫描头像包并建立索引（对等 v1 __init__）。扫描交给 facepack::scan_pack，模板判定用 rule_config。
     pub fn new(img_dir: &str, config: &RuleConfig) -> Result<Self, String> {
-        Self::from_scan(img_dir, scan_pack(img_dir)?, config)
+        let scan = scan_pack(img_dir)?;
+        Self::from_scan(img_dir, &scan, config)
     }
 
     /// 用现成的扫描结果构造（「扫描头像」命令的缓存复用入口）。
-    /// 按 rule_config 的 FolderList 判定模板归属（classify）并分发到对应模板规则。
-    pub fn from_scan(img_dir: &str, scan: PackScan, config: &RuleConfig) -> Result<Self, String> {
+    /// 【借用而非所有权】内部只读 scan（classify 与 for_layout 都吃 &PackScan），
+    /// 大包索引（数万图片名）一份克隆就是几十 MB 白复制，不强制调用方克隆。
+    pub fn from_scan(img_dir: &str, scan: &PackScan, config: &RuleConfig) -> Result<Self, String> {
         // classify 输入剔除垃圾目录（__MACOSX 等不参与判定）。
         let subdirs: BTreeSet<String> = scan.faces_map.keys()
             .filter(|n| !facepack::is_junk_dir(n))
@@ -58,7 +60,7 @@ impl FaceMapper {
         Ok(Self {
             img_dir: img_dir.to_string(),
             layout,
-            rule: pick_rules::for_layout(layout, &scan, config),
+            rule: pick_rules::for_layout(layout, scan, config),
         })
     }
 

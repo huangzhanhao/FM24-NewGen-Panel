@@ -13,14 +13,15 @@
   import ResultsSection from './lib/components/ResultsSection.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import LogDrawer from './lib/components/LogDrawer.svelte';
+  import { t } from './lib/text'; // 全局文案常量（用户可见文字统一在此维护）
   import { initListeners } from './lib/stores/app.svelte'; // 订阅后端事件的初始化函数
 
   // onMount 里的代码在组件首次渲染到页面后运行（适合做“启动时订阅事件”这类副作用）。
   onMount(() => {
     // initListeners 订阅后端的进度/完成/日志事件；传入一个回调，在替换结束时弹窗提示。
     initListeners(async (result) => {
-      if (result === 'finished') await message('Finished! :)', { title: 'NewGAN Manager' });
-      else if (result === 'failed') await message('替换失败，请查看日志', { title: 'Error' });
+      if (result === 'finished') await message(t.app.replaceFinished, { title: t.brand });
+      else if (result === 'failed') await message(t.app.replaceFailed, { title: t.dialog.error });
     });
   });
 </script>

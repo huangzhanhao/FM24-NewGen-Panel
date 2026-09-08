@@ -4,15 +4,16 @@
   import { appStore } from '../stores/app.svelte';
   import { filterLines, logStore } from '../stores/log.svelte';
   import { ui } from '../stores/ui.svelte';
+  import { t } from '../text'; // 全局文案常量
 
   // $derived(表达式)：把表达式“记住”为一个响应式值，每当它依赖的状态变化就重新计算。
   const snap = $derived(appStore.snapshot); // 当前全局快照（可能为 null）
   // 错误条数：把日志按 ERROR 阈值过滤后取长度（snap/logStore.lines 变化时自动重算）。
   const errorCount = $derived(filterLines(logStore.lines, 'ERROR', false).length);
-  // 状态文字：正在替换时显示进度；否则有选中组显示 Ready，没有则提示未选头像包。
+  // 状态文字：正在替换时显示进度（后端文案，中文）；否则有选中组显示就绪，没有则提示未选头像包。
   // ?. 是可选链：snap 为 null 时不会报错，而是返回 undefined。
   const status = $derived(
-    snap?.replacing ? appStore.progress.status : snap?.currentGroup ? 'Ready' : '未选择头像包',
+    snap?.replacing ? appStore.progress.status : snap?.currentGroup ? t.status.ready : t.status.noGroup,
   );
 </script>
 

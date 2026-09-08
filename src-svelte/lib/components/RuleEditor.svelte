@@ -5,12 +5,13 @@
   import { ask } from '@tauri-apps/plugin-dialog';
   import { api } from '../api';
   import { showError } from '../dialog';
+  import { t } from '../text'; // 全局文案常量
   import { appStore, refreshSnapshot } from '../stores/app.svelte';
 
   type RuleName = 'template2' | 'template3';
   const LABELS: Record<RuleName, string> = {
-    template2: '模板二（14 种族目录）',
-    template3: '模板三（细分目录）',
+    template2: t.ruleEditor.tpl2Label,
+    template3: t.ruleEditor.tpl3Label,
   };
   const NAMES: RuleName[] = ['template2', 'template3'];
 
@@ -38,7 +39,7 @@
 
   async function switchTo(name: RuleName) {
     if (name === active) return;
-    if (dirty && !(await ask(`${LABELS[active]} 有未保存的修改，确定放弃并切换？`, { title: '未保存修改' }))) return;
+    if (dirty && !(await ask(t.ruleEditor.unsavedSwitch(LABELS[active]), { title: t.ruleEditor.unsavedTitle }))) return;
     active = name;
     await load(active);
   }
@@ -47,13 +48,13 @@
     try {
       await api.saveRuleFile(active, text);
       baseline = text;
-      status = '已保存 ✓ 下次替换 / 检查完整性即生效';
+      status = t.ruleEditor.savedStatus;
       await refreshSnapshot(); // 快照携带其他状态，顺带保持全局一致
     } catch (e) { await showError(e); } // JSON 校验错误（后端拒绝写入坏规则）
   }
 
   async function close() {
-    if (dirty && !(await ask(`${LABELS[active]} 有未保存的修改，确定关闭？`, { title: '未保存修改' }))) return;
+    if (dirty && !(await ask(t.ruleEditor.unsavedClose(LABELS[active]), { title: t.ruleEditor.unsavedTitle }))) return;
     open = false;
   }
 </script>
@@ -69,17 +70,17 @@
                     onclick={() => switchTo(name)}>{LABELS[name]}</button>
           {/each}
         </span>
-        <span class="row" style="gap:6px">
-          {#if status}<span class="ok-text small">{status}</span>{/if}
-          <span class="muted small" style="margin-right:6px">{appStore.snapshot?.currentProfile ?? ''}</span>
-          <button class="btn primary" onclick={save} disabled={!dirty} title="保存前会校验 JSON 格式，非法内容不会被写入">保存</button>
-          <button class="btn" onclick={close}>关闭</button>
-        </span>
-      </div>
-      <div class="modal-body">
-        <textarea class="editor" bind:value={text} oninput={() => (status = '')}
-                  spellcheck="false" wrap="off"
-                  aria-label="模板规则内容"></textarea>
+          <span class="row" style="gap:6px">
+            {#if status}<span class="ok-text small">{status}</span>{/if}
+            <span class="muted small" style="margin-right:6px">{appStore.snapshot?.currentProfile ?? ''}</span>
+            <button class="btn primary" onclick={save} disabled={!dirty} title={t.ruleEditor.saveHint}>{t.ruleEditor.saveBtn}</button>
+            <button class="btn" onclick={close}>{t.ruleEditor.closeBtn}</button>
+          </span>
+        </div>
+        <div class="modal-body">
+          <textarea class="editor" bind:value={text} oninput={() => (status = '')}
+                    spellcheck="false" wrap="off"
+                    aria-label={t.ruleEditor.editorAria}></textarea>
       </div>
     </div>
   </div>

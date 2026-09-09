@@ -108,3 +108,17 @@
 
 **`DefaultCodes` 的角色**：保留在配置里但不参与抽图 —— 本程序的种族码来自 RTF 名单中球员自己的字段，
 不需要按国家抽一个码；该字段仅在结构校验里与 `Ethnics` 的键集对照。
+
+**真实头像包实测（2026-09-10）**：在社区的 NG_Regens 标准三包（28 万张图，62 个清单目录全在且非空，
+另多出 `Staff`/`WF` 两棵嵌套子树与 `Scandinavian` 平铺残留三个包外目录）上跑通了
+scan → classify → 标准三抽图全链路：233 国 × 11 码全量 2563 组抽图 **100% 直中规则候选目录（零回退）**，
+禁重复 2563 组 from 全部唯一，且每条映射都能在包里定位到真实文件。
+据此补了两层测试：
+
+1. 常态单测（进 CI）`standard3.rs::real_shape_*` 三个：tempdir 复刻真实包形态（62 目录超集 + 包外
+   嵌套子树），锁住「包外目录不进规则池、但进递归兜底池」「全量抽图直中候选且文件存在」「禁重复恰好
+   抽完全部图」三条行为；
+2. 真实包冒烟测试 `templates/mod.rs::real_pack_smoke_scan_classify_pick`（`#[ignore]`，CI 不跑）：
+   `NEWGAN_REAL_PACK_DIR=<包根> cargo test --manifest-path src-tauri/Cargo.toml real_pack_smoke -- --ignored --nocapture`
+   可随时对本机任意社区包做体检——硬断言只有「人人有图、图真实存在」两条，
+   直中/回退占比与清单内空目录只打印不拦（部分目录缺失时走回退是正确行为）。

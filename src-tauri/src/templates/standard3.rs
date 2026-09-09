@@ -655,27 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_routes_by_rule_block_and_ignores_unused_dirs() {
-        let cfg = RuleConfig::builtin().standard3;
-        // 包内只建三个目录 + 一个规则从不指向的多余目录（对应用户真实包的超集形态）。
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
-            ("Spain".into(), sset(&["sp1", "sp2"])),
-            ("MixedRace".into(), sset(&["mx1"])),
-            ("China".into(), sset(&["cn1"])),
-            ("Unused".into(), sset(&["u1"])),
-        ]);
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        assert!(!rule.pools.contains_key("Unused"), "FolderList 外的目录不进抽图池");
-        // ESP 码 1 → 全局块 "default" → Ethnics[ESP]=Spain。
-        let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
-        assert_eq!(img.dir, "Spain");
-        // CHN 码 9 → 全局块直接映射 MixedRace。
-        assert_eq!(rule.pick(&player("r-2", "CHN", "9"), true).unwrap().dir, "MixedRace");
-        // CHN 码 10 → "default" → China。
-        assert_eq!(rule.pick(&player("r-3", "CHN", "10"), true).unwrap().dir, "China");
-    }
-
-    #[test]
     fn pick_falls_back_to_owner_folder_when_target_dir_missing() {
         let mut cfg = RuleConfig::builtin().standard3;
         // 人为把 ESP 码 1 指到包内不存在的目录，验证第一级回退用本国基础池。
@@ -755,23 +734,138 @@ mod tests {
     }
 
     #[test]
-    fn pick_without_duplicates_exhausts_pool_and_excludes_used() {
+    fn exclude_used_removes_occupied_images() {
+        // Preserve 禁重复：已占用的图按 from 全路径从两份索引剔除（池耗尽语义由真实包形态组覆盖）。
         let cfg = RuleConfig::builtin().standard3;
         let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
             ("Spain".into(), sset(&["sp1", "sp2"])),
         ]);
         let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        // 禁重复：ESP 两人各得一张不同的图，第三人无图可抽 → 走递归兜底（池已空）→ None。
-        let a = rule.pick(&player("r-1", "ESP", "1"), false).unwrap();
-        let b = rule.pick(&player("r-2", "ESP", "1"), false).unwrap();
-        assert_ne!(a.stem, b.stem);
-        assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
-        // Preserve 禁重复：已占用的图按 from 全路径剔除。
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
         rule.exclude_used(&sset(&["Spain/sp1"]));
         for _ in 0..5 {
-            assert_eq!(rule.pick(&player("r-4", "ESP", "1"), true).unwrap().stem, "sp2");
+            assert_eq!(rule.pick(&player("r-1", "ESP", "1"), true).unwrap().stem, "sp2");
         }
+    }
+
+    // ---------------- 真实包形态（组 C）：62 目录超集包的完整链路 ----------------
+    // 形态取自实测的社区标准三包：62 个清单目录全在且各有几千张图，另多出三个包外目录——
+    // Scandinavian（老头像包平铺残留）与 Staff/WF（嵌套子树）。专门覆盖手搓 faces_map 测不到的
+    // 「扫描 → 判定 → 建池 → 抽图」全程，尤其是包外目录与递归池的关系。
+
+    /// 在临时目录搭一个「真实包形态」的标准三包，返回写入的图片总数。
+    fn build_real_shape_pack(
+        root: &Path,
+        cfg: &Standard3Config,
+        imgs_per_dir: usize,
+    ) -> std::io::Result<usize> {
+        let mut files = 0usize;
+        for d in &cfg.folder_list {
+            let dir = root.join(d);
+            std::fs::create_dir_all(&dir)?;
+            for i in 0..imgs_per_dir {
+                std::fs::write(dir.join(format!("{d}_{i}.png")), b"png")?;
+                files += 1;
+            }
+        }
+        // 真实包多出的三个目录：Scandinavian 平铺有图；Staff/WF 各含一层嵌套子树。
+        let scan_dir = root.join("Scandinavian");
+        std::fs::create_dir_all(&scan_dir)?;
+        std::fs::write(scan_dir.join("old_0.png"), b"png")?;
+        std::fs::write(scan_dir.join("old_1.png"), b"png")?;
+        files += 2;
+        for (top, sub) in [("Staff", "African"), ("WF", "BrazilMixed")] {
+            let dir = root.join(top).join(sub);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join(format!("{sub}.png")), b"png")?;
+            files += 1;
+        }
+        Ok(files)
+    }
+
+    #[test]
+    fn real_shape_pack_classifies_standard3_and_isolates_extras() {
+        let rcfg = RuleConfig::builtin();
+        let cfg = &rcfg.standard3;
+        let dir = tempfile::tempdir().unwrap();
+        build_real_shape_pack(dir.path(), cfg, 1).unwrap();
+        let scan = crate::facepack::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        // 一级目录 65 个：62 清单 + 3 包外（真实包同款）。
+        assert_eq!(scan.faces_map.len(), cfg.folder_list.len() + 3);
+        let refs: Vec<_> = rcfg.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
+        let layout = crate::facepack::classify(
+            &scan.faces_map.keys().cloned().collect::<BTreeSet<_>>(), false, &refs);
+        // 清单 62 目录全在 → 判标准三完整包；多出的 Staff/WF/Scandinavian 不影响判定。
+        assert_eq!(layout,
+                   crate::facepack::PackLayout::Standard { standard: 3, complete: true });
+        let rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
+        // 抽图主池只收清单内目录：包外目录不进规则池（含与清单目录同在一级的 Scandinavian）。
+        assert_eq!(rule.pools.len(), cfg.folder_list.len());
+        assert!(["Scandinavian", "Staff", "WF"].iter().all(|d| !rule.pools.contains_key(*d)));
+        // 递归全池仍收录包外目录与嵌套子树（Fallback::Random 的兜底来源），根池键恒存在。
+        assert!(rule.recursive_pools.contains_key("Scandinavian"));
+        assert!(rule.recursive_pools.contains_key("Staff/African"));
+        assert!(rule.recursive_pools.contains_key("WF/BrazilMixed"));
+        assert!(rule.recursive_pools.contains_key(""));
+    }
+
+    #[test]
+    fn real_shape_full_coverage_pick_hits_candidate_dirs_and_real_files() {
+        // 真实跑法第一道回归：扫描真实形态的包后，233 国 × 11 码 = 2563 组全量抽图。
+        // 62 个目录全部非空 → 每次都必须直中规则解析出的候选目录（不碰回退链），
+        // 且抽中的必须是包里真实存在的文件（from 不带扩展名，逐个试图片扩展名）。
+        let rcfg = RuleConfig::builtin();
+        let cfg = &rcfg.standard3;
+        let dir = tempfile::tempdir().unwrap();
+        build_real_shape_pack(dir.path(), cfg, 2).unwrap();
+        let scan = crate::facepack::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
+        let folders: BTreeSet<&str> = cfg.folder_list.iter().map(String::as_str).collect();
+        for nat in cfg.ethnics.keys() {
+            for code in 0..=10u8 {
+                let res = cfg.resolve(nat, &code.to_string());
+                let img = rule.pick(&player(&format!("{nat}/{code}"), nat, &code.to_string()), true)
+                    .unwrap_or_else(|| panic!("{nat}/{code} 没抽到图"));
+                let cands: Vec<&str> = match res.candidates.as_ref().unwrap() {
+                    Candidates::Single(d) => vec![d.as_str()],
+                    Candidates::Uniform(v) => v.iter().map(String::as_str).collect(),
+                    Candidates::Weighted { dirs, .. } => dirs.iter().map(String::as_str).collect(),
+                };
+                assert!(cands.contains(&img.dir.as_str()),
+                    "{nat}/{code} 抽到 {}/{}，候选只有 {cands:?}", img.dir, img.stem);
+                assert!(folders.contains(img.dir.as_str()), "{nat}/{code} 抽到清单外目录");
+                let base = dir.path().join(&img.dir).join(&img.stem);
+                assert!(["png", "jpg", "jpeg"].iter()
+                    .any(|e| std::path::Path::new(&format!("{}.{e}", base.display())).is_file()),
+                    "{nat}/{code} → {}/{} 在包里不存在", img.dir, img.stem);
+            }
+        }
+    }
+
+    #[test]
+    fn real_shape_no_duplicates_exhausts_every_image_once() {
+        // 每目录 1 张 + Scandinavian 2 张 + 两棵嵌套子树各 1 张。
+        // 禁重复持续抽：主池抽空 → 归属者目录（同池，也空）→ 递归兜底收尾包外目录的图，
+        // 必须恰好抽完全部图片、无一张重复，耗尽后稳定返回 None。
+        let rcfg = RuleConfig::builtin();
+        let cfg = &rcfg.standard3;
+        let dir = tempfile::tempdir().unwrap();
+        let total = build_real_shape_pack(dir.path(), cfg, 1).unwrap();
+        let scan = crate::facepack::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
+        let nats: Vec<&String> = cfg.ethnics.keys().collect();
+        let mut issued = BTreeSet::new();
+        for i in 0..total + 10 {
+            let nat = nats[i % nats.len()];
+            let code = ((i / nats.len()) % 11).to_string();
+            match rule.pick(&player(&format!("p-{i}"), nat, &code), false) {
+                Some(img) => assert!(issued.insert(record_from(&img.dir, &img.stem)),
+                    "第 {i} 次抽到重复图 {img:?}"),
+                None => break,
+            }
+        }
+        assert_eq!(issued.len(), total, "禁重复应恰好抽完全部 {total} 张图（含包外目录）");
+        // 耗尽后继续抽仍为 None（不 panic、不复活已抽走的图）。
+        assert!(rule.pick(&player("tail", "ESP", "1"), false).is_none());
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub const IMPLEMENTED_STANDARDS: [u8; 2] = [2, 3];
 
 /// 一次抽图的结果：图片相对头像包根的目录路径（"" = 根，多级 "子目录/孙目录"）+ 文件词干。
 /// 写 config.xml 时 dir + stem 经 record_from 拼成 from（统一相对路径口径）。
+#[derive(Debug)]
 pub struct PickedImage { pub dir: String, pub stem: String }
 
 /// 抽图规则统一接口：每个标准一套实现。
@@ -218,6 +219,104 @@ fn pick_from_pools_flat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真实头像包冒烟测试（`#[ignore]`，CI 不跑、未设环境变量时自动跳过）。用法：
+    /// `NEWGAN_REAL_PACK_DIR=<包根> cargo test --manifest-path src-tauri/Cargo.toml \
+    ///  real_pack_smoke -- --ignored --nocapture`
+    ///
+    /// 全链路验证 scan → classify → 标准三抽图：233 国 × 11 码全量扫一遍，
+    /// 硬断言只有两条——每人都能抽到图、抽中的图在包里真实存在（config.xml 的 from
+    /// 不带扩展名，逐个试图片扩展名）；直中/回退占比与空清单目录只打印不拦，
+    /// 便于对任何社区包做体检（部分目录缺失时回退是正确行为而非错误）。
+    #[test]
+    #[ignore]
+    fn real_pack_smoke_scan_classify_pick() {
+        use crate::xml_parser::record_from;
+        use super::standard3::Candidates;
+        let Some(pack) = std::env::var_os("NEWGAN_REAL_PACK_DIR") else {
+            eprintln!("未设 NEWGAN_REAL_PACK_DIR，跳过真实包冒烟测试");
+            return;
+        };
+        let pack = pack.to_string_lossy().to_string();
+        // 规则来源与真实运行同源（开发数据目录的 rules/）；用户文件损坏不中断冒烟，退回内置默认。
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().join("data");
+        let config = RuleConfig::load(&data_dir).unwrap_or_else(|e| {
+            eprintln!("用户规则不可用（{e}），改用内置默认");
+            RuleConfig::builtin()
+        });
+        let t = std::time::Instant::now();
+        let scan = crate::facepack::scan_pack(&pack).unwrap();
+        let total_imgs: usize = scan.recursive_pools.values().map(|s| s.len()).sum();
+        eprintln!("扫描：{} 个一级目录，递归池 {total_imgs} 张图，耗时 {:?}",
+                  scan.faces_map.len(), t.elapsed());
+        let refs: Vec<_> = config.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
+        let subdirs: BTreeSet<String> = scan.faces_map.keys()
+            .filter(|n| !crate::facepack::is_junk_dir(n))
+            .cloned().collect();
+        let layout = crate::facepack::classify(&subdirs, !scan.root_images.is_empty(), &refs);
+        eprintln!("判定：{layout:?}");
+        assert!(matches!(layout, PackLayout::Standard { standard: 3, .. }),
+                "该包未被判为标准三：{layout:?}");
+        // 清单目录在包内的健康度：缺失 / 空目录列出来（对应「一键创建缺失目录」的语义）。
+        let unhealthy: Vec<&String> = config.standard3.folder_list.iter()
+            .filter(|d| scan.faces_map.get(*d).is_none_or(|s| s.is_empty()))
+            .collect();
+        if !unhealthy.is_empty() {
+            eprintln!("清单内缺失或为空的目录 {} 个：{unhealthy:?}", unhealthy.len());
+        }
+        // 第一轮：允许复用，全量 (国籍 × 码) 扫一遍，统计直中候选 vs 走回退。
+        let mut rule = for_layout(layout, &scan, &config);
+        let cfg = &config.standard3;
+        let (mut direct, mut fallback) = (0usize, 0usize);
+        let mut missing: Vec<String> = Vec::new();
+        let mut by_dir: BTreeMap<String, usize> = BTreeMap::new();
+        for nat in cfg.ethnics.keys() {
+            for code in 0..=10u8 {
+                let res = cfg.resolve(nat, &code.to_string());
+                let img = rule.pick(&PlayerRecord {
+                    uid: format!("{nat}/{code}"), primary_nat: nat.into(), sec_nat: String::new(),
+                    name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
+                    ethnicity_code: code.to_string(), detailed: None,
+                }, true).unwrap_or_else(|| panic!("{nat}/{code} 没抽到图"));
+                let in_cands = match res.candidates.as_ref() {
+                    Some(Candidates::Single(d)) => *d == img.dir,
+                    Some(Candidates::Uniform(v)) => v.iter().any(|d| *d == img.dir),
+                    Some(Candidates::Weighted { dirs, .. }) => dirs.iter().any(|d| *d == img.dir),
+                    None => false,
+                };
+                if in_cands { direct += 1 } else { fallback += 1 }
+                *by_dir.entry(img.dir.clone()).or_insert(0) += 1;
+                let base = std::path::Path::new(&pack).join(&img.dir).join(&img.stem);
+                if !["png", "jpg", "jpeg"].iter().any(|e|
+                    std::path::Path::new(&format!("{}.{e}", base.display())).is_file())
+                {
+                    missing.push(format!("{}/{}", img.dir, img.stem));
+                }
+            }
+        }
+        assert!(missing.is_empty(),
+                "{} 条映射指向包里不存在的文件，如 {:?}", missing.len(), &missing[..missing.len().min(5)]);
+        let mut ranked: Vec<_> = by_dir.iter().collect();
+        ranked.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        eprintln!("全量 2563 组：直中候选 {direct}，走回退 {fallback}；目录命中数 Top8：{:?}",
+                  &ranked[..ranked.len().min(8)]);
+        // 第二轮：禁重复再扫一遍，验证两份索引的同步摘除在真实规模下也无重复。
+        let mut rule = for_layout(layout, &scan, &config);
+        let mut issued = BTreeSet::new();
+        for (i, nat) in cfg.ethnics.keys().enumerate() {
+            for code in 0..=10u8 {
+                let img = rule.pick(&PlayerRecord {
+                    uid: format!("nd-{nat}/{code}"), primary_nat: nat.into(), sec_nat: String::new(),
+                    name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
+                    ethnicity_code: code.to_string(), detailed: None,
+                }, false).unwrap_or_else(|| panic!("禁重复第 {i} 组 {nat}/{code} 没抽到图"));
+                assert!(issued.insert(record_from(&img.dir, &img.stem)),
+                        "禁重复抽到重复图 {img:?}");
+            }
+        }
+        eprintln!("禁重复 {} 组：from 全部唯一", issued.len());
+    }
 
     #[test]
     fn builtin_has_expected_defaults() {

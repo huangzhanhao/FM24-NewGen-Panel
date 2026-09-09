@@ -112,7 +112,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 | `MENA` | 中东与北非 | `YugoGreek` | 巴尔干与希腊 |
 
 - 选图池优先级：**国籍同名目录**（如 `ARG/`、`CHN/`）→ 种族目录 → 两者都不存在时使用头像包全部目录。
-- FM 种族码（0–10）如何参与修正选池，见 [种族特征分类说明.md](docs/种族特征分类说明.md) 与 [种族代码示例.xlsx](docs/FM%20NewGAN种族代码示例.xlsx)；实现见 [`face_mapper.rs`](src-tauri/src/face_mapper.rs)。
+- FM 种族码（0–10）如何参与修正选池，见 [种族特征分类说明.md](docs/种族特征分类说明.md) 与 [种族代码示例.md](docs/reference/FM%20NewGAN种族代码示例.md)；实现见 [`face_mapper.rs`](src-tauri/src/face_mapper.rs)。
 - 国籍 → 种族的对照表在 [`src-tauri/assets/eth_cfg.json`](src-tauri/assets/eth_cfg.json)（编译期嵌入，内容与 v1 一致），修改后需重新构建。
 
 ---
@@ -268,7 +268,7 @@ newgan.log              运行日志（10 MB × 3 滚动）
 
 判定层完全数据驱动，新增标准不用改判定代码，六步即可：`assets/standardN.json` → `src-tauri/src/templates/standardN.rs`（规则结构体 + 校验 + 抽图模型 + 单测，只依赖 `templates/mod.rs` 的接口）→ `assets.rs` 内嵌 → `templates/mod.rs` 登记（配置字段、加载导出、`folder_lists()`、`for_layout` 分支、`rule_files()`、已实现标准清单）→ 前端加一个 chip。命名一律跟着标准号走：`standardN.rs` ↔ `standardN.json` ↔ 类型 `StandardNConfig` / `StandardNRule`。
 
-注意各标准的 `FolderList` 不能互相包含，否则判定会先命中先赢；加载时会校验这一点并报错。完整设计与验收清单见 `docs/模板三抽图模型重构计划.md`。
+注意各标准的 `FolderList` 不能互相包含，否则判定会先命中先赢；加载时会校验这一点并报错。
 
 ### 目录名不在清单里的老头像包
 

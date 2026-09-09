@@ -80,7 +80,7 @@
 ## 7. 本仓库实现状态（2026-09-08）
 
 模型已落地为**标准三**的抽图规则：配置 `src-tauri/assets/standard3.json`（内容即本文档反推的 Version 4 表）、
-实现 `src-tauri/src/templates/standard3.rs`、设计与验收清单 `docs/模板三抽图模型重构计划.md`、
+实现 `src-tauri/src/templates/standard3.rs`、
 用户视角说明 README「头像包标准与抽图规则」。
 
 **实测到的数据不变量**（233 国 × 11 码 = 2563 组合，已写成回归测试 `builtin_rules_resolve_every_country_and_code`）：

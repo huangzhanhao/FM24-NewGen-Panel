@@ -143,26 +143,12 @@ pub fn rule_files() -> Vec<RuleFile> {
 }
 
 /// 首次运行导出用户可编辑的规则文件（已存在不覆盖，避免冲掉用户修改）。
-/// 旧命名的规则文件在此一并清理：标准二的内容仍然有效 → 改名续用；
-/// 标准三的旧内容已作废 → 直接删（不备份，避免留一份不会被任何代码读取的死文件）。
 pub fn ensure_user_files(data_dir: &Path) -> Result<(), String> {
     let dir = data_dir.join("rules");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建规则目录失败: {e}"))?;
     let cfg = RuleConfig::builtin();
     let s2 = dir.join("standard2.json");
     let s3 = dir.join("standard3.json");
-    let legacy2 = dir.join("template2.json");
-    let legacy3 = dir.join("template3.json");
-    if legacy2.is_file() {
-        if !s2.exists() {
-            std::fs::rename(&legacy2, &s2).map_err(|e| format!("改名规则文件失败: {e}"))?;
-        } else {
-            std::fs::remove_file(&legacy2).map_err(|e| format!("清理旧规则文件失败: {e}"))?;
-        }
-    }
-    if legacy3.is_file() {
-        std::fs::remove_file(&legacy3).map_err(|e| format!("清理旧规则文件失败: {e}"))?;
-    }
     if !s2.is_file() {
         json_store::save(&s2, &cfg.standard2)?;
     }
@@ -301,27 +287,6 @@ mod tests {
         assert!(err.contains("Version"), "应说明版本不符: {err}");
         std::fs::remove_file(&s3).unwrap();
         assert_eq!(RuleConfig::load(data.path()).unwrap().standard3.folder_list.len(), 62);
-    }
-
-    #[test]
-    fn ensure_user_files_renames_standard2_and_drops_old_standard3() {
-        // 旧命名文件：standard2 内容仍有效 → 改名续用（保住用户手改）；
-        // 旧标准三内容已作废 → 直接删且不报错。
-        let data = tempfile::tempdir().unwrap();
-        let dir = data.path().join("rules");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("template2.json"),
-            "{\"FolderList\":[\"African\"],\"Ethnics\":{\"XXX\":\"African\"}}").unwrap();
-        std::fs::write(dir.join("template3.json"), "{\"FolderList\":[\"China\"]}").unwrap();
-        ensure_user_files(data.path()).unwrap();
-        assert!(!dir.join("template2.json").exists(), "旧标准二文件应已改名");
-        assert!(!dir.join("template3.json").exists(), "旧标准三文件应已删除");
-        // 改名后的内容原样保留（不是被内置默认覆盖）。
-        let cfg = RuleConfig::load(data.path()).unwrap();
-        assert_eq!(cfg.standard2.folder_list, vec!["African".to_string()]);
-        assert_eq!(cfg.standard2.ethnics["XXX"], "African");
-        // 标准三取内置默认。
-        assert_eq!(cfg.standard3.folder_list.len(), 62);
     }
 
     #[test]

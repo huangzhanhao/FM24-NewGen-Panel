@@ -1,12 +1,12 @@
 //! 【新手导读】Replace Faces 流水线（自旧版 services/replace_service.py 移植）。
 //! 把「校验 RTF → 解析 → 映射 → 写 config.xml」四个阶段串成一条完整流程。
 //! 进度通过回调上报（值与 v1 对齐：20/40/80/90/100），取消经 AtomicBool 逐球员生效。
-//! 【日志】关键步骤经 Logger 记 INFO（模块 replace）：Logger 会把每条日志批量 emit 成
-//! log:batch 事件推给前端，日志面板实时回显，无需额外接线。
+//! 【日志】关键步骤经 LogSink 记 INFO（模块 replace）：生产实现转发 log 门面，由官方
+//! 插件分发给 stdout/滚动文件/内存缓冲（内存侧再批量 emit 成 log:batch 推给前端）。
 use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack::PackLayout;
-use crate::logger::Logger;
+use crate::logger::LogSink;
 use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
 use crate::rtf_parser::{PlayerRecord, RtfParser};
 use crate::xml_parser::{self, MappingEntry};
@@ -47,7 +47,7 @@ pub struct RunResult {
 
 /// 【核心函数】执行整条替换流水线。run 只做编排（进度与取消检查点），各阶段实现在下方 *_stage。
 /// progress 是回调函数（&mut dyn FnMut）：每进入一个阶段就调用它上报状态文字和百分比（emit 给前端）。
-/// logger 记录关键步骤日志（模块 replace），经 log:batch 事件实时回显前端日志面板。
+/// logger 是日志出口（LogSink）：生产 = log 门面（官方插件承接），测试 = ChannelLogger 捕获。
 /// cancel 是跨线程取消标志：阶段之间、以及映射循环内部都会检查它。
 /// 【为什么阶段返回 Result<_, RunResult>】阶段内失败/取消统一用 Err(RunResult) 短路，
 /// 替代散落在各处的 `return failed(...)`，主干一眼看清「四个阶段排队走」。
@@ -55,7 +55,7 @@ pub fn run(
     params: &ReplaceParams,
     progress: &mut dyn FnMut(&str, u8),
     cancel: &AtomicBool,
-    logger: &Logger,
+    logger: &impl LogSink,
 ) -> RunResult {
     let started = Instant::now();
     // 开始日志：把本次任务的关键参数与两个输入路径落进日志，事后可完整复盘当时跑的是什么。
@@ -96,7 +96,7 @@ fn parse_stage(
     params: &ReplaceParams,
     progress: &mut dyn FnMut(&str, u8),
     cancel: &AtomicBool,
-    logger: &Logger,
+    logger: &impl LogSink,
 ) -> Result<Vec<PlayerRecord>, RunResult> {
     progress("校验 RTF 文件…", 0);
     let mut parser = RtfParser::new();
@@ -129,7 +129,7 @@ fn map_stage(
     rtf_data: &[PlayerRecord],
     progress: &mut dyn FnMut(&str, u8),
     cancel: &AtomicBool,
-    logger: &Logger,
+    logger: &impl LogSink,
 ) -> Result<Vec<MappingEntry>, RunResult> {
     progress("映射球员头像…", 40);
     let t = Instant::now();
@@ -160,7 +160,7 @@ fn write_stage(
     params: &ReplaceParams,
     mapping: &[MappingEntry],
     progress: &mut dyn FnMut(&str, u8),
-    logger: &Logger,
+    logger: &impl LogSink,
 ) -> Result<(), RunResult> {
     progress("生成 config.xml…", 80);
     let t = Instant::now();
@@ -216,7 +216,7 @@ fn cancelled() -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logger::{LogLine, Logger};
+    use crate::logger::{ChannelLogger, LogLine};
     use std::collections::BTreeSet;
     use std::fs;
 
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn happy_path_writes_config_xml() {
-        let (dir, rtf, img) = setup();
+        let (_dir, rtf, img) = setup();
         let params = ReplaceParams {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
@@ -250,7 +250,7 @@ mod tests {
         };
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
-        let (logger, log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |s, v| steps.push((s.to_string(), v)), &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Finished);
         assert_eq!(result.rtf_data.len(), 2);
@@ -281,7 +281,7 @@ mod tests {
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
-        let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, v| { if v == 20 { cancel.store(true, Ordering::Relaxed); } }, &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Cancelled);
     }
@@ -299,14 +299,14 @@ mod tests {
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
-        let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, _| {}, &cancel, &logger);
         assert!(matches!(result.outcome, Outcome::Failed(m) if m.contains("无效")));
     }
 
     #[test]
     fn cancel_before_write_leaves_no_config() {
-        let (dir, rtf, img) = setup();
+        let (_dir, rtf, img) = setup();
         let params = ReplaceParams {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
@@ -314,7 +314,7 @@ mod tests {
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
-        let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
         // 解析完成后立刻取消（在进度 40 时置位）
         let result = run(&params, &mut |_, v| { if v == 40 { cancel.store(true, Ordering::Relaxed); } }, &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Cancelled);
@@ -354,7 +354,7 @@ mod tests {
             rule_config,
         };
         let cancel = AtomicBool::new(false);
-        let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, _| {}, &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Finished);
         assert_eq!(result.mapping.len(), 3);
@@ -402,7 +402,7 @@ mod tests {
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
-        let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, _| {}, &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Finished);
         assert_eq!(result.mapping.len(), 3);
@@ -448,7 +448,7 @@ mod tests {
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
-        let (logger, _log_rx) = Logger::new(dir.path()).unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, _| {}, &cancel, &logger);
         assert_eq!(result.outcome, Outcome::Finished);
         assert_eq!(result.mapping.len(), 3);

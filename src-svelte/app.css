@@ -431,7 +431,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .log-line { color: var(--text-2); }
 .log-line.warning { color: var(--warn); }
 .log-line.error { color: var(--danger); }
-.log-line.critical { color: #fff; background: var(--danger); }
 /* 级别筛选 chip */
 .chip {
   border: 1px solid var(--hairline-2); background: var(--bg-raised); color: var(--text-2);
@@ -572,7 +571,6 @@ input.uid-chip { width: 160px; max-width: 100%; padding: 4px 10px; font-family: 
   padding: 0 12px; white-space: nowrap;
   font-family: var(--mono); font-size: 11.5px; line-height: 1.75;
 }
-.drawer-body .log-line.critical { border-radius: 0; }
 /* 模态标题区内的分段控件不撑满 */
 .modal-title .seg3 { width: auto; }
 .modal-title .seg3 button { flex: none; padding: 6px 14px; }

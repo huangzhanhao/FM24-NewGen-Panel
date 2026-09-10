@@ -3,8 +3,9 @@
 import type { LogLine } from '../types';
 
 const MAX = 10_000; // 前端显示上限（超出则从头部丢弃，与后端环形缓冲一致）
+// 级别口径对齐 Rust log 门面（Trace/Debug/Info/Warn/Error，显示串沿用 v1 拼写 WARNING）。
 // as const 把数组锁定为字面量类型（而不是宽泛的 string[]），便于类型推导。
-export const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const;
+export const LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR'] as const;
 
 /** 日志环形缓冲 + 过滤条件（对等旧版 LogTab 的 log_store + _filter_log）。
  * $state 让这个对象响应式：lines/level/only 变化时，日志面板会自动刷新。 */

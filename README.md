@@ -105,7 +105,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 ### 7. 状态栏与日志
 底部状态栏常驻显示当前状态（就绪 / 进度文字）；`日志` 按钮出现红色角标表示有错误，点开抽屉可按级别筛选、只看某一级、打开日志文件或清空显示。
 
-> 抽屉里的列表来自 Rust 侧的环形缓冲（上限 1 万条，仅本次运行）：前端启动时会先向 `query_logs` 回填一次历史，再订阅 `log:batch` 增量。
+> 日志管道基于官方 `tauri-plugin-log` 插件（log 门面 + 控制台 + 10 MB × 3 份滚动文件，依赖库日志同样汇入）；抽屉列表来自 Rust 侧的环形缓冲（上限 1 万条，仅本次运行）：前端启动时会先向 `query_logs` 回填一次历史，再订阅 `log:batch` 增量。
 > 因为启动日志（`Starting Application v2`）在 WebView 开始加载页面前就已被 emit，而 Tauri 不重放事件，所以这一行只能靠回填拿到。
 
 ---
@@ -160,7 +160,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       ├── profile_manager.rs   # ← core/ProfileManager.py（档/组 CRUD、浏览预览、激活快照交换）
 │       ├── face_mapper.rs       # ← core/FaceMapper.py（标准路由 + 三模式映射）
 │       ├── replace_flow.rs      # ← services/replace_service.py（替换流水线）
-│       ├── logger.rs            # ← core/NewGanLogManager.py（环形缓冲 + 事件）
+│       ├── logger.rs            # ← core/NewGanLogManager.py（官方 log 插件管道 + 内存环形缓冲/批量事件）
 │       └── commands.rs          # ← services/* + 对话框原语（26 个 Tauri 命令）
 ├── tests/testing_data/          # RTF 测试样本（不入库）
 ├── .cargo/config.toml           # Cargo 构建配置（target-dir 指向根目录 target/）
@@ -240,7 +240,7 @@ rules/
   standard2.json          标准二规则的用户副本（首次启动从出厂默认导出，改完下次替换即生效）
   standard3.json          标准三规则的用户副本（同上）
 webview/                  WebView2 浏览器数据（缓存/localStorage，已重定向，不写 C 盘）
-newgan.log                运行日志（10 MB × 3 滚动）
+newgan.log                运行日志（10 MB × 3 滚动，备份命名 newgan_日期_时间.log）
 ```
 
 ---

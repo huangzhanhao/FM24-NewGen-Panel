@@ -28,7 +28,7 @@ pub use crate::facepack::FACEPACK_DIRS;
 /// 所以共享数据用 Mutex（互斥锁）保护，跨线程引用用 Arc（共享所有权），标志用 AtomicBool。
 pub struct AppState {
     pub pm: Mutex<ProfileManager>,       // 存档管理器（Mutex 保证同一时刻只有一个线程操作）
-    pub logger: Arc<Logger>,             // Logger 字段全部是 Mutex/Sender，包 Arc 即可跨线程
+    pub logger: Arc<Logger>,             // 日志门面（Arc 跨线程共享；写入走 log 门面，回查走内存缓冲）
     pub cancel: Arc<AtomicBool>,         // 请求取消标志
     pub running: Arc<AtomicBool>,        // 是否正在替换
     pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>,   // 最近一次解析的球员缓存
@@ -509,7 +509,7 @@ pub fn start_replace(
                 let _ = emit_app.emit("replace:progress", ProgressPayload { status: status.into(), value });
             },
             &cancel,
-            &logger,
+            &*logger, // &Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）
         );
         // 把解析结果与映射写入缓存（供后续预览/分页查询使用）。
         *rtf_cache.lock().unwrap() = result.rtf_data.clone();

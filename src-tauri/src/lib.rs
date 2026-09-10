@@ -13,7 +13,7 @@ mod commands;        // Tauri 命令层：前端可调用的所有函数都在�
 mod face_mapper;     // 核心算法：球员 → 头像图片的映射
 mod facepack;        // 头像包扫描与标准判定（FolderList 来自 templates，不硬编码）
 mod json_store;      // JSON 配置的原子读写
-mod logger;          // 日志系统（环形缓冲 + 滚动文件 + 事件推送）
+mod logger;          // 日志系统（log 门面 + 官方插件管道；自研内存缓冲与批量事件见模块头）
 mod paths;           // 路径规范化工具
 mod profile_manager; // 存档（Profile）与头像包（组）管理
 mod replace_flow;    // 「Replace Faces」整条流水线
@@ -22,11 +22,12 @@ mod templates;       // 头像包标准与抽图模型（一个标准一个自�
 mod xml_parser;      // 读写 config.xml（FM 认的头像映射配置）
 
 use commands::AppState;                 // 应用全局状态（被 Tauri 托管，命令里通过 State 取用）
-use logger::Logger;                     // 日志器
+use logger::{LogMemory, Logger};        // 日志门面与内存缓冲（文件/控制台管道由官方插件承担）
 use std::path::{Path, PathBuf};         // Rust 的跨平台路径类型（Path 借用、PathBuf 拥有）
 use std::sync::atomic::AtomicBool;      // 原子布尔量：多线程间安全地传递「取消/运行中」标志
 use std::sync::{Arc, Mutex};            // Arc=多线程共享所有权；Mutex=互斥锁，保护共享数据
 use tauri::Manager;                     // 引入 Manager trait 才能用 app.manage() / app.handle()
+use tauri_plugin_log::{fern, RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// 便携化数据目录：开发调试 → 项目根目录 data/；正式分发 → 可执行文件所在目录 data/
 /// （NSIS 以 currentUser 模式安装到用户可写目录，安装目录内可直接写数据）
@@ -107,7 +108,15 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
 /// 采用「建造者模式（Builder Pattern）」：一连串 .xxx() 链式调用逐步配置应用，最后 .run() 启动。
 #[cfg_attr(mobile, tauri::mobile_entry_point)] // 移动端构建时标记为入口点（桌面端忽略）
 pub fn run() {
+    // 数据目录必须先于插件装配确定：日志文件的 Folder target 在 .plugin() 注册时就要用到它
+    // （插件 setup 先于应用 setup 运行，全局 logger 在应用 setup 第一行日志前已就位）。
     // tauri::Builder::default() 创建一个默认的应用构建器，接下来链式地往上叠加配置。
+    let data_dir = portable_data_dir().expect("无法定位便携数据目录");
+    // 内存环形缓冲 + 事件通道（logger.rs 自研补齐的部分）：Arc 一份给插件 fern 闭包，
+    // 一份给 setup 里的 Logger；接收端最后交给后台聚批线程。
+    let (memory, log_rx) = LogMemory::channel();
+    let memory = Arc::new(memory);
+    let memory_for_plugin = Arc::clone(&memory); // fern 闭包拿一份，setup 里的 Logger 拿原件
     tauri::Builder::default()
         // .plugin(...) 注册官方插件：
         //   dialog —— 提供原生弹框（提示/确认）和文件、目录选择对话框；
@@ -115,11 +124,64 @@ pub fn run() {
         // 注册后前端才能通过对应的 JS API 调用它们。
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // 官方日志插件（tauri-plugin-log）：log 门面 + stdout + 滚动文件三合一，
+        // 依赖库（tauri/tao/wry…）的日志从此也汇入同一条管道。第三个 target 把
+        // 原始记录交给自研 LogMemory（官方没有「回查历史」能力，见 logger.rs）。
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)                    // 全局阈值：INFO 及以上才进管道
+                .timezone_strategy(TimezoneStrategy::UseLocal)    // 本地时区（与 v1 一致）
+                .max_file_size(10 * 1024 * 1024)                  // 单文件 10MB，超过滚动（对齐 v1）
+                .rotation_strategy(RotationStrategy::KeepSome(3)) // 保留最近 3 份滚动备份（对齐 v1 的 .1~.3）
+                // 【关键】清掉插件根格式：fern 的父级格式化输出会「替换」record.args 再传
+                // 给子 target（实测正文会被嵌套成 [时间][级别] 前缀套 v1 格式）。清掉后
+                // 根直接透传原始 Record，各 target 自带格式互不污染（文件 v1 行/内存原始串）。
+                .clear_format()
+                .targets([
+                    // ① 控制台：官方默认行样式（clear_format 后根不再兜底，此处自带；
+                    //    样式对齐插件原输出：[日期][时间][级别][模块] 正文）。
+                    Target::new(TargetKind::Stdout).format(|out, message, record| {
+                        out.finish(format_args!(
+                            "[{}][{}][{}] {}",
+                            chrono::Local::now().format("%Y-%m-%d][%H:%M:%S"),
+                            record.level(),
+                            record.target(),
+                            message
+                        ))
+                    }),
+                    // ② 滚动文件：v1 兼容行格式（格式契约在 logger::v1_line，勿改）。
+                    //    官方 RotatingFile 负责开关文件与滚动，替代原手写 write_file/rotate。
+                    //    【file_name 传词干】插件内部 join(词干).with_extension("log") 拼出
+                    //    newgan.log（与 v1 同名）；滚动备份命名为 newgan_日期_时间.log 并按
+                    //    KeepSome(3) 保留最近 3 份（官方语义，替代 v1 的 .1/.2/.3）。
+                    Target::new(TargetKind::Folder {
+                        path: data_dir.clone(),
+                        file_name: Some("newgan".into()),
+                    })
+                    .format(|out, _message, record| {
+                        out.finish(format_args!(
+                            "{}",
+                            logger::v1_line(
+                                &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                                logger::level_label(record.level()),
+                                record.target(),
+                                &record.args().to_string(),
+                            )
+                        ))
+                    }),
+                    // ③ 内存环形缓冲（自研补齐）：fern 自定义输出拿到未经格式化的原始
+                    // Record，组装 LogLine 入缓冲 + 事件通道，前端回查/实时增量都靠它。
+                    Target::new(TargetKind::Dispatch(
+                        fern::Dispatch::new()
+                            .chain(fern::Output::call(move |record| memory_for_plugin.record(record))),
+                    )),
+                ])
+                .build(),
+        )
         // .setup(...) 在应用启动、窗口创建前执行一次初始化。闭包参数 app 是应用句柄。
         // 返回 Result：若初始化出错（用 ? 传播），应用会启动失败。
         .setup(|app| {
-            // 1) 准备便携数据目录，并确保它存在（不存在就创建）。
-            let data_dir = portable_data_dir()?;
+            // 1) 便携数据目录（路径已在 run() 顶部确定，这里只补建目录）。
             std::fs::create_dir_all(&data_dir)?;
             // 2) 尝试把旧版数据迁移过来（首次运行时）。
             migrate_legacy_user_data(&data_dir)?;
@@ -137,9 +199,17 @@ pub fn run() {
                 .data_directory(webview_data) // 关键：把浏览器数据目录指向便携位置
                 .build()?;                 // 真正创建窗口
 
-            // 4) 初始化日志器。Logger::new 返回（日志器, 接收端）；日志器用 Arc 包裹以便多线程共享。
-            let (logger, log_rx) = Logger::new(&data_dir)?;
-            let logger = Arc::new(logger);
+            // 4) 日志门面：官方插件已在 setup 之前装好全局 logger，这里起手即可写。
+            //    Logger 只携带「打开文件路径 + 回查缓冲」，写入经 log 门面走官方管道。
+            let logger = Arc::new(Logger::new(&data_dir, memory));
+            // panic hook：官方生态不覆盖 panic——补上，让崩溃现场进日志文件（默认 hook
+            // 保留，stderr 照常输出）。info 的 Display 自带「位置 + 消息」。
+            let default_hook = std::panic::take_hook();
+            let panic_logger = logger.clone();
+            std::panic::set_hook(Box::new(move |info| {
+                default_hook(info);
+                panic_logger.error("panic", format!("{info}"));
+            }));
             logger.info("app", "Starting Application v2"); // 写入启动日志
 
             // 5) 初始化存档管理器（ProfileManager），读取或创建用户配置。

@@ -64,19 +64,19 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
     <div class="modal">
       <div class="modal-title">
-        <span class="row" style="gap:6px">
+        <div class="seg3">
           {#each NAMES as name}
-            <button class="mode-chip" class:active={active === name}
+            <button class:active={active === name}
                     onclick={() => switchTo(name)}>{LABELS[name]}</button>
           {/each}
-        </span>
-          <span class="row" style="gap:6px">
-            {#if status}<span class="ok-text small">{status}</span>{/if}
-            <span class="muted small" style="margin-right:6px">{appStore.snapshot?.currentProfile ?? ''}</span>
-            <button class="btn primary" onclick={save} disabled={!dirty} title={t.ruleEditor.saveHint}>{t.ruleEditor.saveBtn}</button>
-            <button class="btn" onclick={close}>{t.ruleEditor.closeBtn}</button>
-          </span>
         </div>
+        <div class="modal-actions">
+          {#if status}<span class="ok-text small">{status}</span>{/if}
+          <span class="muted small">{appStore.snapshot?.currentProfile ?? ''}</span>
+          <button class="btn primary" onclick={save} disabled={!dirty} title={t.ruleEditor.saveHint}>{t.ruleEditor.saveBtn}</button>
+          <button class="btn" onclick={close}>{t.ruleEditor.closeBtn}</button>
+        </div>
+      </div>
         <div class="modal-body">
           <textarea class="editor" bind:value={text} oninput={() => (status = '')}
                     spellcheck="false" wrap="off"

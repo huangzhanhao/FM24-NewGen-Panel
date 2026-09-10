@@ -20,6 +20,19 @@ export const t = {
   app: {
     replaceFinished: '替换完成！',
     replaceFailed: '替换失败，请查看日志',
+    brandVer: 'v2.0',
+  },
+
+  /** 顶部五步旅程引导（纯展示，不可点击，随快照状态点亮） */
+  stepper: {
+    steps: ['选档与头像包', '校验与名单', '选模式', '执行替换', '查看与微调'],
+  },
+
+  /** 侧栏底部主题切换 */
+  theme: {
+    dark: '深色',
+    light: '浅色',
+    switchTo: (mode: 'dark' | 'light') => (mode === 'light' ? '切换到浅色主题' : '切换到深色主题'),
   },
 
   /** 侧边栏：存档（Profile）与头像包（组）管理 */
@@ -92,6 +105,10 @@ export const t = {
     missingDirsConfirm: (standard: number, count: number, list: string) =>
       `标准${standard} 缺少 ${count} 个目录：\n${list}\n\n自动创建？`,
     integrityUnknown: '⚠ 无法识别头像包结构：子目录与任何标准的 FolderList 清单都不构成包含关系，替换时将把包内全部图片随机分配；也可在「规则配置」中调整标准目录清单。',
+    // 完整性状态胶囊的短文案（详情仍用上方 integrityFixable / integrityUnknown 长句）
+    pillMissingDirs: (missing: number, found: number, total: number) =>
+      `缺少 ${missing} 个目录（已有 ${found}/${total}）`,
+    pillUnknown: '无法识别头像包结构',
     ruleConfigBtn: '规则配置',
     ruleConfigHint: '直接查看、修改并保存标准规则文件（国籍→目录映射、FolderList 等），保存时自动校验 JSON 格式',
     ruleConfigNote: '抽图规则来自规则 json（可编辑），保存后下次替换/检查完整性即生效',
@@ -162,6 +179,7 @@ export const t = {
   viewer: {
     title: '球员预览',
     hint: '输入 UID 回车预览',
+    colMapping: '当前映射',
     noImage: '暂无图片',
     noMappingPlaceholder: '...\\...',
     imgPlaceholder: '输入新图片路径…',

@@ -6,6 +6,7 @@
   import { showError } from '../dialog';
   import { t } from '../text'; // 全局文案常量
   import { pinScrollEnd } from '../actions'; // 把长路径钉到最右的 action
+  import { icons } from '../icons';
   import { appStore, applySnapshot } from '../stores/app.svelte';
   import type { IntegrityResult } from '../types';
   import RuleEditor from './RuleEditor.svelte';
@@ -104,9 +105,13 @@
     <!-- 头像包路径行：只读输入框 + [检查完整性 | 扫描头像] 按钮组。use:pinScrollEnd 把长路径钉到最右。 -->
     <div class="path-row">
       <label for="sc-group">{t.setup.imgDirLabel}</label>
-      <input id="sc-group" type="text" readonly value={snap.currentGroup ?? ''}
-             placeholder={t.setup.imgDirPlaceholder} title={snap.currentGroup ?? ''}
-             use:pinScrollEnd={snap.currentGroup ?? ''} />
+      <div class="input-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.folder.body}</svg>
+        <input id="sc-group" type="text" readonly value={snap.currentGroup ?? ''}
+               placeholder={t.setup.imgDirPlaceholder} title={snap.currentGroup ?? ''}
+               use:pinScrollEnd={snap.currentGroup ?? ''} />
+      </div>
       <div class="path-actions">
         <!-- disabled 在忙碌或无选中组时置 true；title 根据情况给不同提示。 -->
         <button class="btn" onclick={checkIntegrity} disabled={busy || !snap.currentGroup}
@@ -141,24 +146,40 @@
                 title={t.setup.viewSnapshotHint}>{t.setup.viewSnapshotBtn}</button>
       </div>
     </div>
-    <!-- 底部提示区：无组→引导关联；已检查且完整→绿色✓（含多余目录提示）；已检查且缺失→黄色警告 + 一键创建按钮。 -->
+    <!-- 完整性状态行：无组→引导关联；完整→绿色胶囊（旁注多余目录）；
+         缺失目录→琥珀胶囊 + 详情长句 + 一键创建按钮；无法识别→琥珀胶囊 + 说明长句。 -->
     {#if !snap.currentGroup}
-      <p class="muted small">{t.setup.noGroupGuide}</p>
+      <p class="muted small statusline">{t.setup.noGroupGuide}</p>
     {:else if integrity !== null}
       {#if integrity.status === 'complete'}
-        <p class="ok-text small">{t.setup.integrityOk(completeLabel)}{t.setup.extraDirsNote(integrity.extra.length)}</p>
+        <div class="statusline">
+          <span class="pill ok"><span class="dot"></span>{completeLabel}</span>
+          {#if integrity.extra.length > 0}
+            <span class="note">{t.setup.extraDirsNote(integrity.extra.length).replace(/^；/, '')}</span>
+          {/if}
+        </div>
       {:else if integrity.status === 'fixable'}
-        <p class="warn-text small">{t.setup.integrityFixable(integrity.standard, integrity.missing.length, integrity.found, integrity.expectedTotal, integrity.missing.join(', '))}</p>
-        <button class="btn primary" onclick={fixMissing} disabled={busy}>{t.setup.createMissingBtn}</button>
+        <div class="statusline">
+          <span class="pill warn"><span class="dot"></span>
+            {t.setup.pillMissingDirs(integrity.missing.length, integrity.found, integrity.expectedTotal)}
+          </span>
+          <button class="btn primary" onclick={fixMissing} disabled={busy}>{t.setup.createMissingBtn}</button>
+        </div>
+        <p class="muted small" style="margin:6px 0 0">
+          {t.setup.integrityFixable(integrity.standard, integrity.missing.length, integrity.found, integrity.expectedTotal, integrity.missing.join(', '))}
+        </p>
       {:else}
-        <p class="warn-text small">{t.setup.integrityUnknown}</p>
+        <div class="statusline">
+          <span class="pill warn"><span class="dot"></span>{t.setup.pillUnknown}</span>
+        </div>
+        <p class="muted small" style="margin:6px 0 0">{t.setup.integrityUnknown}</p>
       {/if}
     {/if}
-    <!-- 标准规则入口：打开规则编辑对话框（查看/修改/保存 standard2|standard3.json）。 -->
-    <div class="row">
+    <!-- 标准规则入口：顶部分隔线另起一行（打开查看/修改/保存 standard2|standard3.json 的对话框）。 -->
+    <div class="rule-row">
       <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy}
               title={t.setup.ruleConfigHint}>{t.setup.ruleConfigBtn}</button>
-      <span class="muted small">{t.setup.ruleConfigNote}</span>
+      <span class="note">{t.setup.ruleConfigNote}</span>
     </div>
   </div>
 {/if}

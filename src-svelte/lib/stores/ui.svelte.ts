@@ -1,8 +1,39 @@
-/** 跨组件 UI 状态：日志抽屉开关等（与业务数据无关的界面状态） */
+/** 跨组件 UI 状态：日志抽屉开关、深/浅主题等（与业务数据无关的界面状态） */
 // 【新手导读：Svelte 5 runes】$state(...) 创建一个“响应式对象”：它的属性被修改时，
 // 所有用到它的组件会自动重新渲染。这就是 Svelte 5 的状态管理核心（取代旧版的 writable store）。
 // 【文件名为何是 .svelte.ts】这是 Svelte 5 约定：在组件外的 .ts 文件里使用 $state 等 rune，
 // 文件名必须带 .svelte，编译器才会把它当作 runes 处理。
+
+/** 主题取值：dark=深色「教练席海军蓝」（默认），light=浅色「日间球场」。 */
+export type Theme = 'dark' | 'light';
+const THEME_KEY = 'ngm-theme'; // localStorage 记忆键名
+
+/** 启动时读取上次选择的主题（没有记录时默认深色）。 */
+function readTheme(): Theme {
+  try {
+    return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';
+  } catch {
+    return 'dark'; // 隐私模式等无法访问 localStorage 时静默回退
+  }
+}
+
 export const ui = $state({
   logOpen: false, // 日志抽屉是否打开
+  theme: readTheme() as Theme, // 当前主题（写入 <html data-theme> 切换整套 CSS 令牌）
 });
+
+/** 把当前主题写到 <html data-theme>——这是深/浅两套 CSS 变量的唯一切换开关。 */
+export function applyTheme() {
+  document.documentElement.dataset.theme = ui.theme;
+}
+
+/** 深/浅切换，并把选择持久化到 localStorage（下次启动沿用）。 */
+export function toggleTheme() {
+  ui.theme = ui.theme === 'dark' ? 'light' : 'dark';
+  try {
+    localStorage.setItem(THEME_KEY, ui.theme);
+  } catch {
+    // 存储不可用时仅对本次会话生效
+  }
+  applyTheme();
+}

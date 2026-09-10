@@ -4,6 +4,7 @@
   import { api } from '../api';
   import { appStore } from '../stores/app.svelte';
   import { t } from '../text'; // 全局文案常量
+  import { icons } from '../icons';
   import type { PageResult, PlayerRecord } from '../types';
 
   const PAGE_SIZE = 200; // 每页条数
@@ -43,64 +44,94 @@
 
   // 是否含详细信息：当前页任一条有 detailed 就额外渲染那几列（适配基础/详细两种名单）。
   const hasDetailed = $derived(!!result?.items.some((r) => r.detailed));
+
+  /** 随机人列的标签配色：中文名单值为「是/否」，英文名单兼容 Yes/No；其余值原样显示不着色。 */
+  function newganCls(v: string) {
+    if (/否|no/i.test(v)) return 'tag-no';
+    if (/是|yes/i.test(v)) return 'tag-yes';
+    return '';
+  }
 </script>
 
-<h3>{t.table.title} <span class="muted">{result ? t.table.recordCount(result.total) : ''}</span></h3>
+<!-- 工具条：搜索框（放大镜图标）+ 总条数 + 右侧分页。组件根是纵向 flex，撑满卡片正文高度。 -->
+<div class="table-pane">
+  <div class="table-toolbar">
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" aria-hidden="true">{@html icons.search.body}</svg>
+      <input type="search" placeholder={t.table.searchPlaceholder} bind:value={search} aria-label={t.table.searchPlaceholder} />
+    </div>
+    {#if result}<span class="muted small">{t.table.recordCount(result.total)}</span>{/if}
+    <span class="spacer"></span>
+    <div class="pager">
+      <button class="btn" onclick={() => (page = 0)} disabled={page === 0} title={t.table.prevPage}>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.chevronLeft.body}</svg>
+      </button>
+      <span>{t.table.pageOf(page + 1, totalPages)}</span>
+      <button class="btn" onclick={() => (page += 1)} disabled={page + 1 >= totalPages} title={t.table.nextPage}>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.chevronRight.body}</svg>
+      </button>
+    </div>
+  </div>
 
-<!-- 搜索框 + 上一页/下一页。bind:value 把输入框与 search 双向绑定。 -->
-<div class="row">
-  <input type="text" placeholder={t.table.searchPlaceholder} bind:value={search} class="flex-1" style="max-width:360px" />
-  <button class="btn" onclick={() => (page = 0)} disabled={page === 0}>{t.table.prevPage}</button>
-  <span class="muted">{t.table.pageOf(page + 1, totalPages)}</span>
-  <button class="btn" onclick={() => (page += 1)} disabled={page + 1 >= totalPages}>{t.table.nextPage}</button>
-</div>
-
-<!-- 有数据时渲染表格；否则显示引导提示。 -->
-{#if result && result.items.length > 0}
-  <div style="max-height:340px;overflow:auto">
-    <table class="grid">
-      <thead>
-        <tr>
-          <!-- 可排序的表头绑 onclick=sortBy；arrow() 拼接升降序箭头。
-               排序键（'uid'/'primaryNat'/'name'/'ethnicityCode'）是发往后端的协议值，勿改。 -->
-          <th onclick={() => sortBy('uid')}>{t.table.colUid}{arrow('uid')}</th>
-          <th onclick={() => sortBy('primaryNat')}>{t.table.colNat}{arrow('primaryNat')}</th>
-          <th>{t.table.col2ndNat}</th>
-          <th onclick={() => sortBy('name')}>{t.table.colName}{arrow('name')}</th>
-          <th>{t.table.colHair}</th>
-          <th>{t.table.colColor}</th>
-          <th onclick={() => sortBy('ethnicityCode')}>{t.table.colEth}{arrow('ethnicityCode')}</th>
-          <!-- 仅当名单含详细信息时才多渲染这几列。 -->
-          {#if hasDetailed}
-            <th>{t.table.colSkin}</th><th>{t.table.colClub}</th><th>{t.table.colAge}</th><th>{t.table.colHeight}</th><th>{t.table.colWeight}</th><th>{t.table.colNewgan}</th>
-          {/if}
-        </tr>
-      </thead>
-      <tbody>
-        <!-- {#each ... as r (r.uid)}：括号里的 (r.uid) 是“键”，帮 Svelte 高效复用 DOM。 -->
-        {#each result.items as r (r.uid)}
+  <!-- 有数据时渲染表格；否则显示虚线空状态引导。 -->
+  {#if result && result.items.length > 0}
+    <div class="table-scroll">
+      <table class="grid">
+        <thead>
           <tr>
-            <td class="mono">{r.uid}</td>
-            <td>{r.primaryNat}</td>
-            <td>{r.secNat}</td>
-            <td>{r.name}</td>
-            <td>{r.hairLength}</td>
-            <td>{r.hairColor}</td>
-            <td>{r.ethnicityCode}</td>
-            <!-- 详细列：?. 安全访问 detailed，为空时显示 —。 -->
+            <!-- 可排序的表头绑 onclick=sortBy；arrow() 拼接升降序箭头。
+                 排序键（'uid'/'primaryNat'/'name'/'ethnicityCode'）是发往后端的协议值，勿改。 -->
+            <th onclick={() => sortBy('uid')}>{t.table.colUid}{arrow('uid')}</th>
+            <th onclick={() => sortBy('primaryNat')}>{t.table.colNat}{arrow('primaryNat')}</th>
+            <th>{t.table.col2ndNat}</th>
+            <th onclick={() => sortBy('name')}>{t.table.colName}{arrow('name')}</th>
+            <th>{t.table.colHair}</th>
+            <th>{t.table.colColor}</th>
+            <th onclick={() => sortBy('ethnicityCode')}>{t.table.colEth}{arrow('ethnicityCode')}</th>
+            <!-- 仅当名单含详细信息时才多渲染这几列。 -->
             {#if hasDetailed}
-              <td>{r.detailed?.skinCode ?? '—'}</td>
-              <td>{r.detailed?.club ?? '—'}</td>
-              <td>{r.detailed?.age ?? '—'}</td>
-              <td>{r.detailed?.height ?? '—'}</td>
-              <td>{r.detailed?.weight ?? '—'}</td>
-              <td>{r.detailed?.isNewgan ?? '—'}</td>
+              <th>{t.table.colSkin}</th><th>{t.table.colClub}</th><th>{t.table.colAge}</th><th>{t.table.colHeight}</th><th>{t.table.colWeight}</th><th>{t.table.colNewgan}</th>
             {/if}
           </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
-{:else}
-  <p class="muted">{t.table.emptyHint}</p>
-{/if}
+        </thead>
+        <tbody>
+          <!-- {#each ... as r (r.uid)}：括号里的 (r.uid) 是“键”，帮 Svelte 高效复用 DOM。 -->
+          {#each result.items as r (r.uid)}
+            <tr>
+              <td class="mono">{r.uid}</td>
+              <td>{r.primaryNat}</td>
+              <td>{r.secNat}</td>
+              <td>{r.name}</td>
+              <td>{r.hairLength}</td>
+              <td>{r.hairColor}</td>
+              <td>{r.ethnicityCode}</td>
+              <!-- 详细列：?. 安全访问 detailed，为空时显示 —；随机人列用是/否胶囊着色。 -->
+              {#if hasDetailed}
+                <td>{r.detailed?.skinCode ?? '—'}</td>
+                <td>{r.detailed?.club ?? '—'}</td>
+                <td>{r.detailed?.age ?? '—'}</td>
+                <td>{r.detailed?.height ?? '—'}</td>
+                <td>{r.detailed?.weight ?? '—'}</td>
+                <td>
+                  {#if r.detailed?.isNewgan}
+                    <span class={newganCls(r.detailed.isNewgan)}>{r.detailed.isNewgan}</span>
+                  {:else}—{/if}
+                </td>
+              {/if}
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {:else}
+    <div class="empty">{t.table.emptyHint}</div>
+  {/if}
+</div>
+
+<style>
+  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（粘顶表头在其中生效） */
+  .table-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 2px; }
+</style>

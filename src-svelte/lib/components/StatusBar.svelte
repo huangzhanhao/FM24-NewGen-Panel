@@ -18,8 +18,8 @@
 </script>
 
 <footer class="statusbar">
-  <!-- 小圆点：class:busy 在替换中时加上（变成忙碌颜色）。 -->
-  <span class="dot" class:busy={snap?.replacing}>●</span>
+  <!-- 小圆点：class:busy 在替换中时加上（琥珀色呼吸动画，样式见 app.css）。 -->
+  <span class="dot" class:busy={snap?.replacing}></span>
   <span>{status}</span>
   <!-- 只有替换中或有过进度时才显示迷你进度条；style="width:xx%" 直接把百分比写成行内样式。 -->
   {#if snap?.replacing || appStore.progress.value > 0}

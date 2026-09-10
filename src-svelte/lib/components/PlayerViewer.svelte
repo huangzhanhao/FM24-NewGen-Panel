@@ -1,10 +1,12 @@
 <!-- 【新手导读】单人预览/微调：输入 UID 查看其头像与资料，或选一张新图单独替换。
-     重点演示：把后端返回的图片字节（ArrayBuffer）转成 blob URL 供 <img> 显示。 -->
+     重点演示：把后端返回的图片字节（ArrayBuffer）转成 blob URL 供 <img> 显示。
+     外观为「球员卡」：左列 168 圆角头像 + 映射路径，右列姓名/UID/元信息胶囊/信息格/替换行。 -->
 <script lang="ts">
   import { open, message } from '@tauri-apps/plugin-dialog';
   import { api } from '../api';
   import { t } from '../text'; // 全局文案常量
   import { appStore } from '../stores/app.svelte';
+  import { icons } from '../icons';
   import type { PlayerPreview } from '../types';
 
   let uid = $state('');                 // 输入的 UID
@@ -60,73 +62,76 @@
 
   // d = 预览里的详细信息（方便模板里简写）；可能为 undefined。
   const d = $derived(preview?.record?.detailed);
+  // 球员记录简写（未预览时为 null，模板用 ?? '—' 兜底）。
+  const rec = $derived(preview?.record ?? null);
+  // 当前映射的「种族\图片名」展示串（无映射时为 null）。
+  const mappingText = $derived(
+    preview?.mapping ? `${preview.mapping.ethnicity}\\${preview.mapping.image}` : '',
+  );
 </script>
 
-<h3>{t.viewer.title} <span class="muted">{t.viewer.hint}</span></h3>
-
-<!-- 左图右字的两列布局（窄窗口下会自动换行，见下方 style）。 -->
-<div class="viewer-row">
-  <div class="preview-col">
-    <!-- 有 blob URL 就显示图片，否则显示“暂无图片”占位。 -->
+<div class="player-card">
+  <!-- 左列：圆角头像 + 映射路径（有映射时小圆点着青绿）。 -->
+  <div class="face-col">
+    <!-- 有 blob URL 就显示图片，否则显示虚线占位。 -->
     {#if blobUrl}
-      <img src={blobUrl} alt={t.viewer.title} class="preview-img" />
+      <img src={blobUrl} alt={t.viewer.title} class="face" />
     {:else}
-      <div class="preview-placeholder">{t.viewer.noImage}</div>
+      <div class="face-empty">{t.viewer.noImage}</div>
     {/if}
-    <!-- 图片下方显示当前映射的「种族\图片名」，无映射时显示占位。 -->
-    <span class="muted mono-text">
-      {preview?.mapping ? `${preview.mapping.ethnicity}\\${preview.mapping.image}` : t.viewer.noMappingPlaceholder}
+    <span class="mapping" class:set={!!preview?.mapping} title={mappingText}>
+      {mappingText || t.viewer.noMappingPlaceholder}
     </span>
   </div>
 
-  <div class="fields-col">
-    <!-- 资料字段网格：每个 field 是“标签 + 只读输入框”。UID 框可输入并绑回车预览。 -->
-    <div class="fgrid">
-      <div class="field">
-        <label for="pv-uid">{t.viewer.labels.uid}</label>
-        <!-- onkeydown：按回车时触发预览（e.key === 'Enter' && ...）。 -->
-        <input id="pv-uid" type="text" bind:value={uid} onkeydown={(e) => e.key === 'Enter' && showPreview()} />
+  <!-- 右列：头部（姓名 + 元信息 + UID）、信息格、替换行。 -->
+  <div class="player-info">
+    <div class="player-head">
+      <div>
+        <h2>{rec?.name || '—'}</h2>
+        <div class="meta-row" style="margin-top:8px">
+          <span class="meta">{t.table.colNat} <b>{rec?.primaryNat || '—'}</b></span>
+          {#if rec?.secNat}
+            <span class="meta">{t.table.col2ndNat} <b>{rec.secNat}</b></span>
+          {/if}
+          <span class="meta">{t.table.colEth} <b>{rec?.ethnicityCode || '—'}</b></span>
+          {#if d?.skinCode}
+            <span class="meta">{t.table.colSkin} <b>{d.skinCode}</b></span>
+          {/if}
+          {#if d?.isNewgan}
+            <span class="meta accent">{t.table.colNewgan} · {d.isNewgan}</span>
+          {/if}
+        </div>
       </div>
-      <!-- 下面都是只读展示字段：value 绑预览里的对应值，?. 与 ?? '' 保证为空时不报错。 -->
-      <div class="field"><label for="pv-nat">{t.viewer.labels.nat}</label><input id="pv-nat" type="text" readonly value={preview?.record?.primaryNat ?? ''} /></div>
-      <div class="field"><label for="pv-2nd">{t.viewer.labels.nat2}</label><input id="pv-2nd" type="text" readonly value={preview?.record?.secNat ?? ''} /></div>
-      <div class="field long"><label for="pv-name">{t.viewer.labels.name}</label><input id="pv-name" type="text" readonly value={preview?.record?.name ?? ''} /></div>
-      <div class="field"><label for="pv-hair">{t.viewer.labels.hair}</label><input id="pv-hair" type="text" readonly value={preview?.record?.hairLength ?? ''} /></div>
-      <div class="field"><label for="pv-color">{t.viewer.labels.color}</label><input id="pv-color" type="text" readonly value={preview?.record?.hairColor ?? ''} /></div>
-      <div class="field"><label for="pv-eth">{t.viewer.labels.eth}</label><input id="pv-eth" type="text" readonly value={preview?.record?.ethnicityCode ?? ''} /></div>
-      <div class="field"><label for="pv-skin">{t.viewer.labels.skin}</label><input id="pv-skin" type="text" readonly value={d?.skinCode ?? ''} /></div>
-      <div class="field"><label for="pv-newgan">{t.viewer.labels.newgan}</label><input id="pv-newgan" type="text" readonly value={d?.isNewgan ?? ''} /></div>
-      <div class="field long"><label for="pv-club">{t.viewer.labels.club}</label><input id="pv-club" type="text" readonly value={d?.club ?? ''} /></div>
-      <div class="field"><label for="pv-age">{t.viewer.labels.age}</label><input id="pv-age" type="text" readonly value={d?.age ?? ''} /></div>
-      <div class="field"><label for="pv-height">{t.viewer.labels.height}</label><input id="pv-height" type="text" readonly value={d?.height ?? ''} /></div>
-      <div class="field"><label for="pv-weight">{t.viewer.labels.weight}</label><input id="pv-weight" type="text" readonly value={d?.weight ?? ''} /></div>
+      <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）。 -->
+      <input id="pv-uid" class="uid-chip" type="text" bind:value={uid}
+             placeholder="UID" aria-label={t.viewer.hint}
+             onkeydown={(e) => e.key === 'Enter' && showPreview()} />
     </div>
-    <!-- 替换行：图片路径输入框 + 浏览按钮 + 替换按钮。无选中组时禁用浏览；输入不全时禁用替换。 -->
+
+    <!-- 信息格：标签在上值在下（只读，基础名单缺详细信息时显示 —）。 -->
+    <dl class="dl-grid">
+      <div class="cell"><dt>{t.viewer.labels.hair}</dt><dd>{rec?.hairLength || '—'}</dd></div>
+      <div class="cell"><dt>{t.viewer.labels.color}</dt><dd>{rec?.hairColor || '—'}</dd></div>
+      <div class="cell"><dt>{t.viewer.labels.age}</dt><dd>{d?.age || '—'}</dd></div>
+      <div class="cell"><dt>{t.viewer.labels.club}</dt><dd>{d?.club || '—'}</dd></div>
+      <div class="cell"><dt>{t.viewer.labels.height}</dt><dd>{d?.height || '—'}</dd></div>
+      <div class="cell"><dt>{t.viewer.labels.weight}</dt><dd>{d?.weight || '—'}</dd></div>
+      <div class="cell wide"><dt>{t.viewer.colMapping}</dt>
+        <dd class="mono" title={mappingText}>{mappingText || '—'}</dd></div>
+    </dl>
+
+    <!-- 替换行沉底：图片路径输入框（文件夹图标）+ 浏览 + 替换。无组禁用浏览；输入不全禁用替换。 -->
     <div class="replace-row">
-      <input type="text" placeholder={t.viewer.imgPlaceholder} bind:value={imgPathInput} aria-label={t.viewer.imgPathAria} />
+      <div class="input-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.folder.body}</svg>
+        <input type="text" placeholder={t.viewer.imgPlaceholder} bind:value={imgPathInput}
+               aria-label={t.viewer.imgPathAria} />
+      </div>
       <button class="btn" onclick={browseImage} disabled={!snap?.currentGroup}>{t.viewer.browseBtn}</button>
-      <button class="btn primary" onclick={replaceIt} disabled={!uid.trim() || !imgPathInput.trim()}>{t.viewer.replaceBtn}</button>
+      <button class="btn primary" onclick={replaceIt}
+              disabled={!uid.trim() || !imgPathInput.trim()}>{t.viewer.replaceBtn}</button>
     </div>
   </div>
 </div>
-
-<style>
-  /* 【说明】Svelte 的 <style> 默认“ scoped”（只作用于本组件），不会影响其他组件。
-     var(--xxx) 是全局 CSS 变量（在 app.css 里定义的设计令牌），保证风格统一。 */
-  /* 窄窗口下靠换行而不是横向滚动来保全 label 与按钮可见 */
-  .viewer-row { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
-  .preview-col { display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0; }
-  .preview-img { width: 180px; height: 180px; object-fit: cover; border: 1px solid var(--border); border-radius: var(--radius-md); }
-  .preview-placeholder { width: 180px; height: 180px; display: grid; place-items: center; border: 1px dashed var(--border); border-radius: var(--radius-md); color: var(--muted); }
-  .mono-text { font-family: var(--mono); }
-  .fields-col { flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-  /* 字段网格用 flex 自动换行；每个 field 基础宽 170px，.long 更宽（放姓名/俱乐部）。 */
-  .fgrid { display: flex; flex-wrap: wrap; gap: 6px 10px; }
-  .field { display: flex; align-items: center; gap: 6px; flex: 1 1 170px; min-width: 0; }
-  .field.long { flex-basis: 260px; }
-  /* label 右对齐且不换行（符合项目的“选项设置标签右对齐”规范）。 */
-  .field label { flex-shrink: 0; color: var(--muted); text-align: right; white-space: nowrap; }
-  .field input { flex: 1 1 0; min-width: 48px; }
-  .replace-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .replace-row input { flex: 1 1 220px; min-width: 0; }
-</style>

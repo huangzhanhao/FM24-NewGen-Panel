@@ -1,0 +1,1078 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NewGAN Manager v2 界面重设计 · 预览稿与实施方案</title>
+<style>
+/* ============================================================
+   设计令牌：深色（默认，「教练席海军蓝」）
+   ============================================================ */
+:root{
+  --bg-base:#0D1320; --bg-surface:#151D2E; --bg-raised:#1D2942; --bg-inset:#0A0F1A;
+  --hairline:rgba(148,173,219,.10); --hairline-2:rgba(148,173,219,.22);
+  --text-1:#E9EEF7; --text-2:#A8B5CC; --text-3:#68788F;
+  --accent:#2DD4A7; --accent-hover:#3FE8BA; --accent-press:#24B68E;
+  --accent-contrast:#052820; --accent-soft:rgba(45,212,167,.12);
+  --ok:#34D399; --ok-soft:rgba(52,211,153,.12);
+  --warn:#FBBF24; --warn-soft:rgba(251,191,36,.13);
+  --danger:#F87171; --danger-soft:rgba(248,113,113,.12);
+  --overlay:rgba(4,8,16,.60); --shadow-pop:0 18px 48px rgba(0,0,0,.45);
+  --zebra:rgba(233,238,247,.025); --focus:rgba(45,212,167,.45);
+  --r-sm:6px; --r-md:8px; --r-lg:10px;
+  --mono:"Cascadia Code","Cascadia Mono",Consolas,monospace;
+  --sans:"Segoe UI Variable","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+}
+/* ============================================================
+   设计令牌：浅色「日间球场」
+   ============================================================ */
+[data-theme="light"]{
+  --bg-base:#ECF0F6; --bg-surface:#FFFFFF; --bg-raised:#F2F5FA; --bg-inset:#E8EDF4;
+  --hairline:rgba(23,43,77,.10); --hairline-2:rgba(23,43,77,.18);
+  --text-1:#1B2433; --text-2:#54617A; --text-3:#8B95A8;
+  --accent:#0DA880; --accent-hover:#0B9773; --accent-press:#098464;
+  --accent-contrast:#FFFFFF; --accent-soft:rgba(13,168,128,.10);
+  --ok:#12965A; --ok-soft:rgba(18,150,90,.10);
+  --warn:#B45309; --warn-soft:rgba(180,83,9,.10);
+  --danger:#DC2626; --danger-soft:rgba(220,38,38,.09);
+  --overlay:rgba(17,28,48,.34); --shadow-pop:0 16px 40px rgba(27,42,70,.16);
+  --zebra:rgba(23,43,77,.022); --focus:rgba(13,168,128,.35);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{
+  font-family:var(--sans); font-size:13px; line-height:1.5;
+  background:var(--bg-base); color:var(--text-1);
+  font-variant-numeric:tabular-nums;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--hairline-2);border-radius:8px;border:3px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--text-3);background-clip:padding-box;border:3px solid transparent}
+::-webkit-scrollbar-track{background:transparent}
+.hidden{display:none!important}
+
+/* ============================================================
+   预览控制条（仅本设计稿用，不进入应用）
+   ============================================================ */
+.preview-bar{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:100;
+  display:flex;align-items:center;gap:4px;background:var(--bg-surface);
+  border:1px dashed color-mix(in srgb,var(--accent) 55%,transparent);
+  border-radius:99px;padding:4px 6px;box-shadow:var(--shadow-pop);font-size:12px}
+.preview-bar .tag{color:var(--accent);padding:0 10px 0 8px;font-weight:600;white-space:nowrap}
+.preview-bar button{border:none;background:transparent;color:var(--text-2);border-radius:99px;
+  padding:5px 13px;cursor:pointer;white-space:nowrap}
+.preview-bar button:hover{color:var(--text-1)}
+.preview-bar button.on{background:var(--accent);color:var(--accent-contrast);font-weight:600}
+
+/* ============ 应用骨架 ============ */
+.app{display:grid;grid-template-columns:248px 1fr;grid-template-rows:1fr auto;height:100vh}
+.content{grid-column:2;overflow-y:auto;padding:56px 20px 18px;display:flex;flex-direction:column;gap:14px}
+
+/* ============ 侧栏 ============ */
+.sidebar{grid-row:1/3;background:var(--bg-surface);border-right:1px solid var(--hairline);
+  display:flex;flex-direction:column;overflow-y:auto;padding-top:44px}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 16px 14px}
+.brand img{width:38px;height:38px;border-radius:var(--r-md);display:block;
+  box-shadow:0 0 0 1px var(--hairline-2)}
+.brand .name{font-weight:700;font-size:14.5px;line-height:1.2}
+.brand .ver{display:inline-block;margin-top:3px;font-size:10.5px;color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);border-radius:99px;padding:0 7px;line-height:16px}
+.side-section{padding:6px 12px}
+.side-head{display:flex;justify-content:space-between;align-items:center;margin:10px 2px 7px;
+  font-size:11px;color:var(--text-3);letter-spacing:1.2px}
+.side-head .zh{font-weight:600}
+.icon-btn{border:none;background:none;color:var(--text-3);cursor:pointer;border-radius:var(--r-sm);
+  width:22px;height:22px;display:grid;place-items:center}
+.icon-btn:hover{background:var(--bg-raised);color:var(--text-1)}
+.field{width:100%;background:var(--bg-inset);border:1px solid transparent;border-radius:var(--r-md);
+  padding:7px 10px;color:var(--text-1);font-size:13px;outline:none}
+.field:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+select.field{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--text-3) 50%),linear-gradient(135deg,var(--text-3) 50%,transparent 50%);
+  background-position:calc(100% - 14px) 55%,calc(100% - 9px) 55%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:26px}
+.prf-row{display:flex;gap:8px;margin-top:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;
+  padding:7px 14px;border-radius:var(--r-md);font-size:13px;white-space:nowrap;
+  border:1px solid var(--hairline-2);background:var(--bg-raised);color:var(--text-1);transition:all .14s}
+.btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:transparent;color:var(--accent-contrast);font-weight:600}
+.btn.primary:hover:not(:disabled){background:var(--accent-hover);color:var(--accent-contrast)}
+.btn:active:not(:disabled){transform:translateY(.5px)}
+.btn:disabled{opacity:.42;cursor:not-allowed}
+.btn.danger{color:var(--danger)}
+.btn.danger:hover:not(:disabled){background:var(--danger-soft);border-color:var(--danger);color:var(--danger)}
+.btn.block{flex:1}
+.group-list{list-style:none;display:flex;flex-direction:column;gap:2px}
+.group-list li{position:relative;display:flex;align-items:stretch;border-radius:var(--r-md);overflow:hidden}
+.group-list li.current{background:var(--accent-soft)}
+.group-list li.current::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;
+  border-radius:0 3px 3px 0;background:var(--accent)}
+.group-item{flex:1;min-width:0;text-align:left;border:none;background:none;cursor:pointer;
+  padding:8px 8px 8px 11px;display:flex;flex-direction:column;gap:2px;border-radius:var(--r-md)}
+.group-item .g-name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.group-list li.current .g-name{color:var(--text-1);font-weight:600}
+.g-rtf{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-3)}
+.g-rtf .dot{width:6px;height:6px;border-radius:50%;background:var(--text-3)}
+.g-rtf.ok{color:var(--ok)}.g-rtf.ok .dot{background:var(--ok)}
+.group-del{align-self:center;border:none;background:none;color:var(--text-3);cursor:pointer;
+  width:26px;display:grid;place-items:center;font-size:15px;border-radius:var(--r-sm)}
+.group-del:hover{background:var(--danger-soft);color:var(--danger)}
+.side-foot{margin-top:auto;padding:12px 14px;border-top:1px solid var(--hairline);
+  display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.link{border:none;background:none;color:var(--text-2);cursor:pointer;font-size:12px;padding:0}
+.link:hover{color:var(--accent)}
+.theme-switch{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);
+  border:1px solid var(--hairline-2);border-radius:99px;padding:3px 10px;cursor:pointer;background:var(--bg-raised)}
+.theme-switch:hover{color:var(--accent);border-color:var(--accent)}
+
+/* ============ Stepper ============ */
+.stepper{display:flex;align-items:center;background:var(--bg-surface);border:1px solid var(--hairline);
+  border-radius:var(--r-lg);padding:12px 18px}
+.step{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-3)}
+.step .num{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:600;
+  border:1.5px solid var(--hairline-2);color:var(--text-3);background:var(--bg-base);flex-shrink:0}
+.step.done{color:var(--text-2)}.step.done .num{background:var(--accent);border-color:var(--accent);color:var(--accent-contrast)}
+.step.current{color:var(--text-1);font-weight:600}
+.step.current .num{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);
+  box-shadow:0 0 0 4px var(--accent-soft)}
+.step-line{flex:1;height:2px;background:var(--hairline-2);margin:0 12px;border-radius:2px;min-width:24px}
+.step-line.done{background:var(--accent)}
+
+/* ============ 面板 ============ */
+.panel{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-lg);padding:14px 18px 16px}
+.panel.grow{flex:1;min-height:300px;display:flex;flex-direction:column}
+.panel-title{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:600;margin-bottom:13px}
+.panel-title::before{content:"";width:3px;height:15px;border-radius:2px;background:var(--accent)}
+.panel-title .ctx{font-size:12px;font-weight:400;color:var(--text-3)}
+.path-row{display:grid;grid-template-columns:78px minmax(0,1fr) auto;align-items:center;gap:10px;margin:8px 0}
+.path-row>label{color:var(--text-2);font-size:13px;text-align:right}
+.input-wrap{position:relative;display:flex;align-items:center}
+.input-wrap svg{position:absolute;left:9px;width:15px;height:15px;color:var(--text-3);pointer-events:none}
+.input-wrap .field{padding-left:31px;font-family:var(--mono);font-size:12px;color:var(--text-2)}
+.path-actions{display:flex;gap:7px}
+.path-actions .btn{padding:7px 12px}
+.statusline{display:flex;align-items:center;gap:9px;margin-top:10px;font-size:12.5px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;border-radius:99px;padding:3px 11px;font-size:12px;font-weight:500}
+.pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.ok{color:var(--ok);background:var(--ok-soft)}
+.pill.warn{color:var(--warn);background:var(--warn-soft)}
+.pill.gray{color:var(--text-2);background:var(--bg-raised)}
+.statusline .note{color:var(--text-3);font-size:12px}
+.rule-row{margin-top:11px;padding-top:11px;border-top:1px solid var(--hairline);
+  display:flex;align-items:center;gap:10px}
+.rule-row .note{color:var(--text-3);font-size:12px}
+
+/* ============ 分段控件 / Tabs ============ */
+.seg3{display:flex;background:var(--bg-inset);border-radius:var(--r-md);padding:3px;gap:2px}
+.seg3 button{flex:1;border:none;background:none;padding:7px 10px;border-radius:6px;cursor:pointer;
+  color:var(--text-2);font-size:13px;transition:all .14s}
+.seg3 button.active{background:var(--bg-surface);color:var(--accent);font-weight:600;
+  box-shadow:0 1px 3px rgba(0,0,0,.25),0 0 0 1px var(--hairline)}
+[data-theme="light"] .seg3 button.active{box-shadow:0 1px 3px rgba(23,43,77,.12),0 0 0 1px var(--hairline)}
+.seg3 button:hover:not(.active){color:var(--text-1)}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--hairline);margin:-2px 0 12px}
+.tabs button{border:none;background:none;padding:9px 16px;cursor:pointer;color:var(--text-3);
+  border-bottom:2px solid transparent;margin-bottom:-1px;font-size:13px}
+.tabs button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.tabs button:hover:not(.active){color:var(--text-1)}
+
+/* ============ 开关 ============ */
+.switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;color:var(--text-1)}
+.switch input{display:none}
+.switch .track{width:34px;height:19px;border-radius:99px;background:var(--bg-inset);
+  border:1px solid var(--hairline-2);position:relative;transition:all .16s;flex-shrink:0}
+.switch .track::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;
+  background:var(--text-3);transition:all .16s}
+.switch input:checked+.track{background:var(--accent);border-color:var(--accent)}
+.switch input:checked+.track::after{transform:translateX(15px);background:var(--accent-contrast)}
+.switch input:focus-visible+.track{box-shadow:0 0 0 3px var(--focus)}
+
+/* ============ 进度 ============ */
+.progress-track{flex:1;height:8px;border-radius:99px;background:var(--bg-inset);overflow:hidden}
+.progress-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent-press),var(--accent));
+  transition:width .15s}
+
+/* ============ 表格 ============ */
+.table-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.search{position:relative;flex:0 1 320px}
+.search svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--text-3)}
+.search input{width:100%;background:var(--bg-inset);border:1px solid transparent;border-radius:var(--r-md);
+  padding:7px 10px 7px 30px;color:var(--text-1);outline:none;font-size:13px}
+.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+.pager{display:flex;align-items:center;gap:8px;color:var(--text-3);font-size:12px}
+.table-scroll{flex:1;overflow:auto;border:1px solid var(--hairline);border-radius:var(--r-md)}
+table.grid{width:100%;border-collapse:collapse;font-size:12.5px}
+table.grid th{position:sticky;top:0;background:var(--bg-inset);color:var(--text-2);font-weight:600;
+  text-align:left;padding:8px 10px;white-space:nowrap;cursor:pointer;z-index:1;
+  border-bottom:1px solid var(--hairline)}
+table.grid td{padding:6.5px 10px;white-space:nowrap;color:var(--text-1);border-bottom:1px solid var(--hairline)}
+table.grid tbody tr:nth-child(even){background:var(--zebra)}
+table.grid tbody tr:hover{background:var(--bg-raised)}
+.mono{font-family:var(--mono)}
+.tag-yes{color:var(--accent);background:var(--accent-soft);border-radius:99px;padding:1px 9px;font-size:11.5px}
+.tag-no{color:var(--text-3);background:var(--bg-raised);border-radius:99px;padding:1px 9px;font-size:11.5px}
+
+/* ============ 球员卡 ============ */
+.player-card{display:flex;gap:22px;flex-wrap:wrap}
+.face-col{flex-shrink:0;display:flex;flex-direction:column;gap:7px;align-items:flex-start}
+.face{width:168px;height:168px;border-radius:12px;object-fit:cover;box-shadow:0 0 0 1px var(--hairline-2)}
+.face-empty{width:168px;height:168px;border-radius:12px;border:1.5px dashed var(--hairline-2);
+  display:grid;place-items:center;color:var(--text-3);background:var(--bg-inset)}
+.mapping{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11.5px;color:var(--text-2)}
+.mapping .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.player-info{flex:1;min-width:380px;display:flex;flex-direction:column;gap:14px}
+.player-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.player-head h2{font-size:21px;font-weight:700;letter-spacing:.2px}
+.uid-chip{font-family:var(--mono);font-size:12px;color:var(--text-2);background:var(--bg-inset);
+  border:1px solid var(--hairline);border-radius:var(--r-md);padding:4px 10px}
+.meta-row{display:flex;gap:7px;flex-wrap:wrap}
+.meta{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-2);
+  background:var(--bg-raised);border-radius:var(--r-sm);padding:3px 10px}
+.meta b{color:var(--text-1);font-weight:600}
+.dl-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--hairline);
+  border:1px solid var(--hairline);border-radius:var(--r-md);overflow:hidden}
+.dl-grid .cell{background:var(--bg-surface);padding:9px 12px}
+.dl-grid dt{font-size:11px;color:var(--text-3);margin-bottom:2px}
+.dl-grid dd{font-size:13px;color:var(--text-1)}
+.replace-row{display:flex;gap:8px;margin-top:auto;flex-wrap:wrap}
+.replace-row .input-wrap{flex:1;min-width:240px}
+
+/* ============ 状态栏 ============ */
+.statusbar{grid-column:2;display:flex;align-items:center;gap:12px;height:32px;padding:0 16px;
+  background:var(--bg-surface);border-top:1px solid var(--hairline);font-size:12px;color:var(--text-2)}
+.statusbar .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.statusbar .dot.busy{background:var(--warn);animation:pulse 1.3s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.mini-track{width:130px;height:5px;border-radius:99px;background:var(--bg-inset);overflow:hidden}
+.mini-fill{height:100%;background:var(--accent)}
+.log-btn{position:relative;border:none;background:none;color:var(--text-2);cursor:pointer;font-size:12px;padding:2px 4px}
+.log-btn:hover{color:var(--accent)}
+.badge{background:var(--danger);color:#fff;border-radius:99px;font-size:10.5px;
+  min-width:16px;height:16px;display:inline-grid;place-items:center;padding:0 4px;margin-left:5px;font-weight:600}
+.spacer{flex:1}
+
+/* ============ 抽屉 / 模态 ============ */
+.overlay{position:fixed;inset:0;background:var(--overlay);z-index:40}
+.drawer{position:absolute;top:0;right:0;bottom:0;width:min(560px,82vw);background:var(--bg-surface);
+  border-left:1px solid var(--hairline-2);box-shadow:var(--shadow-pop);z-index:50;
+  display:flex;flex-direction:column;padding:52px 14px 12px;animation:slidein .18s ease}
+@keyframes slidein{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
+.drawer-tools{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.drawer-tools strong{font-size:13.5px}
+.chip{border:1px solid var(--hairline-2);background:var(--bg-raised);color:var(--text-2);border-radius:99px;
+  padding:3px 11px;font-size:11.5px;cursor:pointer}
+.chip.active{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.log-body{flex:1;background:var(--bg-inset);border:1px solid var(--hairline);border-radius:var(--r-md);
+  padding:8px 0;overflow:hidden;font-family:var(--mono);font-size:11.5px;line-height:1.75}
+.log-line{padding:0 12px;white-space:nowrap;color:var(--text-2)}
+.log-line .lv{display:inline-block;width:64px;color:var(--text-3)}
+.log-line.warn{color:var(--warn)} .log-line.warn .lv{color:var(--warn)}
+.log-line.error{color:var(--danger)} .log-line.error .lv{color:var(--danger)}
+.log-line.critical{background:var(--danger);color:#fff}
+.log-line.critical .lv{color:#fff}
+.modal-wrap{position:absolute;inset:0;display:grid;place-items:center;z-index:50}
+.modal{width:min(900px,92vw);height:min(600px,86vh);background:var(--bg-surface);
+  border:1px solid var(--hairline-2);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);
+  display:flex;flex-direction:column;padding:14px 16px;animation:popin .18s ease}
+@keyframes popin{from{opacity:0;transform:translateY(8px) scale(.99)}to{opacity:1;transform:none}}
+.modal-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.modal-title .seg3{width:auto}
+.modal-title .seg3 button{flex:none;padding:6px 14px}
+.editor{flex:1;width:100%;resize:none;background:var(--bg-inset);border:1px solid var(--hairline);
+  border-radius:var(--r-md);padding:10px 12px;font-family:var(--mono);font-size:12px;line-height:1.65;
+  color:var(--text-2);outline:none;white-space:pre;overflow:auto}
+.editor:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+
+/* ============================================================
+   文档视图（设计理念 / 设计方案 / 实施路径）
+   ============================================================ */
+.doc{position:fixed;inset:0;overflow-y:auto;background:var(--bg-base);padding:64px 24px 60px}
+.doc-inner{max-width:980px;margin:0 auto}
+.doc h1{font-size:26px;font-weight:700;letter-spacing:.2px;margin-bottom:6px;display:flex;align-items:center;gap:12px}
+.doc h1::before{content:"";width:5px;height:26px;border-radius:3px;background:var(--accent)}
+.doc .lead{color:var(--text-2);font-size:14px;margin:6px 0 26px;padding-left:17px}
+.doc h2{font-size:17px;font-weight:700;margin:34px 0 12px;display:flex;align-items:center;gap:9px}
+.doc h2 .no{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:6px;
+  background:var(--accent-soft);color:var(--accent);font-size:12px;font-weight:700}
+.doc h3{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--text-1)}
+.doc p{color:var(--text-2);margin:8px 0}
+.doc ul,.doc ol{margin:8px 0 8px 20px;color:var(--text-2)}
+.doc li{margin:5px 0}
+.doc strong{color:var(--text-1)}
+.doc code{font-family:var(--mono);font-size:11.5px;background:var(--bg-inset);
+  border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--text-1)}
+.doc-card{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-lg);
+  padding:16px 18px;margin:12px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media(max-width:900px){.grid2,.grid3,.grid4{grid-template-columns:1fr}}
+.principle{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-lg);padding:15px 16px}
+.principle .p-no{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:1px}
+.principle h4{font-size:14px;margin:5px 0 7px}
+.principle p{font-size:12.5px;margin:0}
+.decision{display:flex;align-items:flex-start;gap:12px;background:var(--bg-surface);
+  border:1px solid var(--hairline);border-left:3px solid var(--accent);border-radius:var(--r-md);padding:12px 15px;margin:8px 0}
+.decision .q{color:var(--text-3);font-size:12px;min-width:104px;padding-top:1px}
+.decision .a{color:var(--text-1);font-size:13px;font-weight:600}
+.decision .a small{display:block;font-weight:400;color:var(--text-2);margin-top:2px}
+.skin-card{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-md);padding:11px 13px}
+.skin-card .nm{font-weight:600;font-size:13px}
+.skin-card .tags{margin-top:5px;display:flex;gap:5px;flex-wrap:wrap}
+.skin-tag{font-size:10.5px;border-radius:99px;padding:1px 8px;background:var(--bg-raised);color:var(--text-2)}
+.skin-tag.hot{background:var(--accent-soft);color:var(--accent)}
+.skin-card p{font-size:12px;margin:6px 0 0}
+.doc table{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0;
+  background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-md);overflow:hidden}
+.doc th{background:var(--bg-inset);color:var(--text-2);font-weight:600;text-align:left;padding:8px 11px;white-space:nowrap}
+.doc td{padding:8px 11px;border-top:1px solid var(--hairline);color:var(--text-2);vertical-align:top}
+.doc td code{white-space:nowrap}
+.swatch{display:inline-block;width:13px;height:13px;border-radius:4px;margin-right:7px;
+  vertical-align:-2px;border:1px solid var(--hairline-2)}
+.callout{border-radius:var(--r-md);padding:11px 14px;margin:12px 0;font-size:12.5px;
+  display:flex;gap:10px;align-items:flex-start}
+.callout .ic{flex-shrink:0;font-weight:700}
+.callout.info{background:var(--accent-soft);color:var(--text-1);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.callout.info .ic{color:var(--accent)}
+.callout.warn{background:var(--warn-soft);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent)}
+.callout.warn .ic{color:var(--warn)}
+.callout.danger{background:var(--danger-soft);border:1px solid color-mix(in srgb,var(--danger) 30%,transparent)}
+.callout.danger .ic{color:var(--danger)}
+.callout p{margin:0;color:inherit}
+.batch{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-lg);
+  padding:15px 17px;margin:12px 0;display:grid;grid-template-columns:64px 1fr;gap:4px 16px}
+.batch .b-id{font-size:18px;font-weight:700;color:var(--accent)}
+.batch .b-title{font-size:14.5px;font-weight:700;align-self:center}
+.batch .b-body{grid-column:2}
+.batch ul{margin:6px 0 0}
+.checklist{list-style:none;margin-left:0!important}
+.checklist li{padding-left:24px;position:relative}
+.checklist li::before{content:"✓";position:absolute;left:0;color:var(--accent);font-weight:700}
+.crosslist{list-style:none;margin-left:0!important}
+.crosslist li{padding-left:24px;position:relative}
+.crosslist li::before{content:"—";position:absolute;left:4px;color:var(--text-3)}
+.toc{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 0 17px}
+.toc a{font-size:12px;color:var(--accent);text-decoration:none;border:1px solid var(--hairline-2);
+  border-radius:99px;padding:3px 12px;background:var(--bg-surface)}
+.toc a:hover{border-color:var(--accent)}
+.tok-dim{color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:18px 0 6px}
+.mini-ui{display:flex;gap:14px;flex-wrap:wrap;align-items:center;background:var(--bg-inset);
+  border:1px solid var(--hairline);border-radius:var(--r-md);padding:14px 16px;margin:10px 0}
+.demo-titlebar{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-md);
+  padding:8px 12px;display:flex;align-items:center;gap:8px;color:var(--text-3);font-size:11px;margin:6px 0}
+.demo-titlebar .tb-dots{margin-left:auto;letter-spacing:3px}
+.anno-list{counter-reset:anno;list-style:none;margin:6px 0 0}
+.anno-list li{counter-increment:anno;padding-left:30px;position:relative;margin:8px 0}
+.anno-list li::before{content:counter(anno);position:absolute;left:0;top:1px;width:20px;height:20px;
+  border-radius:50%;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:700;
+  display:grid;place-items:center}
+.doc-footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--hairline);
+  color:var(--text-3);font-size:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<!-- 设计稿控制条（仅本文件用，不进入应用） -->
+<div class="preview-bar">
+  <span class="tag">NewGAN v2 设计稿</span>
+  <button data-view="app" class="on" onclick="switchView('app',this)">界面预览</button>
+  <button data-view="philosophy" onclick="switchView('philosophy',this)">设计理念</button>
+  <button data-view="design" onclick="switchView('design',this)">设计方案</button>
+  <button data-view="roadmap" onclick="switchView('roadmap',this)">实施路径</button>
+  <button onclick="toggleTheme()" id="theme-btn">切换浅色</button>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     视图 A：界面预览（高保真静态稿）
+     ════════════════════════════════════════════════════════════ -->
+<div class="app" id="view-app">
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="../app-icon.png" alt="NewGAN" />
+      <div>
+        <div class="name">NewGAN Manager</div>
+        <span class="ver">v2.0</span>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <div class="side-head"><span class="zh">存档资料</span>
+        <button class="icon-btn" title="新建 Profile">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <select class="field"><option>我的曼联档 2026</option><option>诺丁汉森林档</option><option>No Profile</option></select>
+      <div class="prf-row">
+        <button class="btn block" disabled>已激活</button>
+        <button class="btn danger block">删除当前</button>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <div class="side-head"><span class="zh">头像包（组）</span>
+        <button class="icon-btn" title="关联头像包目录">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <ul class="group-list">
+        <li class="current">
+          <button class="group-item">
+            <span class="g-name">DF11 Megapack 2026</span>
+            <span class="g-rtf ok"><span class="dot"></span>RTF 已设置</span>
+          </button>
+          <button class="group-del" title="删除组">×</button>
+        </li>
+        <li>
+          <button class="group-item">
+            <span class="g-name">NewGAN 标准二备份</span>
+            <span class="g-rtf"><span class="dot"></span>未设置 RTF</span>
+          </button>
+          <button class="group-del" title="删除组">×</button>
+        </li>
+      </ul>
+    </div>
+
+    <div class="side-foot">
+      <button class="link">教程</button>
+      <button class="link">故障排查</button>
+      <button class="link">FAQ</button>
+      <button class="link">Discord</button>
+      <button class="theme-switch" onclick="toggleTheme()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>
+        <span id="theme-label">深色</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <nav class="stepper">
+      <div class="step done"><span class="num">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      </span>选档与头像包</div>
+      <div class="step-line done"></div>
+      <div class="step done"><span class="num">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      </span>校验与名单</div>
+      <div class="step-line done"></div>
+      <div class="step current"><span class="num">3</span>选模式</div>
+      <div class="step-line"></div>
+      <div class="step"><span class="num">4</span>执行替换</div>
+      <div class="step-line"></div>
+      <div class="step"><span class="num">5</span>查看与微调</div>
+    </nav>
+
+    <div id="view-main">
+      <section class="panel">
+        <div class="panel-title">当前任务 <span class="ctx">我的曼联档 2026 · DF11 Megapack 2026</span></div>
+        <div class="path-row">
+          <label>头像包</label>
+          <div class="input-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <input class="field" readonly value="D:\FootballManager\graphics\faces\DF11 Megapack 2026" />
+          </div>
+          <div class="path-actions"><button class="btn">检查完整性</button><button class="btn">扫描头像</button></div>
+        </div>
+        <div class="path-row">
+          <label>RTF 名单</label>
+          <div class="input-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></svg>
+            <input class="field" readonly value="D:\exports\newgens_2026_squad.rtf" />
+          </div>
+          <div class="path-actions"><button class="btn">选择RTF</button><button class="btn">扫描RTF</button></div>
+        </div>
+        <div class="path-row">
+          <label>config.xml</label>
+          <div class="input-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>
+            <input class="field" readonly value="D:\FootballManager\graphics\faces\DF11 Megapack 2026\config.xml" />
+          </div>
+          <div class="path-actions"><button class="btn">查看config</button><button class="btn">查看快照</button></div>
+        </div>
+        <div class="statusline">
+          <span class="pill ok"><span class="dot"></span>标准二：14 个配置目录齐全</span>
+          <span class="note">另含 2 个未配置目录（不参与抽图）</span>
+        </div>
+        <div class="rule-row">
+          <button class="btn">规则配置</button>
+          <span class="note">抽图规则来自规则 json（可编辑），保存后下次替换 / 检查完整性即生效</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">替换执行</div>
+        <div class="path-row" style="grid-template-columns:78px 1fr;">
+          <label>模式</label>
+          <div style="display:flex;align-items:center;gap:14px;min-width:0">
+            <div class="seg3" style="flex:0 1 360px">
+              <button class="active">保留</button><button>覆写</button><button>生成</button>
+            </div>
+            <span style="color:var(--text-3);font-size:12px">保留已换过的球员，只为新球员补图（推荐日常增量）</span>
+          </div>
+        </div>
+        <div class="path-row" style="grid-template-columns:78px 1fr;">
+          <label>选项设置</label>
+          <div style="display:flex;gap:22px;flex-wrap:wrap">
+            <label class="switch"><input type="checkbox" checked /><span class="track"></span>允许复用图片</label>
+            <label class="switch"><input type="checkbox" checked /><span class="track"></span>仅随机人</label>
+            <label class="switch"><input type="checkbox" checked /><span class="track"></span>写入前备份</label>
+          </div>
+        </div>
+        <div style="display:flex;gap:9px;margin:12px 0 4px">
+          <button class="btn primary" style="flex:1;padding:10px;font-size:14px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            替换头像
+          </button>
+          <button class="btn" style="width:92px">取消</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:10px">
+          <div class="progress-track"><div class="progress-fill" style="width:62%"></div></div>
+          <span style="color:var(--text-2);font-size:12px;min-width:210px">62% · 正在写入 config.xml…</span>
+        </div>
+      </section>
+
+      <section class="panel grow">
+        <div class="tabs">
+          <button class="active">名单预览</button>
+          <button onclick="setPreviewTab('player')">单人微调</button>
+        </div>
+        <div class="table-toolbar">
+          <div class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <input placeholder="搜索 UID / 姓名 / 国籍…" />
+          </div>
+          <span style="color:var(--text-3);font-size:12px">共 12,480 条</span>
+          <span class="spacer"></span>
+          <div class="pager"><button class="btn" style="padding:4px 10px">‹</button>第 1 / 63 页<button class="btn" style="padding:4px 10px">›</button></div>
+        </div>
+        <div class="table-scroll">
+          <table class="grid">
+            <thead><tr>
+              <th>UID ↑</th><th>国籍</th><th>第二国籍</th><th>姓名</th><th>发长</th><th>发色</th><th>种族</th><th>随机人</th>
+            </tr></thead>
+            <tbody>
+              <tr><td class="mono">r-2000472008</td><td>ESP</td><td>USA</td><td>Pepe Sáenz</td><td>1</td><td>12</td><td>1</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472104</td><td>BRA</td><td>—</td><td>Kaio Mendes</td><td>3</td><td>4</td><td>6</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472255</td><td>ENG</td><td>SCO</td><td>Alfie Whitmore</td><td>2</td><td>9</td><td>0</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472331</td><td>JPN</td><td>—</td><td>佐藤 蓮</td><td>1</td><td>1</td><td>7</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472488</td><td>NGA</td><td>ENG</td><td>Chidi Okonkwo</td><td>4</td><td>2</td><td>10</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472502</td><td>ARG</td><td>ITA</td><td>Tomás Bertoli</td><td>2</td><td>11</td><td>5</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472617</td><td>KOR</td><td>—</td><td>김 도윤</td><td>1</td><td>1</td><td>7</td><td><span class="tag-no">否</span></td></tr>
+              <tr><td class="mono">r-2000472790</td><td>FRA</td><td>SEN</td><td>Mathis Diouf</td><td>3</td><td>6</td><td>3</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472844</td><td>MEX</td><td>USA</td><td>Diego Salcedo</td><td>2</td><td>7</td><td>8</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000472961</td><td>NOR</td><td>—</td><td>Sander Løken</td><td>1</td><td>10</td><td>2</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000473088</td><td>CHN</td><td>—</td><td>李凌风</td><td>1</td><td>1</td><td>7</td><td><span class="tag-yes">是</span></td></tr>
+              <tr><td class="mono">r-2000473150</td><td>GER</td><td>TUR</td><td>Can Yıldırım</td><td>2</td><td>5</td><td>4</td><td><span class="tag-yes">是</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div id="view-player" class="hidden">
+      <section class="panel grow">
+        <div class="tabs">
+          <button onclick="setPreviewTab('main')">名单预览</button>
+          <button class="active">单人微调</button>
+        </div>
+        <div class="player-card">
+          <div class="face-col">
+            <img class="face" src="../app-icon.png" alt="球员头像预览" />
+            <span class="mapping"><span class="dot"></span>African\00487.png</span>
+          </div>
+          <div class="player-info">
+            <div class="player-head">
+              <div>
+                <h2>Chidi Okonkwo</h2>
+                <div class="meta-row" style="margin-top:8px">
+                  <span class="meta"><b>NGA</b> 尼日利亚</span>
+                  <span class="meta">第二国籍 <b>ENG</b></span>
+                  <span class="meta">种族码 <b>10</b></span>
+                  <span class="meta">肤色 <b>3</b></span>
+                  <span class="meta" style="color:var(--accent)">随机人 · 是</span>
+                </div>
+              </div>
+              <span class="uid-chip">r-2000472488</span>
+            </div>
+            <dl class="dl-grid">
+              <div class="cell"><dt>发长</dt><dd>4</dd></div>
+              <div class="cell"><dt>发色</dt><dd>2</dd></div>
+              <div class="cell"><dt>年龄</dt><dd>16</dd></div>
+              <div class="cell"><dt>俱乐部</dt><dd>Nottingham Forest</dd></div>
+              <div class="cell"><dt>身高</dt><dd>181 cm</dd></div>
+              <div class="cell"><dt>体重</dt><dd>72 kg</dd></div>
+              <div class="cell"><dt>当前映射</dt><dd class="mono" style="font-size:11.5px">African\00487.png</dd></div>
+              <div class="cell"><dt>替换后</dt><dd style="color:var(--text-3)">仅改写这一条</dd></div>
+            </dl>
+            <div class="replace-row">
+              <div class="input-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                <input class="field" value="D:\NewGANpack\African\02914.png" />
+              </div>
+              <button class="btn">浏览</button>
+              <button class="btn primary">替换</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="statusbar">
+    <span class="dot"></span><span>就绪</span>
+    <span class="spacer"></span>
+    <span style="color:var(--text-3)">标准三规则已加载 · 62 图像池</span>
+    <button class="log-btn">日志<span class="badge">3</span></button>
+  </footer>
+</div>
+
+<!-- 日志抽屉 -->
+<div id="drawer-layer" class="hidden" style="position:fixed;inset:0;z-index:40">
+  <div class="overlay" onclick="toggleDrawer()"></div>
+  <aside class="drawer">
+    <div class="drawer-tools">
+      <strong>运行日志</strong>
+      <label class="switch" style="font-size:12px"><input type="checkbox" /><span class="track"></span>仅该级别</label>
+      <select class="field" style="width:110px;padding:5px 8px"><option>DEBUG</option><option selected>INFO</option><option>WARN</option><option>ERROR</option></select>
+      <span style="flex:1"></span>
+      <button class="btn" style="padding:5px 11px">打开日志文件</button>
+      <button class="btn" style="padding:5px 11px">清空显示</button>
+      <button class="icon-btn" onclick="toggleDrawer()" style="font-size:17px;width:26px;height:26px">×</button>
+    </div>
+    <div class="log-body">
+      <div class="log-line"><span class="lv">INFO</span> 2026-09-10 12:03:58 | Starting Application v2.0.0</div>
+      <div class="log-line"><span class="lv">INFO</span> 2026-09-10 12:04:02 | 已加载标准三规则：62 图像池，40 国家块</div>
+      <div class="log-line"><span class="lv">DEBUG</span> 2026-09-10 12:04:11 | 扫描头像包 14 个种族目录，索引图片 84,203 张</div>
+      <div class="log-line"><span class="lv">INFO</span> 2026-09-10 12:04:31 | RTF 解析完成：检测到中文表头，共 12,480 行</div>
+      <div class="log-line warn"><span class="lv">WARN</span> 2026-09-10 12:04:32 | primary nationality 'XKX' is None - skipping 2 行</div>
+      <div class="log-line"><span class="lv">INFO</span> 2026-09-10 12:04:45 | 开始替换：模式 Preserve，仅随机人=true，复用图片=true</div>
+      <div class="log-line"><span class="lv">DEBUG</span> 2026-09-10 12:04:47 | 映射 7,738 / 12,480（保留已有 4,721 条）</div>
+      <div class="log-line error"><span class="lv">ERROR</span> 2026-09-10 12:04:52 | 图片被占用，无法读取：Seasian\11882.png</div>
+      <div class="log-line"><span class="lv">INFO</span> 2026-09-10 12:04:58 | 备份已创建：config备份_20260910-120458.xml</div>
+      <div class="log-line critical"><span class="lv">CRITICAL</span> 2026-09-10 12:04:59 | config.xml 写入中断：磁盘空间不足</div>
+    </div>
+  </aside>
+</div>
+
+<!-- 规则编辑模态 -->
+<div id="modal-layer" class="hidden" style="position:fixed;inset:0;z-index:40">
+  <div class="overlay" onclick="toggleModal()"></div>
+  <div class="modal-wrap">
+    <div class="modal">
+      <div class="modal-title">
+        <div class="seg3">
+          <button>标准二（14 种族目录）</button>
+          <button class="active">标准三（细分目录）</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="color:var(--ok);font-size:12px">已保存 ✓ 下次替换即生效</span>
+          <span style="color:var(--text-3);font-size:12px">我的曼联档 2026</span>
+          <button class="btn primary">保存</button>
+          <button class="btn">关闭</button>
+        </div>
+      </div>
+      <textarea class="editor" spellcheck="false">{
+  "Version": 4,
+  "FolderList": ["Mestizo", "Afrocaribbean", "Japan", "China", ...],
+  "Ethnics": {
+    "BRA": "Mestizo",
+    "ARG": "Mestizo",
+    "JPN": "Japan",
+    "CHN": "China"
+  },
+  "Rules": {
+    "BRA": {
+      "0": "default",
+      "1": { "typeOfMapping": "randomWithWeight",
+             "directory": { "ethnicities": ["Mestizo", "NorthernSA"],
+                            "weights": [66, 33] } },
+      "2": { "typeOfMapping": "directly", "directory": "Afrocaribbean" }
+    },
+    "_DEFAULT_": { "0": "default", "1": "default" }
+  },
+  "Fallback": "random"
+}</textarea>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     视图 B：设计理念
+     ════════════════════════════════════════════════════════════ -->
+<div class="doc hidden" id="view-philosophy">
+ <div class="doc-inner">
+  <h1>设计理念：教练席控制台（The Dugout）</h1>
+  <p class="lead">让 NewGAN Manager 看起来像 FM 的延伸，而不是一个通用蓝白 SaaS：玩家刚从深色皮肤的 FM 里切出来，视觉上无缝衔接。本页记录调研依据与设计取向；<strong>设计方案</strong>页给出令牌与组件规范，<strong>实施路径</strong>页给出分批落地计划。</p>
+  <div class="toc"><a href="#p-research">FM26 皮肤调研</a><a href="#p-common">六条共性</a><a href="#p-principles">四条原则</a><a href="#p-decisions">已确认决策</a></div>
+
+  <h2 id="p-research"><span class="no">1</span>FM26 热门皮肤调研</h2>
+  <p>按 FMScout / sortitoutsi / FMSkinBuilder 的浏览与下载量梳理 2026 赛季头部皮肤（调研时间：2026-09）：</p>
+  <div class="grid3">
+    <div class="skin-card"><div class="nm">Material Skin 26</div><div class="tags"><span class="skin-tag hot">50 万+ 浏览</span><span class="skin-tag">深浅皆可</span><span class="skin-tag">高信息密度</span></div><p>多年沿用的 Material 配色，重排世界杯面板、球员大脸 Profile、按钮统一样式。</p></div>
+    <div class="skin-card"><div class="nm">CTRL 26 · MW90</div><div class="tags"><span class="skin-tag hot">31 万+ 浏览</span><span class="skin-tag">clean</span><span class="skin-tag">dark</span><span class="skin-tag">minimal</span></div><p>官方自我标签即「干净 / 深色 / 极简」：弱化单选组、次级按钮加回细边框、表格斑马纹、移除紫渐变、状态色统一色相。</p></div>
+    <div class="skin-card"><div class="nm">Darkside v5</div><div class="tags"><span class="skin-tag hot">深蓝</span><span class="skin-tag">declutter</span><span class="skin-tag">动态瓷砖</span></div><p>明确主张「现代化、去杂乱、降低眼疲劳」，为单档数百小时的玩家设计；重排所有 Overview 页。</p></div>
+    <div class="skin-card"><div class="nm">MNB · AnSeOs</div><div class="tags"><span class="skin-tag hot">Muted Navy Blue</span><span class="skin-tag">低分辨率</span><span class="skin-tag">翡翠备选</span></div><p>柔和海军蓝配色，Portal 只放最重要的管理元素；另出翡翠绿主题包。</p></div>
+    <div class="skin-card"><div class="nm">TSO · DaveHouto</div><div class="tags"><span class="skin-tag">dark-blue</span><span class="skin-tag">比赛日重设</span></div><p>深蓝主题 + 可滚动瓷砖与快速切换按钮，强调清晰度、可用性与沉浸感。</p></div>
+    <div class="skin-card"><div class="nm">AlexMorak / Kojuro</div><div class="tags"><span class="skin-tag">去紫</span><span class="skin-tag">低眼疲劳</span></div><p>卖点即「去掉 FM26 烦人的紫蓝调」；Kojuro 仅换色不动结构，降低视觉刺激。</p></div>
+  </div>
+  <p style="margin-top:10px">另有 SAS26、skogr（La Liga 风直播图形、热图）、TinyHips OLED 纯黑等，方向一致。</p>
+
+  <h2 id="p-common"><span class="no">2</span>跨皮肤的六条共性</h2>
+  <div class="doc-card">
+    <ol>
+      <li><strong>深海军蓝是绝对主流</strong>：Darkside / MNB / TSO / CTRL 全部 dark-navy，目标是长时间使用不刺眼。</li>
+      <li><strong>集体「去紫」</strong>：FM26 默认紫蓝被普遍替换为克制的海军蓝 + 单一强调色。</li>
+      <li><strong>降噪（Declutter）第一</strong>：弱化装饰、弱化单选组、统一状态色阶、表格加斑马纹、按钮加细边框。</li>
+      <li><strong>瓷砖（Tile）与背景层级取代粗边框卡片</strong>；导航靠激活区块高亮，而非图标堆砌。</li>
+      <li><strong>字体偏小偏紧、信息密度高</strong>：几乎所有皮肤都换字体，数据强调等宽对齐。</li>
+      <li><strong>球员档案页是视觉重心</strong>：大脸肖像、多边形切角（Lotsgon polygon）成为标志性语言。</li>
+    </ol>
+  </div>
+  <div class="callout info"><span class="ic">★</span><p>本工具恰好是一个「头像工具」——FM 皮肤里最标志性的多边形/圆角人像母题，与「给随机人长脸」的业务高度呼应，应作为品牌符号反复出现。</p></div>
+
+  <h2 id="p-principles"><span class="no">3</span>四条设计原则</h2>
+  <div class="grid2">
+    <div class="principle"><div class="p-no">原则 01</div><h4>面孔是主角</h4><p>圆角人像用于品牌区、单人微调、空状态；处处强化「批量匹配头像」的产品心智，而不是文件处理器。</p></div>
+    <div class="principle"><div class="p-no">原则 02</div><h4>降噪如 CTRL</h4><p>去掉满屏 1px 方框，改用背景深浅分层 + 间距分组；全界面只有三层深度：base / surface / raised。</p></div>
+    <div class="principle"><div class="p-no">原则 03</div><h4>状态一眼可读</h4><p>就绪 / 进行中 / 警告 / 错误用统一色阶，且图标 + 文字双通道表达，不单纯依赖颜色（照顾色觉障碍）。</p></div>
+    <div class="principle"><div class="p-no">原则 04</div><h4>密集但有节奏</h4><p>13px 基准字、等宽数字、表格高信息密度；区块之间保留呼吸留白，长列表（30 万行级）不产生视觉噪声。</p></div>
+  </div>
+
+  <h2 id="p-decisions"><span class="no">4</span>已确认的关键决策（2026-09-10）</h2>
+  <div class="decision"><div class="q">主题方向</div><div class="a">双主题都做<small>深色「教练席海军蓝」为默认；浅色「日间球场」由同一套令牌映射，侧栏底部一键切换并记忆。</small></div></div>
+  <div class="decision"><div class="q">强调色</div><div class="a">青绿 Teal #2DD4A7（深色）/ #0DA880（浅色）<small>取自应用图标柴犬的项圈色；在海军蓝上对比强烈，且不与语义红绿混淆。</small></div></div>
+  <div class="decision"><div class="q">旅程引导</div><div class="a">顶部五步 Stepper<small>选档与头像包 → 校验与名单 → 选模式 → 执行替换 → 查看与微调；随状态自动点亮，纯引导、不可点，不改业务流程。</small></div></div>
+  <div class="decision"><div class="q">头像造型</div><div class="a">圆角矩形（12px）<small>品牌图、单人微调大头像、空状态占位统一；与面板圆角语言一致。</small></div></div>
+
+  <div class="doc-footer"><span>NewGAN Manager v2.0 · 前端界面重设计稿</span><span>下一步：阅读「设计方案」与「实施路径」</span></div>
+ </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     视图 C：设计方案
+     ════════════════════════════════════════════════════════════ -->
+<div class="doc hidden" id="view-design">
+ <div class="doc-inner">
+  <h1>具体设计方案</h1>
+  <p class="lead">令牌（Design Tokens）是唯一样式入口：所有颜色、圆角、字体、动效都通过 CSS 变量消费，深色/浅色只差一组令牌取值，未来主题演进只改 <code>:root</code> 与 <code>[data-theme]</code> 两段。</p>
+  <div class="toc"><a href="#d-color">色板令牌</a><a href="#d-type">字体排版</a><a href="#d-motif">视觉母题</a><a href="#d-components">组件规范</a><a href="#d-screens">界面注解</a><a href="#d-a11y">无障碍与动效</a></div>
+
+  <h2 id="d-color"><span class="no">1</span>色板令牌（双主题）</h2>
+  <div class="tok-dim">表面层级 · 文字</div>
+  <table>
+    <tr><th>令牌</th><th>深色（默认）</th><th>浅色「日间球场」</th><th>用途</th></tr>
+    <tr><td><code>--bg-base</code></td><td><span class="swatch" style="background:#0D1320"></span>#0D1320</td><td><span class="swatch" style="background:#ECF0F6"></span>#ECF0F6</td><td>窗口最底层</td></tr>
+    <tr><td><code>--bg-surface</code></td><td><span class="swatch" style="background:#151D2E"></span>#151D2E</td><td><span class="swatch" style="background:#FFFFFF"></span>#FFFFFF</td><td>侧栏 / 面板 / 状态栏</td></tr>
+    <tr><td><code>--bg-raised</code></td><td><span class="swatch" style="background:#1D2942"></span>#1D2942</td><td><span class="swatch" style="background:#F2F5FA"></span>#F2F5FA</td><td>悬停 / 按钮 / 激活控件</td></tr>
+    <tr><td><code>--bg-inset</code></td><td><span class="swatch" style="background:#0A0F1A"></span>#0A0F1A</td><td><span class="swatch" style="background:#E8EDF4"></span>#E8EDF4</td><td>凹槽：只读框 / 表头 / 日志 / 搜索</td></tr>
+    <tr><td><code>--hairline / -2</code></td><td>rgba(148,173,219,.10 / .22)</td><td>rgba(23,43,77,.10 / .18)</td><td>发丝描边（分隔线/弹层）</td></tr>
+    <tr><td><code>--text-1 / -2 / -3</code></td><td>#E9EEF7 / #A8B5CC / #68788F</td><td>#1B2433 / #54617A / #8B95A8</td><td>主文字 / 标签 / 占位弱化</td></tr>
+  </table>
+  <div class="tok-dim">品牌与语义</div>
+  <table>
+    <tr><th>令牌</th><th>深色</th><th>浅色</th><th>用途</th></tr>
+    <tr><td><code>--accent</code></td><td><span class="swatch" style="background:#2DD4A7"></span>#2DD4A7</td><td><span class="swatch" style="background:#0DA880"></span>#0DA880</td><td>主按钮 / 进度 / 激活态 / 链接</td></tr>
+    <tr><td><code>--accent-contrast</code></td><td>#052820（按钮文字）</td><td>#FFFFFF</td><td>青绿底上的文字，保证对比度</td></tr>
+    <tr><td><code>--accent-soft</code></td><td>rgba(45,212,167,.12)</td><td>rgba(13,168,128,.10)</td><td>激活区块软底 / 标签胶囊</td></tr>
+    <tr><td><code>--ok / -soft</code></td><td>#34D399</td><td>#12965A</td><td>就绪、完整、RTF 已设置</td></tr>
+    <tr><td><code>--warn / -soft</code></td><td>#FBBF24</td><td>#B45309</td><td>缺失目录、进行中、WARN 日志</td></tr>
+    <tr><td><code>--danger / -soft</code></td><td>#F87171</td><td>#DC2626</td><td>删除、错误、CRITICAL；配软底使用</td></tr>
+  </table>
+  <div class="callout warn"><span class="ic">!</span><p>语义修正：旧版组条目「未设置 RTF」显示<strong>红色</strong>，但它只是未配置而非错误。新版：已设置 = 青绿圆点，未设置 = 中性灰圆点；真正的错误才使用红色。</p></div>
+
+  <h2 id="d-type"><span class="no">2</span>字体与排版</h2>
+  <div class="grid2">
+    <div class="doc-card">
+      <h3>字体族（零新增依赖）</h3>
+      <ul>
+        <li>界面：<code>"Segoe UI Variable","Segoe UI","Microsoft YaHei UI",system-ui</code>——Win10/11 自带，不打包字体，安装包不增大。</li>
+        <li>等宽：<code>"Cascadia Code",Consolas</code>——路径 / UID / 日志 / JSON 编辑器。</li>
+        <li>全局 <code>font-variant-numeric: tabular-nums</code>：进度、百分比、行数、UID 等宽对齐不跳动。</li>
+      </ul>
+    </div>
+    <div class="doc-card">
+      <h3>字号阶</h3>
+      <table>
+        <tr><th>px</th><th>用途</th></tr>
+        <tr><td><code>12</code></td><td>辅助说明、状态栏、区块小标签（大写 + 字距）</td></tr>
+        <tr><td><code>13</code></td><td>正文基准、表格、按钮、输入框</td></tr>
+        <tr><td><code>14</code></td><td>面板标题、主 CTA</td></tr>
+        <tr><td><code>16 / 20</code></td><td>弹层标题 / 球员姓名</td></tr>
+        <tr><td><code>11–11.5</code></td><td>日志、JSON、角标</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2 id="d-motif"><span class="no">3</span>视觉母题</h2>
+  <div class="grid3">
+    <div class="principle"><div class="p-no">母题 A</div><h4>面板竖条标题</h4><p>3px 青绿竖条 + 标题，替代旧版光秃秃的加粗文字；深/浅主题下层级都清晰。</p></div>
+    <div class="principle"><div class="p-no">母题 B</div><h4>状态胶囊 Pill</h4><p>圆角 99px、语义软底 + 同色文字 + 圆点；图标与文字双通道，不只靠颜色。</p></div>
+    <div class="principle"><div class="p-no">母题 C</div><h4>圆角人像</h4><p>12px 圆角矩形：品牌 38px、微调大头像 168px、空状态同尺寸虚线占位。</p></div>
+    <div class="principle"><div class="p-no">母题 D</div><h4>激活条</h4><p>侧栏当前组 / 当前导航：3px 左侧青绿条 + 软底，源自 FM 皮肤的 active-section。</p></div>
+    <div class="principle"><div class="p-no">母题 E</div><h4>凹槽输入</div><p>只读路径框使用 inset 深色底 + 等宽字 + 类型图标，长路径尾部对齐。</p></div>
+    <div class="principle"><div class="p-no">母题 F</div><h4>无渐变装饰</h4><p>不使用渐变文字、玻璃拟态、发光；仅进度条允许青绿单向渐变。</p></div>
+  </div>
+
+  <h2 id="d-components"><span class="no">4</span>组件规范</h2>
+  <h3>按钮层级（三级）</h3>
+  <div class="mini-ui">
+    <button class="btn primary">主要操作（青绿实底）</button>
+    <button class="btn">次级（描边幽灵）</button>
+    <button class="btn danger">危险（红字，悬停红软底）</button>
+    <button class="btn primary" disabled>禁用（中性灰，无彩色残影）</button>
+  </div>
+  <h3>选择与开关</h3>
+  <div class="mini-ui">
+    <div class="seg3" style="width:260px"><button class="active">保留</button><button>覆写</button><button>生成</button></div>
+    <label class="switch"><input type="checkbox" checked /><span class="track"></span>开关（仍是 checkbox，键盘/读屏可用）</label>
+    <span class="pill ok"><span class="dot"></span>完整胶囊</span>
+    <span class="pill warn"><span class="dot"></span>警告胶囊</span>
+    <span class="pill gray"><span class="dot"></span>中性胶囊</span>
+  </div>
+  <h3>进度与表格</h3>
+  <div class="mini-ui" style="flex-direction:column;align-items:stretch;gap:10px">
+    <div style="display:flex;gap:12px;align-items:center"><div class="progress-track" style="flex:1"><div class="progress-fill" style="width:62%"></div></div><span style="font-size:12px;color:var(--text-2)">8px 高 · 150ms 过渡 · 百分比等宽</span></div>
+    <div style="font-size:12px;color:var(--text-2)">表格：凹槽粘顶表头 · 斑马纹 <code>--zebra</code> · 悬停整行 <code>--bg-raised</code> · 「随机人」用是/否胶囊替代裸文字</div>
+  </div>
+  <h3>弹层与滚动条</h3>
+  <ul>
+    <li>模态 / 抽屉是唯一使用柔和投影 <code>--shadow-pop</code> 的层级；背景遮罩 <code>--overlay</code>。</li>
+    <li>滚动条全局自绘：10px 宽、描边透明留白形成细条，悬停加深。</li>
+  </ul>
+
+  <h2 id="d-screens"><span class="no">5</span>界面注解（对照「界面预览」页）</h2>
+  <div class="grid2">
+    <div class="doc-card">
+      <h3>主工作台（12 个落点）</h3>
+      <ol class="anno-list">
+        <li><strong>品牌区</strong>：圆角柴犬 + 字标 + <code>v2.0</code> 描边胶囊。</li>
+        <li><strong>五步 Stepper</strong>：完成✓ / 当前双环 / 待办灰，随状态点亮，不可点。</li>
+        <li><strong>面板标题</strong>：竖条 + 标题 + 当前档/组小字。</li>
+        <li><strong>路径行</strong>：凹槽等宽框 + 文件夹/文件/齿轮图标 + 等宽幽灵按钮列。</li>
+        <li><strong>完整性状态条</strong>：齐全绿 / 缺失琥珀+一键创建 / 未知灰，语义胶囊。</li>
+        <li><strong>模式</strong>：三段连体控件，选中段软底，说明常驻右侧。</li>
+        <li><strong>选项</strong>：纯 CSS 自绘 toggle（底层仍是 input checkbox）。</li>
+        <li><strong>主 CTA</strong>：青绿全宽 + 播放图标；禁用中性灰。</li>
+        <li><strong>进度</strong>：8px 条 + 等宽百分比 + 后端状态原文。</li>
+        <li><strong>侧栏当前组</strong>：左激活条 + 软底；RTF 圆点；× 悬停显红。</li>
+        <li><strong>名单表格</strong>：斑马纹、粘顶表头、排序箭头、分页胶囊。</li>
+        <li><strong>状态栏</strong>：状态胶囊（就绪绿点 / 忙碌琥珀呼吸点）+ 日志红色错误角标。</li>
+      </ol>
+    </div>
+    <div class="doc-card">
+      <h3>其余三个界面</h3>
+      <p><strong>单人微调 → 球员卡</strong>：168px 圆角头像为视觉中心；姓名大字 + UID 等宽胶囊；国籍/种族等元信息胶囊；资料字段从「只读输入框表单」改为 4 列「标签—值」信息格；替换行沉底。字段再多也不像表单。</p>
+      <p><strong>日志抽屉</strong>：560px 右抽屉、180ms 滑入；级别 chip + 「仅该级别」；WARN 琥珀 / ERROR 红 / CRITICAL 反白红条；虚拟列表（virtua）与字段结构不变。</p>
+      <p><strong>规则模态</strong>：标准二/三分段切换；raised 表面 + 投影；等宽 JSON 凹槽编辑器，焦点环青绿；保存校验逻辑不动。</p>
+      <div class="callout info"><span class="ic">i</span><p>原生 <code>ask()</code> / <code>message()</code> 系统弹窗保持不动（无法皮肤化）；如二期需要统一，可做应用内确认弹窗组件。</p></div>
+    </div>
+  </div>
+
+  <h2 id="d-a11y"><span class="no">6</span>无障碍、对比度与动效</h2>
+  <div class="grid2">
+    <div class="doc-card">
+      <h3>无障碍</h3>
+      <ul class="checklist">
+        <li>正文 / 控件文字对比度 ≥ 4.5:1（双主题逐一核验）。</li>
+        <li>所有可交互元素有可见焦点环：3px <code>--focus</code> 半透明环。</li>
+        <li>开关、分段控件底层保持原生 input/button，键盘 Tab 与读屏语义不变。</li>
+        <li>状态一律「图标/形状 + 文字」双通道，不单独依赖色相。</li>
+        <li>抽屉遮罩支持 Esc / 点击关闭并带 aria-label。</li>
+      </ul>
+    </div>
+    <div class="doc-card">
+      <h3>动效预算（硬约束）</h3>
+      <ul class="checklist">
+        <li>所有动画时长 ≤ 200ms（抽屉/模态 180ms，悬停 140–160ms）。</li>
+        <li>位移 ≤ 8px（抽屉 8px、模态 8px 上浮）。</li>
+        <li>进度条宽度过渡 150ms；忙碌呼吸点 1.3s 透明度循环。</li>
+        <li>全局适配 <code>prefers-reduced-motion: reduce</code>：关闭动画与过渡。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="doc-footer"><span>NewGAN Manager v2.0 · 具体设计方案</span><span>所有消费样式必须走令牌，禁止硬编码色值</span></div>
+ </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     视图 D：实施路径
+     ════════════════════════════════════════════════════════════ -->
+<div class="doc hidden" id="view-roadmap">
+ <div class="doc-inner">
+  <h1>改造与实施路径</h1>
+  <p class="lead">视觉完全重排，业务零改动。分 5 批（B0–B4）顺序推进，每批结束都可运行、可回退；主要工作量 = 令牌 + class + 少量纯展示标记。</p>
+  <div class="toc"><a href="#r-guard">硬约束</a><a href="#r-batches">B0–B4 批次</a><a href="#r-files">文件对照</a><a href="#r-gate">质量门</a><a href="#r-scope">范围边界</a></div>
+
+  <h2 id="r-guard"><span class="no">0</span>实施硬约束（不可突破）</h2>
+  <div class="grid2">
+    <div class="doc-card">
+      <ul class="checklist">
+        <li><strong>不新增任何依赖</strong>：纯 CSS + Svelte scoped，不引 tailwind / 组件库。</li>
+        <li>不动业务流程、Rust、IPC 协议、stores 数据逻辑。</li>
+        <li>用户可见文案沿用 <code>src-svelte/lib/text.ts</code>，仅新增必要的主题/Stepper 词条。</li>
+        <li>所有危险操作的 <code>ask()</code> 确认框逻辑与措辞不变。</li>
+        <li>核心数据留 Rust 侧、IPC 只传分页/摘要的架构不变。</li>
+      </ul>
+    </div>
+    <div class="doc-card">
+      <ul class="checklist">
+        <li>保持三层架构 UI / services / core；一组件一文件、一模块一文件。</li>
+        <li>SVG 图标集中到 <code>src-svelte/lib/icons.ts</code>。</li>
+        <li>所有视觉取值走设计令牌，便于二期暗色/主题演进。</li>
+        <li>动效 ≤200ms、位移 ≤8px；适配 reduced-motion。</li>
+        <li>首版不含侧栏折叠；深色为默认，浅色同期交付。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="r-batches"><span class="no">1</span>B0–B4 分批计划</h2>
+
+  <div class="batch">
+    <div class="b-id">B0</div><div class="b-title">基座：双主题令牌与全局样式</div>
+    <div class="b-body">
+      <p>重写 <code>app.css</code>：<code>:root</code>（深色默认）+ <code>[data-theme="light"]</code> 两套令牌；基础元素 body / input / select / button / scrollbar；工具类：面板竖条、状态胶囊、switch、seg3、stepper、圆角头像、tag-yes/no。新建 <code>lib/icons.ts</code>（文件夹 / 文件 / 齿轮 / 搜索 / 播放 / 加号 / 月亮太阳 / 对勾 / 三角翻页，stroke currentColor）。</p>
+      <ul><li><strong>验收</strong>：空页面切换 <code>document.documentElement.dataset.theme</code> 全站换色；无硬编码色值。</li></ul>
+    </div>
+  </div>
+
+  <div class="batch">
+    <div class="b-id">B1</div><div class="b-title">骨架与侧栏：Stepper / 品牌 / 状态胶囊</div>
+    <div class="b-body">
+      <p><code>ui.svelte.ts</code> 增加 <code>theme</code>（localStorage 持久化，默认 dark，启动时写到 <code>&lt;html data-theme&gt;</code>）；App 顶区新增 <code>Stepper.svelte</code>（步骤完成态由现有快照派生：已选档/组 → 已设 RTF → 当前阶段，纯展示）；Sidebar 品牌区（头像走 <code>convertFileSrc</code> 或内置 asset）、组激活条/RTF 圆点、底部主题切换；StatusBar 状态胶囊与呼吸点。</p>
+      <ul><li><strong>验收</strong>：刷新后主题记忆；Stepper 在 No Profile / 已设 RTF / 替换中三态点亮正确；侧栏所有既有按钮（新建/激活/删除/关联/删组/外链）行为不变。</li></ul>
+    </div>
+  </div>
+
+  <div class="batch">
+    <div class="b-id">B2</div><div class="b-title">主操作区：当前任务 + 替换执行</div>
+    <div class="b-body">
+      <p>SetupCard：路径行图标化与凹槽样式、完整性三态胶囊、规则行分隔。ReplacePanel：模式 chip → seg3 连体段；复选框 → switch；CTA 改大号青绿 + 图标；进度条 8px；未就绪引导与浏览态提示保留原文案。</p>
+      <ul><li><strong>验收</strong>：未就绪三级禁用原因、浏览态禁用、缺失目录二次确认、替换中取消全部与旧版一致。</li></ul>
+    </div>
+  </div>
+
+  <div class="batch">
+    <div class="b-id">B3</div><div class="b-title">结果区与弹层：表格 / 球员卡 / 抽屉 / 模态 / 空状态</div>
+    <div class="b-body">
+      <p>PlayersTable 深色斑马表 + 搜索图标 + 分页胶囊（分页/排序/防抖逻辑不动）；ResultsSection tabs 改下划线样式；PlayerViewer 重构为球员卡布局（头像 blob 逻辑、UID 回车、Browse/Replace it 流程不动，只把只读 input 换成定义列表）；LogDrawer 级别 chip 与配色（VList 不动）；RuleEditor 模态与编辑器皮肤化；补齐各空状态（无组 / 无名单 / 无头像虚线占位）。</p>
+      <ul><li><strong>验收</strong>：12 字段在 1366×768 下换行无横向滚动；万条日志滚动流畅；模态未保存确认链路不变。</li></ul>
+    </div>
+  </div>
+
+  <div class="batch">
+    <div class="b-id">B4</div><div class="b-title">质量门：自动化 / 视觉 / 无障碍 / 兼容</div>
+    <div class="b-body">
+      <ul class="checklist">
+        <li><code>pnpm check</code> 与 <code>pnpm test</code>（vitest）全绿；<code>cargo test</code> 不受影响。</li>
+        <li>对比度复核：双主题正文 ≥4.5:1，关键文字 ≥4.5:1。</li>
+        <li>键盘全流程走查：Tab 焦点环、开关空格切换、抽屉 Esc、模态未保存拦截。</li>
+        <li>分辨率：1366×768（最低）与 1920×1080 分别截图；缩放 125% / 150% 不破版。</li>
+        <li>状态矩阵截图：空态 / 浏览态 / 替换中（进度+取消）/ 失败角标 / 抽屉 / 模态 / 球员卡有人像与无头像。</li>
+        <li><code>prefers-reduced-motion</code> 下无动画；大名单（200 行/页）滚动与翻页性能不回退。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="r-files"><span class="no">2</span>文件改造对照</h2>
+  <table>
+    <tr><th>文件</th><th>批次</th><th>改造性质</th><th>逻辑影响</th></tr>
+    <tr><td><code>src-svelte/app.css</code></td><td>B0</td><td>重写令牌 + 基础/工具样式</td><td>无（纯样式）</td></tr>
+    <tr><td><code>src-svelte/lib/icons.ts</code></td><td>B0</td><td>新建，集中 SVG</td><td>无（新增）</td></tr>
+    <tr><td><code>src-svelte/lib/stores/ui.svelte.ts</code></td><td>B1</td><td>增加 theme 字段与持久化</td><td>仅新增字段</td></tr>
+    <tr><td><code>src-svelte/App.svelte</code></td><td>B1</td><td>插入 Stepper、挂载主题</td><td>布局组合，监听逻辑不动</td></tr>
+    <tr><td><code>src-svelte/lib/components/Stepper.svelte</code></td><td>B1</td><td>新建纯展示组件</td><td>无（派生只读）</td></tr>
+    <tr><td><code>Sidebar.svelte</code> / <code>StatusBar.svelte</code></td><td>B1</td><td>class/标记调整、主题开关</td><td>无（事件处理原样保留）</td></tr>
+    <tr><td><code>SetupCard.svelte</code> / <code>ReplacePanel.svelte</code></td><td>B2</td><td>路径行/胶囊/seg3/switch/CTA/进度</td><td>无（bind 与 API 调用不动）</td></tr>
+    <tr><td><code>PlayersTable.svelte</code></td><td>B3</td><td>表格皮肤、工具栏</td><td>无（分页/防抖/排序不动）</td></tr>
+    <tr><td><code>PlayerViewer.svelte</code></td><td>B3</td><td>表单 → 球员卡定义列表</td><td>blob/替换 API 不动，仅展示标记</td></tr>
+    <tr><td><code>ResultsSection / LogDrawer / RuleEditor</code></td><td>B3</td><td>tabs、抽屉、模态皮肤化</td><td>无（VList、校验、确认链路不动）</td></tr>
+    <tr><td><code>src-svelte/lib/text.ts</code></td><td>B1</td><td>仅新增 Stepper / 主题切换文案</td><td>现有 key 不改值</td></tr>
+  </table>
+
+  <h2 id="r-gate"><span class="no">3</span>每批合并门槛</h2>
+  <div class="grid3">
+    <div class="principle"><div class="p-no">门槛 A</div><h4>自动化</h4><p>pnpm check 零错误；vitest 全绿；无新增 TS / a11y 警告。</p></div>
+    <div class="principle"><div class="p-no">门槛 B</div><h4>视觉走查</h4><p>双主题各截状态矩阵图；令牌覆盖率 100%（grep 无裸色值）。</p></div>
+    <div class="principle"><div class="p-no">门槛 C</div><h4>回归走查</h4><p>新建/切换/删除档、关联/删组、三模式替换、取消、单人微调、规则保存、日志筛选。</p></div>
+  </div>
+
+  <h2 id="r-scope"><span class="no">4</span>明确不在本次范围</h2>
+  <div class="doc-card">
+    <ul class="crosslist">
+      <li>业务流程重排（v1→v2 已定稿，不再调整旅程，只做视觉与引导强化）。</li>
+      <li>Rust 侧、IPC 命令、.user 数据结构、config.xml 字节兼容性。</li>
+      <li>新增运行时依赖、字体打包、深色以外的更多主题、侧栏折叠、暗色以外的品牌换色。</li>
+      <li>原生 ask/message 系统弹窗皮肤化（列入二期候选：应用内确认弹窗组件）。</li>
+    </ul>
+  </div>
+  <div class="callout danger"><span class="ic">×</span><p>回滚策略：B0–B3 均为前端文件，按批次单独提交；任何一批验收不通过可直接 revert 该批，不影响数据与后端。</p></div>
+
+  <div class="doc-footer"><span>NewGAN Manager v2.0 · 实施路径（B0–B4）</span><span>预计影响文件 12 个（新增 2 个），Rust 侧 0 改动</span></div>
+ </div>
+</div>
+
+<script>
+/* ---- 视图切换：app / philosophy / design / roadmap ---- */
+function switchView(v, btn){
+  ['app','philosophy','design','roadmap'].forEach(k=>{
+    document.getElementById('view-'+k).classList.toggle('hidden', k!==v);
+  });
+  document.querySelectorAll('.preview-bar button[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===v));
+  if(v==='app') setPreviewTab('main');
+  const doc=document.getElementById('view-'+(v==='app'?'philosophy':v));
+  if(v!=='app') doc.scrollTop=0;
+}
+/* ---- 预览稿内部：名单/球员卡 两个 tab ---- */
+function setPreviewTab(tab){
+  document.getElementById('view-main').classList.toggle('hidden', tab!=='main');
+  document.getElementById('view-player').classList.toggle('hidden', tab!=='player');
+  const mainTabs=document.querySelectorAll('#view-main .tabs button');
+  const playerTabs=document.querySelectorAll('#view-player .tabs button');
+  if(mainTabs[0])mainTabs[0].classList.toggle('active',tab==='main');
+  if(playerTabs[1])playerTabs[1].classList.toggle('active',tab==='player');
+  if(playerTabs[0])playerTabs[0].classList.toggle('active',tab!=='player');
+}
+/* ---- 抽屉 / 模态（仅预览）：打开时隐藏设计稿控制条 ---- */
+function syncLayerBar(){
+  const open=!document.getElementById('drawer-layer').classList.contains('hidden')
+    ||!document.getElementById('modal-layer').classList.contains('hidden');
+  document.querySelector('.preview-bar').style.visibility=open?'hidden':'visible';
+}
+function toggleDrawer(){document.getElementById('drawer-layer').classList.toggle('hidden');syncLayerBar()}
+function toggleModal(){document.getElementById('modal-layer').classList.toggle('hidden');syncLayerBar()}
+/* ---- 双主题 ---- */
+function toggleTheme(){
+  const html=document.documentElement;
+  const light=html.dataset.theme==='light';
+  html.dataset.theme=light?'dark':'light';
+  const label=document.getElementById('theme-label');
+  if(label)label.textContent=light?'深色':'浅色';
+  document.getElementById('theme-btn').textContent=light?'切换浅色':'切换深色';
+}
+/* ---- URL 参数预设：?view=design&theme=light&drawer=1&modal=1 ---- */
+(function(){
+  const p=new URLSearchParams(location.search);
+  if(p.get('theme')==='light'){
+    document.documentElement.dataset.theme='light';
+    document.getElementById('theme-label').textContent='浅色';
+    document.getElementById('theme-btn').textContent='切换深色';
+  }
+  const v=p.get('view');
+  if(['philosophy','design','roadmap'].includes(v)){
+    switchView(v, document.querySelector('.preview-bar button[data-view="'+v+'"]'));
+  }
+  if(p.get('tab')==='player') setPreviewTab('player');
+  if(p.get('drawer')==='1') document.getElementById('drawer-layer').classList.remove('hidden');
+  if(p.get('modal')==='1') document.getElementById('modal-layer').classList.remove('hidden');
+  syncLayerBar();
+  /* 文档页锚点（视图切换后跳转） */
+  if(location.hash){
+    const el=document.querySelector(location.hash);
+    if(el) requestAnimationFrame(()=>el.scrollIntoView());
+  }
+})();
+</script>
+</body>
+</html>

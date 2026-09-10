@@ -7,6 +7,7 @@
   import { clearDisplay, filterLines, LEVELS, logStore } from '../stores/log.svelte';
   import { ui } from '../stores/ui.svelte';
   import { t } from '../text'; // 全局文案常量
+  import { icons } from '../icons';
   import type { LogLine } from '../types';
 
   // 抽屉打开期间，过滤条件变化 → 从 Rust 环形缓冲重查（前端缓冲仅承接事件增量）。
@@ -32,10 +33,14 @@
   <!-- 半透明遮罩：点它或按 Esc 关闭抽屉。role/tabindex/aria-label 是为了无障碍与键盘可聚焦。 -->
   <div class="drawer-backdrop" role="button" tabindex={0} aria-label={t.log.closeAria} onclick={() => (ui.logOpen = false)} onkeydown={(e) => e.key === 'Escape' && (ui.logOpen = false)}></div>
   <aside class="drawer">
-    <!-- 顶部工具条：标题 + “仅该级别”复选框 + 级别下拉 + 打开文件/清空/关闭按钮。 -->
-    <div class="row">
+    <!-- 顶部工具条：标题 + “仅该级别”开关 + 级别下拉 + 打开文件/清空/关闭按钮。 -->
+    <div class="drawer-tools">
       <strong>{t.log.title}</strong>
-      <label class="small"><input type="checkbox" bind:checked={logStore.only} /> {t.log.onlyLevel}</label>
+      <label class="switch">
+        <input type="checkbox" bind:checked={logStore.only} />
+        <span class="track"></span>
+        {t.log.onlyLevel}
+      </label>
       <!-- bind:value 把下拉选中值与 logStore.level 双向绑定。级别值（DEBUG/INFO…）是过滤协议值，勿改。 -->
       <select bind:value={logStore.level}>
         {#each LEVELS as l}<option value={l}>{l}</option>{/each}
@@ -43,15 +48,19 @@
       <span class="flex-1"></span>
       <button class="btn" onclick={openLogFile}>{t.log.openFileBtn}</button>
       <button class="btn" onclick={clearDisplay}>{t.log.clearBtn}</button>
-      <button class="icon-btn" onclick={() => (ui.logOpen = false)}>×</button>
+      <button class="icon-btn" onclick={() => (ui.logOpen = false)} aria-label={t.log.closeAria}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.x.body}</svg>
+      </button>
     </div>
     <div class="drawer-body">
       <!-- VList 虚拟列表：data 传入全部数据，但只渲染可见区域的行。 -->
-      <VList data={shown} style="height:100%" class="mono small">
+      <VList data={shown} style="height:100%">
         <!-- {#snippet children(line)} 定义每一行的渲染模板（VList 会逐行回调它）。 -->
         {#snippet children(line: LogLine)}
-          <!-- 行内类名用级别小写（如 .error），对应不同颜色；padEnd(8) 把级别补齐到 8 字符对齐。 -->
-          <div class="log-line {line.level.toLowerCase()}" style="padding:1px 8px;white-space:nowrap">
+          <!-- 行内类名用级别小写（如 .error），对应不同颜色；padEnd(8) 把级别补齐到 8 字符对齐。
+               字号/等宽/内边距由全局 .drawer-body .log-line 提供。 -->
+          <div class="log-line {line.level.toLowerCase()}">
             | {line.ts} | {line.level.padEnd(8)} | {line.module} | {line.message}
           </div>
         {/snippet}

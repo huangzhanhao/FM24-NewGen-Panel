@@ -8,6 +8,7 @@
   import { message } from '@tauri-apps/plugin-dialog'; // 原生弹框
   // 下面导入各个子组件（Svelte 里组件名首字母大写，在模板中当标签用）。
   import Sidebar from './lib/components/Sidebar.svelte';
+  import Stepper from './lib/components/Stepper.svelte';
   import SetupCard from './lib/components/SetupCard.svelte';
   import ReplacePanel from './lib/components/ReplacePanel.svelte';
   import ResultsSection from './lib/components/ResultsSection.svelte';
@@ -15,6 +16,10 @@
   import LogDrawer from './lib/components/LogDrawer.svelte';
   import { t } from './lib/text'; // 全局文案常量（用户可见文字统一在此维护）
   import { initListeners } from './lib/stores/app.svelte'; // 订阅后端事件的初始化函数
+  import { applyTheme } from './lib/stores/ui.svelte'; // 深/浅主题令牌切换
+
+  // 组件初始化即在 <html> 上写好 data-theme（首帧就是上次记忆的主题，不闪烁）。
+  applyTheme();
 
   // onMount 里的代码在组件首次渲染到页面后运行（适合做“启动时订阅事件”这类副作用）。
   onMount(() => {
@@ -30,6 +35,7 @@
 <div class="app">
   <Sidebar />
   <main class="content">
+    <Stepper />
     <SetupCard />
     <ReplacePanel />
     <ResultsSection />

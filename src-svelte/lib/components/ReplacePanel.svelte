@@ -6,6 +6,7 @@
   import { showError } from '../dialog';
   import { t } from '../text'; // 全局文案常量
   import { appStore, refreshSnapshot } from '../stores/app.svelte';
+  import { icons } from '../icons';
 
   // 三个模式的取值/标签/说明统一在 text.ts 的 t.replace.modes 维护；
   // value 发往后端（协议值），label 显示在模式按钮上，desc 显示在选中模式旁。
@@ -62,45 +63,58 @@
 
 <div class="card">
   <div class="card-title">{t.replace.cardTitle}</div>
-  <!-- 模式选择：{#each} 遍历 t.replace.modes 生成三个按钮，选中的加 active 类。
+  <!-- 模式选择：连体分段控件 seg3。{#each} 遍历 t.replace.modes 生成三个按钮，选中的加 active 类。
        按钮显示 label（中文），点选后把 value（协议值）存进 mode。 -->
-  <div class="row">
+  <div class="path-row two">
     <span class="row-label">{t.replace.modeLabel}</span>
-    {#each t.replace.modes as m}
-      <button
-        class="mode-chip"
-        class:active={mode === m.value}
-        onclick={() => (mode = m.value)}
-        disabled={busy}
-      >{m.label}</button>
-    {/each}
-    <!-- 当前选中模式的说明文字（flex-1 占据剩余宽度）。 -->
-    <span class="muted small flex-1">{modeDesc}</span>
+    <div class="mode-line">
+      <div class="seg3">
+        {#each t.replace.modes as m}
+          <button class:active={mode === m.value} onclick={() => (mode = m.value)} disabled={busy}>{m.label}</button>
+        {/each}
+      </div>
+      <!-- 当前选中模式的说明文字。 -->
+      <span class="muted small">{modeDesc}</span>
+    </div>
   </div>
-  <!-- 选项复选框：bind:checked 实现双向绑定（勾选→变量 true；变量变→勾选状态变）。 -->
-  <div class="row checks">
+  <!-- 选项开关：底层仍是 input checkbox + bind:checked（键盘/读屏语义不变），外观由 .switch/.track 皮肤化。 -->
+  <div class="path-row two">
     <span class="row-label">{t.replace.optionsLabel}</span>
-    <label><input type="checkbox" bind:checked={allowDuplicates} disabled={busy} /> {t.replace.optAllowDuplicates}</label>
-    <label><input type="checkbox" bind:checked={filterNewgan} disabled={busy} /> {t.replace.optFilterNewgan}</label>
-    <label><input type="checkbox" bind:checked={saveBackup} disabled={busy} /> {t.replace.optSaveBackup}</label>
+    <div class="opt-line">
+      <label class="switch">
+        <input type="checkbox" bind:checked={allowDuplicates} disabled={busy} />
+        <span class="track"></span>{t.replace.optAllowDuplicates}
+      </label>
+      <label class="switch">
+        <input type="checkbox" bind:checked={filterNewgan} disabled={busy} />
+        <span class="track"></span>{t.replace.optFilterNewgan}
+      </label>
+      <label class="switch">
+        <input type="checkbox" bind:checked={saveBackup} disabled={busy} />
+        <span class="track"></span>{t.replace.optSaveBackup}
+      </label>
+    </div>
   </div>
   <!-- 开始/取消按钮：未就绪或忙碌时禁用开始；非忙碌时禁用取消。 -->
-  <div class="row">
-    <button class="btn primary big flex-1" onclick={startReplace}
+  <div class="cta-row">
+    <button class="btn primary" onclick={startReplace}
             disabled={busy || browseMode || !ready}
             title={browseMode ? t.replace.browseDisabledHint : ''}>
+      {#if !busy}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">{@html icons.play.body}</svg>
+      {/if}
       {busy ? t.replace.runningBtn : t.replace.startBtn}
     </button>
-    <button class="btn" onclick={() => api.cancelReplace()} disabled={!busy}>{t.replace.cancelBtn}</button>
+    <button class="btn cancel" onclick={() => api.cancelReplace()} disabled={!busy}>{t.replace.cancelBtn}</button>
   </div>
   {#if browseMode}
     <p class="muted small">{t.replace.browseNotice(appStore.selectedProfile)}</p>
   {/if}
-  <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比。 -->
+  <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比，右侧跟「百分比 · 阶段文案」。 -->
   {#if busy || appStore.progress.value > 0}
-    <div class="row">
+    <div class="progress-line">
       <div class="progress-track"><div class="progress-fill" style="width:{appStore.progress.value}%"></div></div>
-      <span class="muted" style="min-width:180px">{appStore.progress.status}</span>
+      <span class="progress-text">{appStore.progress.value}% · {appStore.progress.status}</span>
     </div>
   {/if}
   <!-- 未就绪时把待完成项列出来引导用户。 -->
@@ -108,3 +122,11 @@
     <p class="muted small">{t.replace.todoPrefix}{missing.join(' · ')}</p>
   {/if}
 </div>
+
+<style>
+  /* 模式行：分段控件定宽 360，右侧说明文字占用余宽（窄屏自动收缩） */
+  .mode-line { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .mode-line .seg3 { flex: 0 1 360px; }
+  /* 选项行：三个开关 22px 间距换行 */
+  .opt-line { display: flex; gap: 22px; flex-wrap: wrap; }
+</style>

@@ -8,6 +8,10 @@
   import { showError } from '../dialog';
   import { t } from '../text'; // 全局文案常量
   import { appStore, applySnapshot } from '../stores/app.svelte';
+  import { ui, toggleTheme } from '../stores/ui.svelte';
+  import { icons } from '../icons';
+  // Vite 静态资源导入：打包后得到带哈希的图片 URL（app-icon.png 在项目根）。
+  import brandLogo from '../../../app-icon.png';
 
   let newProfileName = $state('');   // 新建存档输入框的值
   let creating = $state(false);      // 是否展开“新建存档”行
@@ -110,7 +114,14 @@
 </script>
 
 <aside class="sidebar">
-  <div class="brand">{t.brand}</div>
+  <!-- 品牌区：柴犬图标（取自应用图标）+ 名称 + v2.0 胶囊 -->
+  <div class="brand-row">
+    <img class="brand-logo" src={brandLogo} alt="" />
+    <div>
+      <div class="brand-name">{t.brand}</div>
+      <span class="brand-ver">{t.app.brandVer}</span>
+    </div>
+  </div>
 
   <!-- 区域一：存档（Profile）管理。 -->
   <section>
@@ -160,7 +171,10 @@
       <span>{t.sidebar.groupSection}</span>
       <!-- 关联新目录按钮：忙碌或选中项未激活（浏览态）时禁用——组操作仅对激活档可用。 -->
       <button class="icon-btn" title={browseMode ? t.sidebar.linkBrowseHint : t.sidebar.linkNewHint}
-              onclick={linkFacepack} disabled={busy || !hasProfile}>＋</button>
+              onclick={linkFacepack} disabled={busy || !hasProfile}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.plus.body}</svg>
+      </button>
     </div>
     <!-- 有组时渲染列表；否则显示空状态提示。 -->
     {#if snap && snap.groups.length > 0}
@@ -192,5 +206,14 @@
     <button class="link small" onclick={() => openUrl('https://github.com/Maradonna90/NewGAN-Manager/wiki/Troubleshooting')}>{t.sidebar.linkTroubleshooting}</button>
     <button class="link small" onclick={() => openUrl('https://github.com/Maradonna90/NewGAN-Manager/wiki/FAQ')}>{t.sidebar.linkFaq}</button>
     <button class="link small" onclick={() => openUrl('https://discord.gg/UfRpJVc')}>{t.sidebar.linkDiscord}</button>
+    <!-- 主题切换：深色显示月亮+「深色」，浅色显示太阳+「浅色」；选择记忆在 localStorage -->
+    <button class="theme-switch" onclick={toggleTheme}
+            title={t.theme.switchTo(ui.theme === 'dark' ? 'light' : 'dark')}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="13" height="13">
+        {@html (ui.theme === 'dark' ? icons.moon : icons.sun).body}
+      </svg>
+      <span>{ui.theme === 'dark' ? t.theme.dark : t.theme.light}</span>
+    </button>
   </div>
 </aside>

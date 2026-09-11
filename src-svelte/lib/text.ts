@@ -170,7 +170,6 @@ export const t = {
     colClub: '俱乐部',
     colAge: '年龄',
     colHeight: '身高',
-    colWeight: '体重',
     colNewgan: '随机人',
     emptyHint: '执行「替换头像」或「扫描RTF」后可在此预览名单（最近一次解析结果）。',
   },
@@ -204,7 +203,6 @@ export const t = {
       club: '俱乐部:',
       age: '年龄:',
       height: '身高:',
-      weight: '体重:',
     },
   },
 

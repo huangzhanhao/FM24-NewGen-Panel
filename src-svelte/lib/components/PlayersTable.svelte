@@ -93,7 +93,7 @@
             <th onclick={() => sortBy('ethnicityCode')}>{t.table.colEth}{arrow('ethnicityCode')}</th>
             <!-- 仅当名单含详细信息时才多渲染这几列。 -->
             {#if hasDetailed}
-              <th>{t.table.colSkin}</th><th>{t.table.colClub}</th><th>{t.table.colAge}</th><th>{t.table.colHeight}</th><th>{t.table.colWeight}</th><th>{t.table.colNewgan}</th>
+              <th>{t.table.colSkin}</th><th>{t.table.colClub}</th><th>{t.table.colAge}</th><th>{t.table.colHeight}</th><th>{t.table.colNewgan}</th>
             {/if}
           </tr>
         </thead>
@@ -114,7 +114,6 @@
                 <td>{r.detailed?.club ?? '—'}</td>
                 <td>{r.detailed?.age ?? '—'}</td>
                 <td>{r.detailed?.height ?? '—'}</td>
-                <td>{r.detailed?.weight ?? '—'}</td>
                 <td>
                   {#if r.detailed?.isNewgan}
                     <span class={newganCls(r.detailed.isNewgan)}>{r.detailed.isNewgan}</span>

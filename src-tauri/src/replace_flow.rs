@@ -8,7 +8,7 @@ use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack_scanner::PackLayout;
 use crate::logger::LogSink;
 use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
-use crate::rtf_scanner::{PlayerRecord, RtfParser};
+use crate::rtf_scanner::{PlayerRecord, RtfScanner};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
 use std::sync::Arc;
@@ -91,28 +91,26 @@ pub fn run(
     RunResult { outcome: Outcome::Finished, rtf_data, mapping }
 }
 
-/// 阶段1+2：校验 RTF 并解析出结构化球员列表（0 → 20%）。
+/// 阶段1+2：识别 RTF 格式并解析出结构化名单（0 → 20%）。
+/// 格式识别失败 → failed("RTF 格式不合法：…")（带首个不合法字段定位，前端弹窗展示）。
 fn parse_stage(
     params: &ReplaceParams,
     progress: &mut dyn FnMut(&str, u8),
     cancel: &AtomicBool,
     logger: &impl LogSink,
 ) -> Result<Vec<PlayerRecord>, RunResult> {
-    progress("校验 RTF 文件…", 0);
-    let mut parser = RtfParser::new();
-    // check_rtf_valid 返回 Ok(true)/Ok(false)/Err 三种，分别处理。
-    match parser.check_rtf_valid(Path::new(&params.rtf_path)) {
-        Ok(true) => {}
-        Ok(false) => return Err(failed("RTF 文件格式无效")),
-        Err(e) => return Err(failed(&e)),
+    progress("识别 RTF 格式…", 0);
+    let mut scanner = RtfScanner::new();
+    if let Err(e) = scanner.detect_format(Path::new(&params.rtf_path)) {
+        return Err(failed(&e));
     }
     if is_cancelled(cancel) {
         return Err(cancelled());
     }
     progress("解析 RTF 文件…", 20);
-    let t = Instant::now(); // 计时只覆盖解析（校验在上一步，不计入本行耗时）
-    let rtf_data = parser
-        .parse_rtf(Path::new(&params.rtf_path), params.filter_newgen, &NAT_TRANSLATION)
+    let t = Instant::now(); // 计时只覆盖解析（识别在上一步，不计入本行耗时）
+    let rtf_data = scanner
+        .parse_roster(Path::new(&params.rtf_path), params.filter_newgen, &NAT_TRANSLATION, logger)
         .map_err(|e| failed(&e))?;
     // 解析完立即检查取消（原版口径）：不等头像包扫描跑完才停，大包扫描可能耗时很久。
     if is_cancelled(cancel) {
@@ -301,7 +299,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, _| {}, &cancel, &logger);
-        assert!(matches!(result.outcome, Outcome::Failed(m) if m.contains("无效")));
+        assert!(matches!(result.outcome, Outcome::Failed(m) if m.contains("RTF 格式不合法")));
     }
 
     #[test]

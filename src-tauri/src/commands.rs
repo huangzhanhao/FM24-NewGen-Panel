@@ -7,11 +7,11 @@
 use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::Mode;
 use crate::facepack_scanner::{self, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack_scanner.rs）
-use crate::logger::{LogPage, Logger};
+use crate::logger::{LogPage, LogSink, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
 use crate::templates::{self, RuleConfig};
-use crate::rtf_scanner::{PlayerRecord, RtfParser, NEWGAN_UID_PREFIX};
+use crate::rtf_scanner::{PlayerRecord, RtfScanner, NEWGAN_UID_PREFIX};
 use crate::xml_parser::{self, MappingEntry};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -96,7 +96,8 @@ pub struct ImageScanResult { pub total: usize, pub standard: u8 }
 pub struct RtfScanResult {
     pub total: usize,     // 名单总条数
     pub newgan: usize,    // 随机人（r- 前缀）条数
-    pub detailed: bool,   // 是否详细名单
+    pub detailed: bool,   // 是否含拓展信息（拓展名单为 true）
+    pub format: String,   // 基础名单 / 拓展球员名单 / 拓展职员名单
     pub language: String, // "English" / "简体中文"
 }
 
@@ -372,19 +373,19 @@ fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, Pa
     Ok((total, layout.standard(), scan))
 }
 
-/// 「扫描RTF」核心（纯函数，便于单测）：校验 + 全量解析名单，返回 (摘要, 球员列表)。
-fn scan_rtf_core(rtf_path: &str) -> Result<(RtfScanResult, Vec<PlayerRecord>), String> {
-    let mut parser = RtfParser::new();
-    if !parser.check_rtf_valid(Path::new(rtf_path))? {
-        return Err("RTF 文件格式无效".into());
-    }
+/// 「扫描RTF」核心：格式识别 + 全量解析名单（全字段入库），返回 (摘要, 记录列表)。
+/// 识别失败 → Err("RTF 格式不合法：…")，文案带首个不合法字段定位，前端弹窗直接展示。
+fn scan_rtf_core(rtf_path: &str, logger: &impl LogSink) -> Result<(RtfScanResult, Vec<PlayerRecord>), String> {
+    let mut scanner = RtfScanner::new();
+    scanner.detect_format(Path::new(rtf_path))?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
-    let data = parser.parse_rtf(Path::new(rtf_path), false, &NAT_TRANSLATION)?;
+    let data = scanner.parse_roster(Path::new(rtf_path), false, &NAT_TRANSLATION, logger)?;
     let summary = RtfScanResult {
         total: data.len(),
         newgan: data.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count(),
         detailed: data.iter().any(|p| p.detailed.is_some()),
-        language: parser.rtf_language.clone(),
+        format: scanner.format.label().into(),
+        language: scanner.language.clone(),
     };
     Ok((summary, data))
 }
@@ -408,10 +409,11 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
 pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, String> {
     let rtf = { state.pm.lock().unwrap().get_cur_rtf() };
     if rtf.is_empty() { return Err("请先选择 RTF 名单".into()); }
-    let (summary, data) = scan_rtf_core(&rtf)?;
-    *state.rtf_cache.lock().unwrap() = data; // 名单预览（query_players）直接读这份缓存
+    // &*state.logger：&Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）。
+    let (summary, data) = scan_rtf_core(&rtf, &*state.logger)?;
+    *state.rtf_cache.lock().unwrap() = data; // 名单预览（query_players）直接读这份缓存（全字段）
     state.logger.info("scan", format!("扫描 RTF 完成：{} 条（随机人 {}，{}，{}）",
-        summary.total, summary.newgan, if summary.detailed { "详细名单" } else { "基础名单" }, summary.language));
+        summary.total, summary.newgan, summary.format, summary.language));
     Ok(summary)
 }
 
@@ -746,6 +748,7 @@ pub fn cancel_replace(state: State<'_, AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logger::ChannelLogger;
 
     /// 在临时目录下按 names 建子目录，返回根路径字符串。
     fn mk_dirs(root: &Path, names: &[&str]) {
@@ -910,16 +913,19 @@ mod tests {
              | 2000472008| ESP  | USA     | Pepe Sáenz    | 1  | 12 | 1 |\n\
              | 2002161479| BRA  |         | José·Milhomem | 1  | 16 | 3 |\n",
         ).unwrap();
-        let (summary, data) = scan_rtf_core(rtf.to_str().unwrap()).unwrap();
+        let logger = ChannelLogger::channel().0;
+        let (summary, data) = scan_rtf_core(rtf.to_str().unwrap(), &logger).unwrap();
         assert_eq!(summary.total, 2);
         assert_eq!(summary.newgan, 2); // 两条 UID 均带 r- 前缀
-        assert!(!summary.detailed);    // 基础名单
+        assert!(!summary.detailed);    // 基础名单无拓展信息
+        assert_eq!(summary.format, "基础名单");
         assert_eq!(summary.language, "English");
         assert_eq!(data.len(), 2);
-        // 非法 RTF → Err
+        // 非法 RTF → Err，文案带「RTF 格式不合法」
         let bad = dir.path().join("bad.rtf");
         std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
-        assert!(scan_rtf_core(bad.to_str().unwrap()).is_err());
+        let err = scan_rtf_core(bad.to_str().unwrap(), &logger).err().unwrap();
+        assert!(err.contains("RTF 格式不合法"), "{err}");
     }
 
     #[test]

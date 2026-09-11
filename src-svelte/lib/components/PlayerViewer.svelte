@@ -116,7 +116,6 @@
       <div class="cell"><dt>{t.viewer.labels.age}</dt><dd>{d?.age || '—'}</dd></div>
       <div class="cell"><dt>{t.viewer.labels.club}</dt><dd>{d?.club || '—'}</dd></div>
       <div class="cell"><dt>{t.viewer.labels.height}</dt><dd>{d?.height || '—'}</dd></div>
-      <div class="cell"><dt>{t.viewer.labels.weight}</dt><dd>{d?.weight || '—'}</dd></div>
       <div class="cell wide"><dt>{t.viewer.colMapping}</dt>
         <dd class="mono" title={mappingText}>{mappingText || '—'}</dd></div>
     </dl>

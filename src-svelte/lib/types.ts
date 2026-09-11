@@ -2,10 +2,16 @@
 // 这里的每个接口都对应 Rust commands.rs 里的一个结构体（字段名用驼峰，与 Rust 的 camelCase 序列化一致）。
 // interface 只在编译期做类型检查，不会产生运行时代码；作用是让编辑器和编译器帮你提前发现字段名写错。
 
-/// 详细名单才有的额外信息（对应 Rust 的 DetailedInfo）。
+/// 拓展名单才有的额外信息（对应 Rust 的 DetailedInfo），承载第 5-17 列及用户自定义列全部原文。
 export interface DetailedInfo {
-  skinCode: string; faceId: string; club: string;
-  age: string; height: string; weight: string; isNewgan: string;
+  skinCode: string; isNewgan: string; club: string;
+  age: string; height: string;
+  based: string;        // 俱乐部赛事级别/所在地（仅拓展球员）
+  preferredJob: string; // 偏好工作（仅拓展职员）
+  ca: string; pa: string;
+  rca: string;          // 推荐能力 R.C.A（仅拓展球员）
+  gender: string;       // 性别（仅拓展职员）
+  extraFields: string[]; // 第 18 列起的用户自定义列原文
 }
 
 /// 一个球员（对应 Rust 的 PlayerRecord）。detailed? 的 ? 表示可选（可能为 undefined）。
@@ -36,7 +42,7 @@ export interface IntegrityResult {
 export interface ImageScanResult { total: number; standard: number; }
 
 /// 「扫描RTF」返回摘要（对应 Rust 的 RtfScanResult）。
-export interface RtfScanResult { total: number; newgan: number; detailed: boolean; language: string; }
+export interface RtfScanResult { total: number; newgan: number; detailed: boolean; format: string; language: string; }
 
 /// 当前组 config.xml 的路径与存在性（对应 Rust 的 ConfigXmlInfo）。
 export interface ConfigXmlInfo { path: string; exists: boolean; }

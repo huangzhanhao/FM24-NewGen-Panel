@@ -5,10 +5,10 @@
 //! 插件分发给 stdout/滚动文件/内存缓冲（内存侧再批量 emit 成 log:batch 推给前端）。
 use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::{FaceMapper, Mode};
-use crate::facepack::PackLayout;
+use crate::facepack_scanner::PackLayout;
 use crate::logger::LogSink;
 use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
-use crate::rtf_parser::{PlayerRecord, RtfParser};
+use crate::rtf_scanner::{PlayerRecord, RtfParser};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub struct ReplaceParams {
     pub save_backup: bool,      // 写入前是否备份
     /// 「扫描头像」命令缓存的包索引（按 img_dir 命中即复用，避免重复扫盘）。
     /// Arc 共享缓存里的同一份——克隆只涨引用计数，不复制数万图片名表；None = 现场新扫描。
-    pub pre_scan: Option<Arc<crate::facepack::PackScan>>,
+    pub pre_scan: Option<Arc<crate::facepack_scanner::PackScan>>,
     /// 标准规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
     pub rule_config: RuleConfig,
 }

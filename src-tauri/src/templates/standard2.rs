@@ -4,7 +4,7 @@
 //! 本模块不硬编码任何目录名或码表。
 use super::{filter_pools, PickedImage, PickRule, RuleFile};
 use crate::json_store;
-use crate::rtf_parser::PlayerRecord;
+use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
 use rand::Rng;
 use serde::{Deserialize, Serialize};

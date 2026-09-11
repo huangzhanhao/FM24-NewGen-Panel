@@ -8,7 +8,7 @@
 //! `random`（等概率多选一）、`randomWithWeight`（按权重多选一）。
 use super::{filter_pools, pick_from_pools_flat, PickedImage, PickRule, RuleFile};
 use crate::json_store;
-use crate::rtf_parser::PlayerRecord;
+use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
 use rand::Rng;
 use serde::de::{self, Deserializer};
@@ -788,15 +788,15 @@ mod tests {
         let cfg = &rcfg.standard3;
         let dir = tempfile::tempdir().unwrap();
         build_real_shape_pack(dir.path(), cfg, 1).unwrap();
-        let scan = crate::facepack::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
         // 一级目录 65 个：62 清单 + 3 包外（真实包同款）。
         assert_eq!(scan.faces_map.len(), cfg.folder_list.len() + 3);
         let refs: Vec<_> = rcfg.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
-        let layout = crate::facepack::classify(
+        let layout = crate::facepack_scanner::classify(
             &scan.faces_map.keys().cloned().collect::<BTreeSet<_>>(), false, &refs);
         // 清单 62 目录全在 → 判标准三完整包；多出的 Staff/WF/Scandinavian 不影响判定。
         assert_eq!(layout,
-                   crate::facepack::PackLayout::Standard { standard: 3, complete: true });
+                   crate::facepack_scanner::PackLayout::Standard { standard: 3, complete: true });
         let rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
         // 抽图主池只收清单内目录：包外目录不进规则池（含与清单目录同在一级的 Scandinavian）。
         assert_eq!(rule.pools.len(), cfg.folder_list.len());
@@ -817,7 +817,7 @@ mod tests {
         let cfg = &rcfg.standard3;
         let dir = tempfile::tempdir().unwrap();
         build_real_shape_pack(dir.path(), cfg, 2).unwrap();
-        let scan = crate::facepack::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
         let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
         let folders: BTreeSet<&str> = cfg.folder_list.iter().map(String::as_str).collect();
         for nat in cfg.ethnics.keys() {
@@ -850,7 +850,7 @@ mod tests {
         let cfg = &rcfg.standard3;
         let dir = tempfile::tempdir().unwrap();
         let total = build_real_shape_pack(dir.path(), cfg, 1).unwrap();
-        let scan = crate::facepack::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
         let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
         let nats: Vec<&String> = cfg.ethnics.keys().collect();
         let mut issued = BTreeSet::new();

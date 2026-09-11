@@ -8,7 +8,7 @@
 //!   4. `filter_pools` / `pick_from_pools_flat`：两个纯机械工具，不含任何标准语义；
 //!   5. `validate_registry`：标准之间的登记冲突守卫。
 //!
-//! 头像包布局判定在 `facepack::classify`（数据驱动，按各标准的 FolderList 推断），
+//! 头像包布局判定在 `facepack_scanner::classify`（数据驱动，按各标准的 FolderList 推断），
 //! 本模块不重复实现判定 —— 判定与分发各只有一处真源。
 //!
 //! 【扩展点】新增标准四/五/六：①`assets/standardN.json` ②`templates/standardN.rs`
@@ -21,9 +21,9 @@ pub(crate) mod standard2;
 pub(crate) mod standard3;
 pub(crate) mod unknown;
 
-use crate::facepack::{PackLayout, PackScan};
+use crate::facepack_scanner::{PackLayout, PackScan};
 use crate::json_store::{self, LoadError};
-use crate::rtf_parser::PlayerRecord;
+use crate::rtf_scanner::PlayerRecord;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -79,7 +79,7 @@ impl RuleConfig {
     }
 
     /// 所有参与目录判定的标准 (标准号, FolderList)，按标准号升序登记。
-    /// 【这张表的顺序就是判定的唯一真源】`facepack::classify` 两轮都是先命中先赢，
+    /// 【这张表的顺序就是判定的唯一真源】`facepack_scanner::classify` 两轮都是先命中先赢，
     /// 因此任意两份清单不能互相包含（由 `validate_registry` 守卫）。
     pub fn folder_lists(&self) -> Vec<(u8, &Vec<String>)> {
         vec![(2, &self.standard2.folder_list), (3, &self.standard3.folder_list)]
@@ -246,15 +246,15 @@ mod tests {
             RuleConfig::builtin()
         });
         let t = std::time::Instant::now();
-        let scan = crate::facepack::scan_pack(&pack).unwrap();
+        let scan = crate::facepack_scanner::scan_pack(&pack).unwrap();
         let total_imgs: usize = scan.recursive_pools.values().map(|s| s.len()).sum();
         eprintln!("扫描：{} 个一级目录，递归池 {total_imgs} 张图，耗时 {:?}",
                   scan.faces_map.len(), t.elapsed());
         let refs: Vec<_> = config.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
         let subdirs: BTreeSet<String> = scan.faces_map.keys()
-            .filter(|n| !crate::facepack::is_junk_dir(n))
+            .filter(|n| !crate::facepack_scanner::is_junk_dir(n))
             .cloned().collect();
-        let layout = crate::facepack::classify(&subdirs, !scan.root_images.is_empty(), &refs);
+        let layout = crate::facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &refs);
         eprintln!("判定：{layout:?}");
         assert!(matches!(layout, PackLayout::Standard { standard: 3, .. }),
                 "该包未被判为标准三：{layout:?}");

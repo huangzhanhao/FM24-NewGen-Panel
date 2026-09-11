@@ -4,7 +4,7 @@
 //! 抽图靠单一根池。所以 `RuleConfig` 里没有它的字段，`folder_lists()` 里也没有它，
 //! `IMPLEMENTED_STANDARDS` 的拦截同样不经过它（那个拦截只针对 `PackLayout::Standard`）。
 use super::{PickedImage, PickRule};
-use crate::rtf_parser::PlayerRecord;
+use crate::rtf_scanner::PlayerRecord;
 use rand::Rng;
 use std::collections::BTreeSet;
 

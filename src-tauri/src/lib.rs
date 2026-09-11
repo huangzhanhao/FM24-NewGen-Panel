@@ -11,13 +11,13 @@
 mod assets;          // 编译期内嵌的只读映射表（国籍翻译、config.xml 模板、标准规则默认数据）
 mod commands;        // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper;     // 核心算法：球员 → 头像图片的映射
-mod facepack;        // 头像包扫描与标准判定（FolderList 来自 templates，不硬编码）
+mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（FolderList 来自 templates，不硬编码）
 mod json_store;      // JSON 配置的原子读写
 mod logger;          // 日志系统（log 门面 + 官方插件管道；自研内存缓冲与批量事件见模块头）
 mod paths;           // 路径规范化工具
 mod profile_manager; // 存档（Profile）与头像包（组）管理
 mod replace_flow;    // 「Replace Faces」整条流水线
-mod rtf_parser;      // 解析 FM 导出的 RTF 球员名单
+mod rtf_scanner;     // RTF 扫描器：识别并解析 FM 导出的 RTF 名单（基础/拓展球员/拓展职员）
 mod templates;       // 头像包标准与抽图模型（一个标准一个自包含模块 + 规则配置聚合）
 mod xml_parser;      // 读写 config.xml（FM 认的头像映射配置）
 

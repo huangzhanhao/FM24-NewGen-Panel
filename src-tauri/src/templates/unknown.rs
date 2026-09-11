@@ -3,7 +3,7 @@
 //! 抽图逻辑 = 把包内所有子/孙目录（含根）的图片归入一个大池，完全随机抽。
 //! 对外的标准号映射（Empty → 1、Unknown → 0）只在 `PackLayout::standard()` 一处。
 use super::{pick_from_pools_flat, PickedImage, PickRule};
-use crate::rtf_parser::PlayerRecord;
+use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +30,7 @@ impl PickRule for UnknownRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtf_parser::PlayerRecord;
+    use crate::rtf_scanner::PlayerRecord;
 
     fn player(uid: &str, nat: &str, code: &str) -> PlayerRecord {
         PlayerRecord {

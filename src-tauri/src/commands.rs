@@ -6,12 +6,12 @@
 //! 返回 Result<T, String> 时：Ok → 前端 Promise resolve；Err(String) → 前端 Promise reject（抛异常）。
 use crate::assets::NAT_TRANSLATION;
 use crate::face_mapper::Mode;
-use crate::facepack::{self, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
+use crate::facepack_scanner::{self, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack_scanner.rs）
 use crate::logger::{LogPage, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
 use crate::templates::{self, RuleConfig};
-use crate::rtf_parser::{PlayerRecord, RtfParser, NEWGAN_UID_PREFIX};
+use crate::rtf_scanner::{PlayerRecord, RtfParser, NEWGAN_UID_PREFIX};
 use crate::xml_parser::{self, MappingEntry};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use tauri::{AppHandle, Emitter, State}; // AppHandle=应用句柄（发事件用
 
 // 标准二的 14 目录常量保留在此 re-export（validate_image_dirs 与既有测试引用路径不变）；
 // 标准三目录清单已由 rule_config 的 standard3.json（FolderList）取代，不再有硬编码常量。
-pub use crate::facepack::FACEPACK_DIRS;
+pub use crate::facepack_scanner::FACEPACK_DIRS;
 
 /// 应用全局状态（在 lib.rs 的 setup 里用 app.manage 交给 Tauri 托管）。
 /// 【为何这样包】命令可能在不同线程被调用，后台替换也跑在单独线程；
@@ -291,7 +291,7 @@ fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
             let p = e.path();
             let fname = e.file_name().to_string_lossy().to_string();
             if p.is_dir() {
-                if !facepack::is_junk_dir(&fname) { subdirs.insert(fname); } // 跳过 __MACOSX 等
+                if !facepack_scanner::is_junk_dir(&fname) { subdirs.insert(fname); } // 跳过 __MACOSX 等
             }
             else if !fname.starts_with('.')   // 跳过 ._x.png 等隐藏文件，与 scan_pack 口径一致
                 && p.extension().and_then(|x| x.to_str())
@@ -301,7 +301,7 @@ fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
         }
     }
 
-    let layout = facepack::classify(&subdirs, has_images, &config.folder_lists());
+    let layout = facepack_scanner::classify(&subdirs, has_images, &config.folder_lists());
     let standard = layout.standard();
     let status = match layout {
         PackLayout::Flat => "complete",
@@ -356,13 +356,13 @@ fn layout_label(standard: u8, config: &RuleConfig) -> String {
 /// 「扫描头像」核心（纯函数，便于单测）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
 /// 标准号按 templates 的 FolderList 判定（用户可配置，不再硬编码）。
 fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, PackScan), String> {
-    let scan = facepack::scan_pack(img_dir)?;
+    let scan = facepack_scanner::scan_pack(img_dir)?;
     // 布局判定与 FaceMapper::from_scan 同口径（垃圾目录不参与判定）。
     let subdirs: std::collections::BTreeSet<String> = scan.faces_map.keys()
-        .filter(|n| !facepack::is_junk_dir(n))
+        .filter(|n| !facepack_scanner::is_junk_dir(n))
         .cloned()
         .collect();
-    let layout = facepack::classify(&subdirs, !scan.root_images.is_empty(), &config.folder_lists());
+    let layout = facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &config.folder_lists());
     // 平铺包图片数 = 根图数；其余（含 Unknown 的子/孙目录）= 递归全量池图片总数。
     let total = if layout.is_flat() {
         scan.root_images.len()

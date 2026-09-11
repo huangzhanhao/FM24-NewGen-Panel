@@ -3,7 +3,7 @@
 //!   <record from="种族目录/图片名" to="graphics/pictures/person/<UID>/portrait"/>
 //! 意思是「把某张图片用于某个 UID 的球员头像」。本模块负责读、写、单行替换、备份这些配置。
 use crate::assets::CONFIG_TEMPLATE;        // 复用 assets 里的 config.xml 模板
-use crate::rtf_parser::NEWGAN_UID_PREFIX;  // 复用 r- 前缀常量
+use crate::rtf_scanner::NEWGAN_UID_PREFIX;  // 复用 r- 前缀常量
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -150,7 +150,7 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
 
 /// 从用户选中的图片绝对路径反推 (相对目录路径, 图名)。平铺包（图片在 img_dir 根）→ 目录为空串；
 /// 子/孙目录图片 → 相对 img_dir 的目录路径，多级用 "/" 分隔（如 "MENA/sub"）。
-/// 词干用 file_stem，与 facepack::scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
+/// 词干用 file_stem，与 facepack_scanner::scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
 pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(String, String)> {
     let p = Path::new(image_path);
     let ext = p.extension()?.to_str()?.to_ascii_lowercase();

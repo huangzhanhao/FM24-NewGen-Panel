@@ -1,9 +1,9 @@
 //! 【新手导读】球员 → 头像映射（自旧版 core/FaceMapper.py 移植，含 0-10 种族码修正规则）。
 //! 这是整个应用的「大脑」：根据每个球员的国籍 + 种族码，算出该用头像包里哪个种族目录，
 //! 再从目录里选一张图片，最终得到一条「球员 UID → 图片」的映射。
-use crate::facepack::{self, scan_pack, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack.rs）
+use crate::facepack_scanner::{self, scan_pack, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack_scanner.rs）
 use crate::templates::{self, PickRule, RuleConfig};           // 抽图模型（一个标准一套）+ 规则配置聚合
-use crate::rtf_parser::PlayerRecord;
+use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
 use std::collections::{BTreeSet, HashMap}; // BTreeSet = 有序集合，保证行为可复现
 use std::path::Path;
@@ -33,14 +33,14 @@ impl Mode {
 /// 头像映射器：持有扫描判定的布局与对应标准的抽图模型，负责按模式编排并组装映射条目。
 pub struct FaceMapper {
     pub img_dir: String,
-    /// 布局判定结果（facepack::classify 按 templates 的 FolderList 判定）；replace_flow 据此拦截未实现标准。
+    /// 布局判定结果（facepack_scanner::classify 按 templates 的 FolderList 判定）；replace_flow 据此拦截未实现标准。
     pub layout: PackLayout,
     /// 抽图模型（标准一平铺 / 标准二种族匹配 / 标准三细分目录检索 / 退化布局递归全池），池的所有权在模型内。
     rule: Box<dyn PickRule>,
 }
 
 impl FaceMapper {
-    /// 扫描头像包并建立索引。扫描交给 facepack::scan_pack，标准判定与模型选择交给 templates。
+    /// 扫描头像包并建立索引。扫描交给 facepack_scanner::scan_pack，标准判定与模型选择交给 templates。
     pub fn new(img_dir: &str, config: &RuleConfig) -> Result<Self, String> {
         let scan = scan_pack(img_dir)?;
         Self::from_scan(img_dir, &scan, config)
@@ -52,10 +52,10 @@ impl FaceMapper {
     pub fn from_scan(img_dir: &str, scan: &PackScan, config: &RuleConfig) -> Result<Self, String> {
         // classify 输入剔除垃圾目录（__MACOSX 等不参与判定）。
         let subdirs: BTreeSet<String> = scan.faces_map.keys()
-            .filter(|n| !facepack::is_junk_dir(n))
+            .filter(|n| !facepack_scanner::is_junk_dir(n))
             .cloned()
             .collect();
-        let layout = facepack::classify(&subdirs, !scan.root_images.is_empty(), &config.folder_lists());
+        let layout = facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &config.folder_lists());
         Ok(Self {
             img_dir: img_dir.to_string(),
             layout,

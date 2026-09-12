@@ -15,21 +15,30 @@
   let result = $state<PageResult<PlayerRecord> | null>(null); // 当前页结果
   let searchTimer: ReturnType<typeof setTimeout> | undefined;  // 防抖定时器句柄
 
+  // 随机人筛选（仅拓展名单显示）：'any'=任意（默认）/ 'yes'=仅随机人 / 'no'=仅真实球员。
+  let newganFilter = $state<'any' | 'yes' | 'no'>('any');
+
+  // 是否为拓展名单：跟随最近一次「扫描RTF」的识别结果（detailed=true 即拓展球员/职员名单）。
+  const isExtRoster = $derived(appStore.lastRtfScan?.detailed ?? false);
+  // 发往后端的生效筛选：非拓展名单（下拉被隐藏）时强制按「任意」，避免旧筛选残留在请求里。
+  const newganQuery = $derived<'any' | 'yes' | 'no'>(isExtRoster ? newganFilter : 'any');
+
   // 总页数：由总数除以每页数向上取整（至少 1 页）。
   const totalPages = $derived(result ? Math.max(1, Math.ceil(result.total / PAGE_SIZE)) : 1);
 
-  /** 拉当前页数据（把页码/搜索/排序传给后端）。 */
+  /** 拉当前页数据（把页码/搜索/随机人筛选/排序传给后端）。 */
   async function load() {
     result = await api.queryPlayers({
       offset: page * PAGE_SIZE, limit: PAGE_SIZE,
       search, sortKey, sortDesc,
+      newgan: newganQuery === 'any' ? null : newganQuery === 'yes',
     });
   }
   // 参数变化自动刷新：effect 内同步读取依赖（runes 追踪），请求 300ms 防抖。
   // void page 等是“显式读取”，让 $effect 知道要追踪这些变量；任一变化就重新执行。
   // rosterVersion：「扫描RTF」成功后 +1，无需执行 Replace 即可在此预览名单。
   $effect(() => {
-    void page; void search; void sortKey; void sortDesc; void appStore.rosterVersion;
+    void page; void search; void sortKey; void sortDesc; void newganQuery; void appStore.rosterVersion;
     clearTimeout(searchTimer);            // 取消上一次未触发的请求
     searchTimer = setTimeout(load, 300);  // 300ms 后才真正请求（防抖：避免边输入边频繁请求）
     return () => clearTimeout(searchTimer); // 清理函数：依赖变化/组件销毁时取消定时器
@@ -61,6 +70,17 @@
            stroke-linecap="round" aria-hidden="true">{@html icons.search.body}</svg>
       <input type="search" placeholder={t.table.searchPlaceholder} bind:value={search} aria-label={t.table.searchPlaceholder} />
     </div>
+    <!-- 随机人筛选：仅拓展名单显示（默认「任意」）；切换后回到第 1 页再查询。 -->
+    {#if isExtRoster}
+      <label class="newgan-filter">
+        <span class="muted small">{t.table.newganFilterLabel}</span>
+        <select bind:value={newganFilter} onchange={() => (page = 0)} aria-label={t.table.newganFilterLabel}>
+          <option value="any">{t.table.newganAny}</option>
+          <option value="yes">{t.table.newganYes}</option>
+          <option value="no">{t.table.newganNo}</option>
+        </select>
+      </label>
+    {/if}
     {#if result}<span class="muted small">{t.table.recordCount(result.total)}</span>{/if}
     <span class="spacer"></span>
     <div class="pager">
@@ -133,4 +153,7 @@
 <style>
   /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（粘顶表头在其中生效） */
   .table-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 2px; }
+  /* 随机人筛选：横向排列的“标签+下拉”，下拉用紧凑尺寸（全局 select 默认 width:100%） */
+  .newgan-filter { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .newgan-filter select { width: auto; padding: 6px 26px 6px 8px; }
 </style>

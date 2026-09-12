@@ -4,12 +4,15 @@
 //! 【六种格式 = 三种列结构 × 两种数据语言】
 //!   Basic     基础名单（球员/职员通用，7 列）——导出自「is newgen」过滤视图，全员随机人；
 //!   ExtPlayer 拓展球员（≥17 列，第 17 列 = R.C.A，数字）；
-//!   ExtStaff  拓展职员（≥17 列，第 17 列 = 性别，文本）。
-//! 语言按数据行的国籍列判定：三位大写码 → English；含汉字 → 简体中文（解析后需查翻译表）。
+//!   ExtStaff  拓展职员（≥18 列，第 3 列 = 头像，第 17 列 = R.C.A，第 18 列 = 性别）。
+//! 语言按数据行的国籍列判定：含汉字 → 简体中文，否则 → English。
+//! 国籍有三种形态：三位大写码（short）、英文全名（long，如 "U.S.A."）、中文国名/截断别名；
+//! 解析后经翻译表（nat_translation.json，按语言查节点）统一归一化为三字码。
 //!
 //! 【判别不读表头】表头/分隔线/空行被「第 0 列须为 4-10 位纯数字 UID」天然排除，
 //! 只看数据行的列结构：第 1 列是 Newgen 标志 → 拓展，否则 → 基础；
-//! 拓展内部前 16 列同构，靠第 17 列「数字=球员 / 文本=职员」区分。
+//! 拓展内部球员/职员前 17 列同构，职员多第 18 列性别——第 18 列是性别词
+//! （男/女/Male/Female）即职员，否则是球员（其第 18 列起为用户自定义列）。
 //! 旧版布局（14 列详细、性别第 3 列的旧职员拓展）不是合法格式，整体判「RTF 格式不合法」。
 use crate::logger::LogSink;
 use serde::{Deserialize, Serialize};
@@ -27,9 +30,12 @@ const MISS_LOG_MAX: usize = 50; // 翻译缺失逐条记日志的上限，超出
 const NEWGEN_FLAG_VALUES: [&str; 4] = ["是", "否", "Yes", "No"];
 /// 标志含这些词 → 随机人（UID 加 r- 前缀）。
 const NEWGAN_FLAGS: [&str; 2] = ["是", "Yes"];
+/// 第 18 列性别词的合法取值（拓展职员的判别依据；英文不区分大小写）。
+const GENDER_VALUES: [&str; 4] = ["男", "女", "male", "female"];
 
 const BASIC_FIELD_COUNT: usize = 7; // 基础名单：UID/国籍/二国籍/姓名/发长/发色/种族码
-const EXT_FIELD_COUNT: usize = 17; // 拓展名单：17 个标准列（其后为用户自定义列，照单入库）
+const EXT_FIELD_COUNT: usize = 17; // 拓展球员：17 个标准列（其后为用户自定义列，照单入库）
+const EXT_STAFF_FIELD_COUNT: usize = 18; // 拓展职员：比球员多第 18 列（性别）
 
 // 数值码列的合法区间（实测口径；越界行按非法行跳过）。
 const ETHNICITY_RANGE: (u32, u32) = (0, 10);
@@ -46,10 +52,10 @@ const BASIC_HAIR_LENGTH_COL: usize = 4;
 const BASIC_HAIR_COLOR_COL: usize = 5;
 const BASIC_ETHNICITY_COL: usize = 6;
 
-// 拓展名单列下标（球员/职员共用前 16 列，第 17 列不同）。
+// 拓展名单列下标（球员/职员共用前 17 列，职员多第 18 列性别）。
 const EXT_UID_COL: usize = 0;
 const EXT_NEWGAN_FLAG_COL: usize = 1;
-const EXT_SPARE_COL: usize = 2; // 空列：恒为空（旧职员布局在此放性别 → 借此拦下旧格式）
+const EXT_AVATAR_COL: usize = 2; // 头像（FM 图片列，导出为空文本；原文照单入库）
 const EXT_NAME_COL: usize = 3;
 const EXT_NAT_COL: usize = 4;
 const EXT_SEC_NAT_COL: usize = 5;
@@ -63,7 +69,8 @@ const EXT_HAIR_LENGTH_COL: usize = 12;
 const EXT_HAIR_COLOR_COL: usize = 13;
 const EXT_CA_COL: usize = 14;
 const EXT_PA_COL: usize = 15;
-const EXT_KIND_COL: usize = 16; // 球员 = R.C.A（数字）；职员 = 性别（文本）
+const EXT_RCA_COL: usize = 16; // R.C.A（球员/职员都在第 17 列，数字）
+const EXT_GENDER_COL: usize = 17; // 性别（第 18 列，仅职员）
 
 /// RTF 名单的列结构。语言不在这里（按国籍列数据另行判定），见 `RtfScanner::language`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -73,7 +80,7 @@ pub enum RtfFormat {
     Basic,
     /// 拓展球员：… | 俱乐部 | 赛事级别 | 种族码 | 肤色 | 发长 | 发色 | CA | PA | R.C.A |。
     ExtPlayer,
-    /// 拓展职员：… | 俱乐部 | 偏好工作 | 种族码 | 肤色 | 发长 | 发色 | CA | PA | 性别 |。
+    /// 拓展职员：… | 俱乐部 | 偏好工作 | 种族码 | 肤色 | 发长 | 发色 | CA | PA | R.C.A | 性别 |。
     ExtStaff,
 }
 
@@ -97,12 +104,13 @@ impl RtfFormat {
     }
 }
 
-/// 拓展名单（球员/职员）才有的额外信息，承载第 5-17 列及用户自定义列的全部原文。
-/// 【瘦身说明】新版四种导出都没有体重（weight）与 Face 列，字段已删除。
+/// 拓展名单（球员/职员）才有的额外信息，承载第 3-18 列及用户自定义列的全部原文。
+/// 【瘦身说明】新版导出都没有体重（weight）与 Face 列，字段已删除。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailedInfo {
     pub skin_code: String,         // 肤色码（第 12 列）
+    pub avatar: String,            // 头像列原文（第 3 列；FM 图片列，导出为空文本）
     pub is_newgan: String,         // Newgen 标志原文（是/否/Yes/No）
     pub club: String,              // 俱乐部（第 9 列）
     pub age: String,               // 年龄（第 7 列）
@@ -111,9 +119,9 @@ pub struct DetailedInfo {
     pub preferred_job: String,     // 偏好工作（第 10 列，仅职员）
     pub ca: String,                // 当前能力 CA（第 15 列）
     pub pa: String,                // 潜力 PA（第 16 列）
-    pub rca: String,               // 推荐能力 R.C.A（第 17 列，仅球员）
-    pub gender: String,            // 性别（第 17 列，仅职员）
-    pub extra_fields: Vec<String>, // 第 18 列起的用户自定义列原文
+    pub rca: String,               // 推荐能力 R.C.A（第 17 列，球员/职员都有）
+    pub gender: String,            // 性别（第 18 列，仅职员）
+    pub extra_fields: Vec<String>, // 用户自定义列原文（球员第 18 列起 / 职员第 19 列起）
 }
 
 /// 一条名单记录（球员或职员）。这是整个模块输出的核心数据结构。
@@ -219,7 +227,7 @@ impl RtfScanner {
 
     /// 逐行解析整份名单（须先 detect_format 通过），返回全字段入库的记录。
     /// keep_only_newgen：仅按 UID 字段筛选——只保留带 r- 前缀（随机人）的记录。
-    /// translations：中文国籍翻译表；查不到保留原值并记警告日志。
+    /// translations：多语言国籍翻译表（语言 → 显示文本 → 三字码）；当前语言查不到的值保留原值并记警告日志。
     pub fn parse_roster(
         &self,
         path: &Path,
@@ -242,11 +250,10 @@ impl RtfScanner {
                 data.push(record);
             }
         }
-        // 非英文名单：把中文国籍翻译成三字码（查不到保留原值，按值去重记警告日志）。
-        if self.language != "English" {
-            let misses = translate_nationalities(&mut data, translations, &self.language);
-            log_translation_misses(&misses, logger);
-        }
+        // 国籍归一化：非三字码的值（中文国名/截断别名、英文全名）查当前语言的翻译节点转码，
+        // 查不到保留原值，按值去重记警告日志。
+        let misses = translate_nationalities(&mut data, translations, &self.language);
+        log_translation_misses(&misses, logger);
         Ok(data)
     }
 
@@ -301,7 +308,7 @@ fn split_row_cells(line: &str) -> Vec<String> {
 /// 单行判别树（检测与解析共用，单一真源）：
 /// ① 第 0 列必须是 4-10 位纯数字 UID（表头/分隔线/空行 → NotDataRow）；
 /// ② 第 1 列是 Newgen 标志 → 拓展路径，否则 → 基础路径；
-/// ③ 拓展路径依次校验空列锚点、列数、国籍、四个数值码，最后按第 17 列分球员/职员；
+/// ③ 拓展路径依次校验列数、国籍、四个数值码与第 17 列 R.C.A，最后按第 18 列性别词分球员/职员；
 ///    基础路径要求恰好 7 有效列（第 8 列起非空 = 旧版详细名单 → 拒）。
 fn classify_row(cells: &[String]) -> RowVerdict {
     let Some(uid) = cells.first() else {
@@ -369,15 +376,10 @@ fn classify_basic_row(cells: &[String]) -> RowVerdict {
     RowVerdict::Data(RtfFormat::Basic)
 }
 
-/// 拓展名单（≥17 列）判别：空列锚点、列数、国籍、四个数值码，最后按第 17 列分球员/职员。
+/// 拓展名单判别：列数、国籍、四个数值码、第 17 列 R.C.A，最后按第 18 列性别词分球员/职员。
+/// 【为何没有第 3 列锚点】职员第 3 列是头像（FM 图片列，导出为空文本），不作判别依据；
+/// 旧职员布局（性别第 3 列）的第 10 列是偏好工作文本，会被「种族码」数值校验自然拦下。
 fn classify_ext_row(cells: &[String]) -> RowVerdict {
-    // 空列锚点：新拓展布局第 3 列恒为空；旧职员布局在此放性别 → 借此拦下旧格式。
-    if cells.get(EXT_SPARE_COL).map_or(true, |c| !c.is_empty()) {
-        return RowVerdict::Rejected {
-            field: "第 3 列",
-            detail: "应为空列（可能是旧版导出布局，请用新视图重新导出）".into(),
-        };
-    }
     if cells.len() < EXT_FIELD_COUNT {
         return RowVerdict::Rejected {
             field: "列数",
@@ -406,18 +408,20 @@ fn classify_ext_row(cells: &[String]) -> RowVerdict {
     if let Some(v) = invalid_code(cells, EXT_HAIR_COLOR_COL, "头发颜色码", HAIR_COLOR_RANGE) {
         return v;
     }
-    // 第 17 列是拓展球员/职员唯一的结构差异：R.C.A 为数字，性别为文本。
-    let kind = cells[EXT_KIND_COL].as_str();
-    if kind.is_empty() {
+    // 第 17 列 R.C.A：球员/职员都是数字（结构锚点，不做区间校验）。
+    let rca = cells[EXT_RCA_COL].as_str();
+    if rca.is_empty() || !rca.bytes().all(|b| b.is_ascii_digit()) {
         return RowVerdict::Rejected {
             field: "第 17 列",
-            detail: "R.C.A/性别列不应为空".into(),
+            detail: format!("R.C.A 应为数字，实际「{rca}」"),
         };
     }
-    if kind.bytes().all(|b| b.is_ascii_digit()) {
-        RowVerdict::Data(RtfFormat::ExtPlayer)
-    } else {
+    // 第 18 列是拓展球员/职员唯一的结构差异：职员在此放性别词，
+    // 球员的第 18 列起是用户自定义列（性别词精确匹配，避免普通自定义文本被误判成职员）。
+    if cells.len() >= EXT_STAFF_FIELD_COUNT && is_gender_value(&cells[EXT_GENDER_COL]) {
         RowVerdict::Data(RtfFormat::ExtStaff)
+    } else {
+        RowVerdict::Data(RtfFormat::ExtPlayer)
     }
 }
 
@@ -435,7 +439,7 @@ fn invalid_nationality(
     Some(RowVerdict::Rejected {
         field,
         detail: format!(
-            "第 {} 列应为三位大写国籍码或中文国名，实际「{value}」",
+            "第 {} 列应为三位大写国籍码、国籍英文名或中文国名，实际「{value}」",
             col + 1
         ),
     })
@@ -485,18 +489,34 @@ fn is_three_letter_code(nat: &str) -> bool {
     nat.len() == 3 && nat.bytes().all(|b| b.is_ascii_uppercase())
 }
 
-/// 国籍形态校验：三位大写码或含汉字（纯形态，不查翻译表——
-/// 截断中文名、未收录码都能通过；翻译查不到时保留原值并记警告日志）。
+/// 国籍英文全名（long 格式）：以字母开头、至少 2 个字符、不含数字，
+/// 可含空格与 & . - ' ( ) 等连接符及变音字母（如 "U.S.A."、"Türkiye"、"Hong Kong (China PR)"）。
+/// 【为何宽松】只做形态判定不查表：查不到的值走「保留原值 + 警告」兜底，不拒行。
+fn is_long_form_name(nat: &str) -> bool {
+    nat.chars().next().is_some_and(|c| c.is_alphabetic())
+        && nat.chars().count() >= 2
+        && nat.chars().all(|c| {
+            c.is_alphabetic() || matches!(c, ' ' | '&' | '.' | '-' | '\'' | '’' | '(' | ')')
+        })
+}
+
+/// 国籍形态校验：三位大写码、英文全名或含汉字（纯形态，不查翻译表——
+/// 截断中文名、未收录全名都能通过；翻译查不到时保留原值并记警告日志）。
 fn is_valid_nationality(nat: &str, allow_empty: bool) -> bool {
     if nat.is_empty() {
         return allow_empty;
     }
-    is_three_letter_code(nat) || contains_cjk(nat)
+    is_three_letter_code(nat) || contains_cjk(nat) || is_long_form_name(nat)
 }
 
 /// Newgen 标志是否为随机人：含 是/Yes → 是（正向判定，UID 加 r- 前缀）。
 fn is_newgan(flag: &str) -> bool {
     NEWGAN_FLAGS.iter().any(|f| flag.contains(f))
+}
+
+/// 第 18 列是否为性别词（拓展职员判别；英文不区分大小写）。
+fn is_gender_value(value: &str) -> bool {
+    GENDER_VALUES.contains(&value.to_ascii_lowercase().as_str())
 }
 
 // ---------------- 行解析（classify 通过后取列组装，不再重复校验） ----------------
@@ -515,7 +535,7 @@ fn parse_basic_row(cells: &[String]) -> PlayerRecord {
     }
 }
 
-/// 拓展名单行（球员/职员前 16 列同构，仅第 10/17 列语义不同），全字段入库。
+/// 拓展名单行（球员/职员前 17 列同构，仅第 10/18 列语义不同），全字段入库。
 fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
     let is_player = format == RtfFormat::ExtPlayer;
     // 随机人正向判定：标志含 是/Yes → 加 r- 前缀；否/No → 保留裸 UID。
@@ -535,6 +555,7 @@ fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
         ethnicity_code: cells[EXT_ETHNICITY_COL].clone(),
         detailed: Some(DetailedInfo {
             skin_code: cells[EXT_SKIN_COL].clone(),
+            avatar: cells[EXT_AVATAR_COL].clone(),
             is_newgan: flag.to_string(),
             club: cells[EXT_CLUB_COL].clone(),
             age: cells[EXT_AGE_COL].clone(),
@@ -551,24 +572,26 @@ fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
             },
             ca: cells[EXT_CA_COL].clone(),
             pa: cells[EXT_PA_COL].clone(),
-            rca: if is_player {
-                cells[EXT_KIND_COL].clone()
-            } else {
-                String::new()
-            },
+            rca: cells[EXT_RCA_COL].clone(),
             gender: if is_player {
                 String::new()
             } else {
-                cells[EXT_KIND_COL].clone()
+                cells[EXT_GENDER_COL].clone()
             },
-            extra_fields: cells[EXT_FIELD_COUNT..].to_vec(),
+            // 用户自定义列：球员从第 18 列起，职员从第 19 列起。
+            extra_fields: if is_player {
+                cells[EXT_FIELD_COUNT..].to_vec()
+            } else {
+                cells[EXT_STAFF_FIELD_COUNT..].to_vec()
+            },
         }),
     }
 }
 
 // ---------------- 国籍翻译 ----------------
 
-/// 中文国籍 → 三字码（就地改写）。查不到保留原值，返回缺失值与出现次数（按行数降序）。
+/// 国籍显示文本 → 三字码（就地改写）。三字码（short 格式）已是目标形态直接跳过；
+/// 查不到保留原值，返回缺失值与出现次数（按行数降序）。
 fn translate_nationalities(
     data: &mut [PlayerRecord],
     translations: &HashMap<String, HashMap<String, String>>,
@@ -578,9 +601,9 @@ fn translate_nationalities(
     let map = translations.get(language).unwrap_or(&empty);
     let mut misses: HashMap<String, usize> = HashMap::new();
     for record in data.iter_mut() {
-        // 主国籍与第二国籍分别查表；第二国籍为空跳过。
+        // 主国籍与第二国籍分别查表；空值与三字码跳过。
         for nat in [&mut record.primary_nat, &mut record.sec_nat] {
-            if nat.is_empty() {
+            if nat.is_empty() || is_three_letter_code(nat) {
                 continue;
             }
             match map.get(nat.as_str()) {
@@ -666,16 +689,16 @@ mod tests {
 | 103607     | Yes    |     | James Henry   | ENG | SCO     | 35  | 185 cm | Shrewsbury | England (Sky Bet League One)     | 0   | 4   | 1   | 7   | 79 | 122 | 78    |
 ";
 
-    /// 拓展职员（新布局）：第 17 列性别为文本，第 10 列为偏好工作。
+    /// 拓展职员（新布局，18 列）：第 3 列头像（FM 图片列导出为空）、第 17 列 R.C.A、第 18 列性别。
     const EXT_STAFF_CN_SAMPLE: &str = "\
-| 编号        | Newgen |     | 姓名   | 国籍/地区籍 | 第二国籍/地区籍 | 年龄 | 身高    | 俱乐部    | 偏好工作  |     |     |     |     | 能力 | 潜力 | 性别 |
-| 2002243829 | 是     |     | 王晨   | 中国        |                | 62   | 182厘米 |           | 足球总监  | 10  | 8   | 1   | 16  | 144  | 199  | 男   |
-| 306951      | 否     |     | 库卡   | 巴西        |                | 68   | 182厘米 | 梅州客家  | 足球总监  | 0   | 8   | 1   | 11  | 142  | 160  | 男   |
+| 编号        | Newgen | 头像 | 姓名   | 国籍/地区籍 | 第二国籍/地区籍 | 年龄 | 身高    | 俱乐部    | 偏好工作  |     |     |     |     | 能力 | 潜力 | R.C.A | 性别 |
+| 2002243829 | 是     |      | 王晨   | 中国        |                | 62   | 182厘米 |           | 足球总监  | 10  | 8   | 1   | 16  | 144  | 199  | 140   | 男   |
+| 306951      | 否     |      | 库卡   | 巴西        |                | 68   | 182厘米 | 梅州客家  | 足球总监  | 0   | 8   | 1   | 11  | 142  | 160  | 138   | 男   |
 ";
 
     const EXT_STAFF_EN_SAMPLE: &str = "\
-| UID      | Newgen |     | Name      | Nat | 2nd Nat | Age | Height | Club | Preferred Job       |     |     |     |     | CA  | PA  | Gender |
-| 67214325 | No     |     | 亚由美    | KOR | ENG     | 26  | 167 cm |      | Performance Analyst | 10  | 8   | 1   | 16  | 200 | 200 | Female |
+| UID      | Newgen | Avatar | Name      | Nat | 2nd Nat | Age | Height | Club | Preferred Job       |     |     |     |     | CA  | PA  | R.C.A | Gender |
+| 67214325 | No     |        | 亚由美    | KOR | ENG     | 26  | 167 cm |      | Performance Analyst | 10  | 8   | 1   | 16  | 200 | 200 | 195   | Female |
 ";
 
     #[test]
@@ -770,6 +793,36 @@ mod tests {
     }
 
     #[test]
+    fn translate_miss_keeps_value_and_logs_warning() {
+        // 翻译表查不到的中文值（截断别名、未收录国名都会走这条路）→ 保留原值不丢行，并记 WARNING 日志。
+        // 「北马其」这类实测截断别名已陆续收录，这里用表里必然没有的虚构国名验证缺失路径。
+        let sample = "\
+| 编号      | 国籍/地区籍 | 第二国籍 | 姓名        |    |    |   |
+| 2002075172| 西兰公国   | 美国     | 扎克·布劳顿 | 3  | 9  | 0 |
+";
+        let path = write_rtf(sample);
+        let mut s = RtfScanner::new();
+        s.detect_format(&path).unwrap();
+        let logger = ChannelLogger::channel();
+        let data = s
+            .parse_roster(&path, false, &NAT_TRANSLATION, &logger.0)
+            .unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].primary_nat, "西兰公国"); // 缺失保留原值
+        assert_eq!(data[0].sec_nat, "USA"); // 命中的第二国籍正常翻译
+        let warns = warn_messages(&logger.1);
+        assert!(
+            warns
+                .iter()
+                .any(|m| m.contains("西兰公国") && m.contains("保留原值")),
+            "应有翻译缺失警告：{:?}",
+            warns.first()
+        );
+        // 命中的国籍不产生警告。
+        assert!(!warns.iter().any(|m| m.contains("美国")));
+    }
+
+    #[test]
     fn ext_player_detect_parse_and_full_fields() {
         let path = write_rtf(EXT_PLAYER_SAMPLE);
         let mut s = RtfScanner::new();
@@ -798,6 +851,7 @@ mod tests {
         assert_eq!(first.ethnicity_code, "0"); // 种族码在第 11 列
         let d = first.detailed.as_ref().unwrap();
         assert_eq!(d.skin_code, "5"); // 肤色在第 12 列
+        assert_eq!(d.avatar, ""); // 头像列（第 3 列）为空
         assert_eq!(d.is_newgan, "No");
         assert_eq!(d.club, "Poeševo"); // 第 9 列
         assert_eq!(d.age, "54");
@@ -833,17 +887,26 @@ mod tests {
 
     #[test]
     fn ext_kind_column_discriminates() {
-        // 同一行第 17 列为数字 → 球员；男/Male 等文本 → 职员。
+        // 前 17 列同构（第 17 列 R.C.A 均为数字）；第 18 列性别词 → 职员，否则球员。
         let base = "| 12315 | No | | X | MKD | | 54 | 188 cm | C | B | 0 | 5 | 1 | 12 | 27 | 122 |";
         let mut s = RtfScanner::new();
         s.detect_format(&write_rtf(&format!("{base} 27 |\n")))
-            .unwrap();
+            .unwrap(); // 17 列整
         assert_eq!(s.format, RtfFormat::ExtPlayer);
         let mut s = RtfScanner::new();
-        s.detect_format(&write_rtf(&format!("{base} 男 |\n")))
+        s.detect_format(&write_rtf(&format!("{base} 27 | 男 |\n")))
             .unwrap();
         assert_eq!(s.format, RtfFormat::ExtStaff);
-        // 第 17 列为空 → 整份不合法（无任何命中行）。
+        let mut s = RtfScanner::new();
+        s.detect_format(&write_rtf(&format!("{base} 27 | Female |\n")))
+            .unwrap();
+        assert_eq!(s.format, RtfFormat::ExtStaff);
+        // 第 18 列是球员的用户自定义列（非性别词）→ 仍是球员。
+        let mut s = RtfScanner::new();
+        s.detect_format(&write_rtf(&format!("{base} 27 | 惯用脚 |\n")))
+            .unwrap();
+        assert_eq!(s.format, RtfFormat::ExtPlayer);
+        // 第 17 列 R.C.A 为空 → 非法行定位到「第 17 列」。
         let err = RtfScanner::new()
             .detect_format(&write_rtf(&format!("{base}  |\n")))
             .unwrap_err();
@@ -872,11 +935,12 @@ mod tests {
         let d = data[0].detailed.as_ref().unwrap();
         assert_eq!(d.preferred_job, "足球总监"); // 偏好工作仅职员
         assert_eq!(d.based, "");
-        assert_eq!(d.gender, "男");
+        assert_eq!(d.gender, "男"); // 第 18 列
         assert_eq!(d.ca, "144");
         assert_eq!(d.pa, "199");
-        assert_eq!(d.rca, "");
-        // 英文职员：国籍列是三字码 → English；性别 Male/Female 入库。
+        assert_eq!(d.rca, "140"); // R.C.A 第 17 列，职员也有
+        assert_eq!(d.avatar, ""); // 头像列（第 3 列）为空
+                                  // 英文职员：国籍列是三字码 → English；性别 Male/Female 入库。
         let path = write_rtf(EXT_STAFF_EN_SAMPLE);
         let mut s = RtfScanner::new();
         s.detect_format(&path).unwrap();
@@ -888,13 +952,38 @@ mod tests {
             .unwrap();
         let d = data[0].detailed.as_ref().unwrap();
         assert_eq!(d.gender, "Female");
+        assert_eq!(d.rca, "195");
         assert_eq!(d.preferred_job, "Performance Analyst");
         assert_eq!(d.club, "");
     }
 
     #[test]
+    fn ext_staff_avatar_and_extras_stored() {
+        // 职员头像列有内容时原文入库；职员自定义列从第 19 列起。
+        let sample = "\
+| 306951 | 否 | face_kuka | 库卡 | 巴西 | | 68 | 182厘米 | 梅州客家 | 足球总监 | 0 | 8 | 1 | 11 | 142 | 160 | 138 | 男 | 合同年 | 2027 |
+";
+        let path = write_rtf(sample);
+        let mut s = RtfScanner::new();
+        s.detect_format(&path).unwrap();
+        assert_eq!(s.format, RtfFormat::ExtStaff);
+        let logger = ChannelLogger::channel().0;
+        let data = s
+            .parse_roster(&path, false, &HashMap::new(), &logger)
+            .unwrap();
+        let d = data[0].detailed.as_ref().unwrap();
+        assert_eq!(d.avatar, "face_kuka");
+        assert_eq!(d.gender, "男");
+        assert_eq!(
+            d.extra_fields,
+            vec!["合同年".to_string(), "2027".to_string()]
+        );
+    }
+
+    #[test]
     fn legacy_staff_layout_rejected() {
-        // 旧职员拓展布局（性别在第 3 列、姓名在第 5 列）→ 整份判不合法。
+        // 旧职员拓展布局（性别在第 3 列、姓名在第 5 列、无 R.C.A）→ 整份判不合法：
+        // 其第 11 列是偏好工作文本，被「种族码」数值校验拦下。
         let sample = "\
 | 67214325   | 否 | 女 |  | 亚由美 | KOR | ENG | 26 | 167厘米 |  | 表现分析师 | 10 | 8 | 1 | 16 | 200 | 200 |
 ";
@@ -902,7 +991,7 @@ mod tests {
             .detect_format(&write_rtf(sample))
             .unwrap_err();
         assert!(
-            err.contains("RTF 格式不合法") && err.contains("第 3 列"),
+            err.contains("RTF 格式不合法") && err.contains("种族码"),
             "{err}"
         );
     }
@@ -935,22 +1024,33 @@ mod tests {
 
     #[test]
     fn nationality_form_checks() {
-        // 三位大写码 / 含汉字 → 合法；两位码 / 纯数字 → 不合法。
+        // 三位大写码 / 含汉字 / 英文全名 → 合法；单字母 / 纯数字 → 不合法。
+        // 英文全名查翻译表命中 → 转码；未收录（如第二国籍列的海外华侨 'SC'）→ 保留原值 + 警告。
         let sample = "\
 | 2000472008| SGP |         | Ok Code Nat    | 1 | 12 | 0 |
 | 2000472009| 北马其 |        | Ok Cjk Nat     | 1 | 12 | 0 |
+| 2000472010| SC  |        | Ok Long Nat    | 1 | 12 | 0 |
 ";
         let path = write_rtf(sample);
         let mut s = RtfScanner::new();
         s.detect_format(&path).unwrap();
-        let logger = ChannelLogger::channel().0;
+        let logger = ChannelLogger::channel();
         let data = s
-            .parse_roster(&path, false, &HashMap::new(), &logger)
+            .parse_roster(&path, false, &NAT_TRANSLATION, &logger.0)
             .unwrap();
-        assert_eq!(data.len(), 2);
-        // 两位码 / 纯数字国籍 → 整份不合法并定位到「国籍」。
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[2].primary_nat, "SC"); // 未收录全名保留原值
+        let warns = warn_messages(&logger.1);
+        assert!(
+            warns
+                .iter()
+                .any(|m| m.contains("SC") && m.contains("保留原值")),
+            "应有翻译缺失警告：{:?}",
+            warns.first()
+        );
+        // 单字母 / 纯数字国籍 → 整份不合法并定位到「国籍」。
         for bad in [
-            "| 2000472008| SC | | X | 1 | 12 | 0 |\n",
+            "| 2000472008| A | | X | 1 | 12 | 0 |\n",
             "| 2000472008| 123 | | X | 1 | 12 | 0 |\n",
         ] {
             let err = RtfScanner::new()
@@ -958,6 +1058,31 @@ mod tests {
                 .unwrap_err();
             assert!(err.contains("国籍"), "{err}");
         }
+    }
+
+    #[test]
+    fn long_form_nationality_translated() {
+        // 英文全名（long 格式）名单：语言判 English，解析后经 English 节点归一化为三字码。
+        let sample = "\
+| UID       | Nat                  | 2nd Nat              | Name           |    |    |   |
+| 7458500   | Argentina            | U.S.A.               | Lionel Messi   | 1  | 11 | 1 |
+| 29179241  | Norway               | Bosnia & Herzegovina | Erling Haaland | 1  | 7  | 0 |
+| 2000197505| Hong Kong (China PR) | Nigeria              | Chan Tai Man   | 1  | 7  | 0 |
+";
+        let path = write_rtf(sample);
+        let mut s = RtfScanner::new();
+        s.detect_format(&path).unwrap();
+        assert_eq!(s.language, "English");
+        let logger = ChannelLogger::channel();
+        let data = s
+            .parse_roster(&path, true, &NAT_TRANSLATION, &logger.0)
+            .unwrap();
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0].primary_nat, "ARG");
+        assert_eq!(data[0].sec_nat, "USA"); // U.S.A. → USA
+        assert_eq!(data[1].sec_nat, "BIH"); // Bosnia & Herzegovina → BIH
+        assert_eq!(data[2].primary_nat, "HKG"); // FM26 带后缀显示名 → HKG
+        assert!(warn_messages(&logger.1).is_empty()); // 全部命中，无警告
     }
 
     #[test]
@@ -1003,16 +1128,12 @@ mod tests {
                 .parse_roster(&f, false, &NAT_TRANSLATION, &logger.0)
                 .unwrap();
             assert_eq!(data.len(), 84_617);
-            // 英格兰 → ENG 已翻译；截断名（北马其）保留原值并记警告日志。
+            // 英格兰 → ENG、北马其顿 → MKD 均已翻译（新版导出国籍为全名，全部命中翻译表）。
             assert!(data.iter().any(|r| r.primary_nat == "ENG"));
             assert!(data.iter().all(|r| r.primary_nat != "英格兰"));
-            assert!(data.iter().any(|r| r.primary_nat == "北马其"));
-            let warns = warn_messages(&logger.1);
-            assert!(
-                warns.iter().any(|m| m.contains("北马其")),
-                "应有翻译缺失警告：{:?}",
-                warns.first()
-            );
+            assert!(data.iter().any(|r| r.primary_nat == "MKD"));
+            assert!(data.iter().all(|r| r.primary_nat != "北马其顿"));
+            // 截断名/缺失码的警告日志路径由合成样本 translate_miss_logs_warning 覆盖。
         }
         if let Some(f) = real_rtf("staff_274.rtf") {
             s.detect_format(&f).unwrap();
@@ -1026,6 +1147,51 @@ mod tests {
                 .unwrap();
             assert_eq!(data.len(), 274); // 基础职员名单（与球员同构），含 270 行 10 位 UID
             assert!(data.iter().all(|r| r.uid.starts_with(NEWGAN_UID_PREFIX)));
+        }
+        // 181855 双格式名单：同一批数据的 short（三字码）与 long（英文全名）导出。
+        if let Some(f) = real_rtf("players_181855short.rtf") {
+            s.detect_format(&f).unwrap();
+            assert_eq!(
+                (s.format, s.language.as_str()),
+                (RtfFormat::Basic, "English")
+            );
+            let logger = ChannelLogger::channel();
+            let data = s
+                .parse_roster(&f, false, &NAT_TRANSLATION, &logger.0)
+                .unwrap();
+            assert_eq!(data.len(), 181_855);
+            // short 格式国籍列全是三字码，直接入库（第二国籍含新版新加坡码 SGP）。
+            assert!(data.iter().any(|r| r.primary_nat == "ARG"));
+            assert!(data.iter().any(|r| r.sec_nat == "SGP"));
+            // 唯一非码值是第二国籍列的海外华侨 'SC'（未收录，保留原值 + 警告）。
+            let warns = warn_messages(&logger.1);
+            assert_eq!(warns.len(), 1, "{warns:?}");
+            assert!(warns[0].contains("SC") && warns[0].contains("保留原值"));
+        }
+        if let Some(f) = real_rtf("players_181855long.rtf") {
+            s.detect_format(&f).unwrap();
+            assert_eq!(
+                (s.format, s.language.as_str()),
+                (RtfFormat::Basic, "English")
+            );
+            let logger = ChannelLogger::channel();
+            let data = s
+                .parse_roster(&f, false, &NAT_TRANSLATION, &logger.0)
+                .unwrap();
+            assert_eq!(data.len(), 181_855);
+            // long 格式的英文全名全部经 English 节点归一化为三字码（码形态值原样保留）。
+            assert!(data.iter().any(|r| r.primary_nat == "ARG"));
+            assert!(data.iter().all(|r| r.primary_nat != "Argentina"));
+            assert!(
+                data.iter().any(|r| r.primary_nat == "USA")
+                    && data.iter().all(|r| r.primary_nat != "U.S.A.")
+            );
+            assert!(data.iter().any(|r| r.sec_nat == "SGP"));
+            // 海外华侨在 long 版显示全名 SEA Chinese（已收录 → 'SC'），新版不再出现裸 'SC' 短形态。
+            assert!(data.iter().any(|r| r.sec_nat == "SC"));
+            // 新版导出的全部显示值（含 "Hong Kong (China PR)" 等带后缀全名）都已命中翻译表，零警告。
+            let warns = warn_messages(&logger.1);
+            assert!(warns.is_empty(), "{warns:?}");
         }
     }
 
@@ -1087,7 +1253,7 @@ mod tests {
                 .parse_roster(&f, false, &NAT_TRANSLATION, &logger.0)
                 .unwrap();
             assert!(data.iter().any(|r| r.primary_nat == "ENG"));
-            assert!(data.iter().any(|r| r.primary_nat == "北马其")); // 截断名保留原值
+            assert!(data.iter().any(|r| r.primary_nat == "MKD")); // 北马其顿已翻译（新版导出为全名）
         }
     }
 

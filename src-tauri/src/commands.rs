@@ -120,6 +120,7 @@ pub struct PlayerQuery {
     pub search: String,
     pub sort_key: String,
     pub sort_desc: bool,
+    pub newgan: Option<bool>, // 随机人筛选：None=任意 / Some(true)=仅随机人 / Some(false)=仅真实球员
 }
 
 /// 通用分页结果（<T> 是泛型，可装任何类型的条目）。
@@ -604,8 +605,13 @@ pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerP
 /// 【为何分页】名单可能上万条，一次全传会卡顿，所以只传当前页（前端每页 200 条）。
 #[tauri::command]
 pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResult<PlayerRecord> {
-    // 先把缓存整体 clone 出来（避免长时间持锁），再做搜索/排序/分页。
-    let mut rows = state.rtf_cache.lock().unwrap().clone();
+    // 先把缓存整体 clone 出来（避免长时间持锁），再交给纯逻辑做筛选/排序/分页。
+    let rows = state.rtf_cache.lock().unwrap().clone();
+    query_players_core(rows, &query)
+}
+
+/// 搜索/随机人筛选/排序/分页的纯逻辑（不碰后端状态，便于单测）。
+fn query_players_core(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageResult<PlayerRecord> {
     let search = query.search.to_lowercase();
     if !search.is_empty() {
         // retain 保留满足条件的项：UID/姓名/国籍 任一包含搜索词即命中。
@@ -614,6 +620,10 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
                 || r.name.to_lowercase().contains(&search)
                 || r.primary_nat.to_lowercase().contains(&search)
         });
+    }
+    // 随机人筛选按 r- 前缀判定：与解析时的加前缀规则、扫描摘要的计数同一口径。
+    if let Some(want) = query.newgan {
+        rows.retain(|r| r.uid.starts_with(NEWGAN_UID_PREFIX) == want);
     }
     // 按前端指定的列排序；sort_desc 为 true 时反转。
     rows.sort_by(|a, b| {
@@ -926,6 +936,32 @@ mod tests {
         std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
         let err = scan_rtf_core(bad.to_str().unwrap(), &logger).err().unwrap();
         assert!(err.contains("RTF 格式不合法"), "{err}");
+    }
+
+    #[test]
+    fn query_players_core_filters_newgan() {
+        // 随机人筛选按 r- 前缀判定：None=全量，Some(true)=仅随机人，Some(false)=仅真实球员。
+        let mk = |uid: &str, name: &str| PlayerRecord {
+            uid: uid.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        let rows = vec![mk("r-100001", "随机人甲"), mk("2000472008", "真实球员乙")];
+        let q = |newgan: Option<bool>| PlayerQuery {
+            offset: 0,
+            limit: 200,
+            search: String::new(),
+            sort_key: "uid".into(),
+            sort_desc: false,
+            newgan,
+        };
+        assert_eq!(query_players_core(rows.clone(), &q(None)).total, 2);
+        let yes = query_players_core(rows.clone(), &q(Some(true)));
+        assert_eq!(yes.total, 1);
+        assert_eq!(yes.items[0].uid, "r-100001");
+        let no = query_players_core(rows, &q(Some(false)));
+        assert_eq!(no.total, 1);
+        assert_eq!(no.items[0].name, "真实球员乙");
     }
 
     #[test]

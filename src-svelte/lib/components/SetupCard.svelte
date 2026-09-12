@@ -77,10 +77,10 @@
     try { await api.scanImages(); } catch (e) { await showError(e); }
   }
 
-  /** 扫描RTF：解析当前 RTF 并填充名单预览缓存；rosterVersion++ 触发名单预览刷新。 */
+  /** 扫描RTF：解析当前 RTF 并填充名单预览缓存；摘要存入全局态（预览页据此显示随机人筛选），rosterVersion++ 触发名单预览刷新。 */
   async function scanRtf() {
     if (!snap?.currentRtf) return;
-    try { await api.scanRtf(); appStore.rosterVersion++; } catch (e) { await showError(e); }
+    try { appStore.lastRtfScan = await api.scanRtf(); appStore.rosterVersion++; } catch (e) { await showError(e); }
   }
 
   /** 一键创建缺失目录（先弹确认框）；创建成功后重新检查，拿最新结论。 */

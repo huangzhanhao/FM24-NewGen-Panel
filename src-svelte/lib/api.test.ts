@@ -17,9 +17,9 @@ describe('api 封装', () => {
 
   it('queryPlayers 序列化 query 参数', async () => {
     invoke.mockResolvedValue({ total: 0, items: [] });
-    await api.queryPlayers({ offset: 0, limit: 200, search: 'x', sortKey: 'uid', sortDesc: false });
+    await api.queryPlayers({ offset: 0, limit: 200, search: 'x', sortKey: 'uid', sortDesc: false, newgan: null });
     expect(invoke).toHaveBeenCalledWith('query_players', {
-      query: { offset: 0, limit: 200, search: 'x', sortKey: 'uid', sortDesc: false },
+      query: { offset: 0, limit: 200, search: 'x', sortKey: 'uid', sortDesc: false, newgan: null },
     });
   });
 });

@@ -171,6 +171,11 @@ export const t = {
     colAge: '年龄',
     colHeight: '身高',
     colNewgan: '随机人',
+    /** 随机人筛选（仅拓展名单显示）：标签 + 三个选项的文案。 */
+    newganFilterLabel: '随机人',
+    newganAny: '任意',
+    newganYes: '是',
+    newganNo: '否',
     emptyHint: '执行「替换头像」或「扫描RTF」后可在此预览名单（最近一次解析结果）。',
   },
 

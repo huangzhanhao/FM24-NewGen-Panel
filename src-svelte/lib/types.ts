@@ -2,16 +2,16 @@
 // 这里的每个接口都对应 Rust commands.rs 里的一个结构体（字段名用驼峰，与 Rust 的 camelCase 序列化一致）。
 // interface 只在编译期做类型检查，不会产生运行时代码；作用是让编辑器和编译器帮你提前发现字段名写错。
 
-/// 拓展名单才有的额外信息（对应 Rust 的 DetailedInfo），承载第 5-17 列及用户自定义列全部原文。
+/// 拓展名单才有的额外信息（对应 Rust 的 DetailedInfo），承载第 3-18 列及用户自定义列全部原文。
 export interface DetailedInfo {
-  skinCode: string; isNewgan: string; club: string;
+  skinCode: string; avatar: string; isNewgan: string; club: string;
   age: string; height: string;
   based: string;        // 俱乐部赛事级别/所在地（仅拓展球员）
   preferredJob: string; // 偏好工作（仅拓展职员）
   ca: string; pa: string;
-  rca: string;          // 推荐能力 R.C.A（仅拓展球员）
-  gender: string;       // 性别（仅拓展职员）
-  extraFields: string[]; // 第 18 列起的用户自定义列原文
+  rca: string;          // 推荐能力 R.C.A（第 17 列，球员/职员都有）
+  gender: string;       // 性别（第 18 列，仅拓展职员）
+  extraFields: string[]; // 标准列之后的用户自定义列原文（球员第 18 列起 / 职员第 19 列起）
 }
 
 /// 一个球员（对应 Rust 的 PlayerRecord）。detailed? 的 ? 表示可选（可能为 undefined）。
@@ -63,9 +63,10 @@ export interface ReplaceArgs {
   filterNewgan: boolean; allowDuplicates: boolean; saveBackup: boolean;
 }
 
-/// 名单分页查询参数（对应 Rust 的 PlayerQuery）。
+/// 名单分页查询参数（对应 Rust 的 PlayerQuery）。newgan: 随机人筛选（null=任意，true=仅随机人，false=仅真实球员）。
 export interface PlayerQuery {
   offset: number; limit: number; search: string; sortKey: string; sortDesc: boolean;
+  newgan: boolean | null;
 }
 
 /// 通用分页结果（对应 Rust 的 PageResult<T>）。<T> 是泛型，使用时传入具体条目类型。

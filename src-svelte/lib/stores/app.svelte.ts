@@ -2,7 +2,7 @@
 // listen 用于订阅 Tauri 后端 emit 发出的事件（与命令 invoke 不同：事件是后端主动推送）。
 import { listen } from '@tauri-apps/api/event';
 import { api } from '../api';
-import type { AppSnapshot, ProgressPayload } from '../types';
+import type { AppSnapshot, ProgressPayload, RtfScanResult } from '../types';
 import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 
 /** 全局应用状态（runes）。snapshot 由命令返回值整体替换。 */
@@ -17,6 +17,8 @@ export const appStore = $state({
   progress: { status: '', value: 0 },   // 当前替换进度（状态文字 + 百分比）
   lastResult: '' as 'finished' | 'cancelled' | 'failed' | '', // 最近一次替换结果
   rosterVersion: 0,                     // 名单预览版本号：「扫描RTF」成功后 +1，触发 PlayersTable 重载
+  /** 最近一次「扫描RTF」的摘要（null=尚未扫描过）。名单预览据此判断名单是否为拓展格式。 */
+  lastRtfScan: null as RtfScanResult | null,
 });
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */

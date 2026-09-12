@@ -39,6 +39,7 @@ venv/
 .design-qa/
 .zcode/
 .idea/
+scripts_dev/
 *.iml
 *.sublime-project
 *.sublime-workspace

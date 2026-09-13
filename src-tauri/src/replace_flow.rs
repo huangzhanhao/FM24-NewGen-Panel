@@ -101,7 +101,7 @@ fn parse_stage(
 ) -> Result<Vec<PlayerRecord>, RunResult> {
     progress("识别 RTF 格式…", 0);
     let mut scanner = RtfScanner::new();
-    if let Err(e) = scanner.detect_format(Path::new(&params.rtf_path)) {
+    if let Err(e) = scanner.detect_format(Path::new(&params.rtf_path), logger) {
         return Err(failed(&e));
     }
     if is_cancelled(cancel) {

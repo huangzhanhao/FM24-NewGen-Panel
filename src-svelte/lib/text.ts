@@ -171,6 +171,7 @@ export const t = {
     colAge: '年龄',
     colHeight: '身高',
     colNewgan: '随机人',
+    colGender: '性别',
     /** 随机人筛选（仅拓展名单显示）：标签 + 三个选项的文案。 */
     newganFilterLabel: '随机人',
     newganAny: '任意',

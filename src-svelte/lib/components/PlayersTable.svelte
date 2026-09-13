@@ -53,6 +53,8 @@
 
   // 是否含详细信息：当前页任一条有 detailed 就额外渲染那几列（适配基础/详细两种名单）。
   const hasDetailed = $derived(!!result?.items.some((r) => r.detailed));
+  // 性别列：仅当当前页有记录带性别（拓展职员/新版拓展球员）才渲染，旧版 17 列名单不占位。
+  const hasGender = $derived(!!result?.items.some((r) => r.detailed?.gender));
 
   /** 随机人列的标签配色：中文名单值为「是/否」，英文名单兼容 Yes/No；其余值原样显示不着色。 */
   function newganCls(v: string) {
@@ -111,9 +113,10 @@
             <th>{t.table.colHair}</th>
             <th>{t.table.colColor}</th>
             <th onclick={() => sortBy('ethnicityCode')}>{t.table.colEth}{arrow('ethnicityCode')}</th>
-            <!-- 仅当名单含详细信息时才多渲染这几列。 -->
+            <!-- 仅当名单含详细信息时才多渲染这几列；性别列仅新版拓展名单（职员/新版球员）有值。 -->
             {#if hasDetailed}
               <th>{t.table.colSkin}</th><th>{t.table.colClub}</th><th>{t.table.colAge}</th><th>{t.table.colHeight}</th><th>{t.table.colNewgan}</th>
+              {#if hasGender}<th>{t.table.colGender}</th>{/if}
             {/if}
           </tr>
         </thead>
@@ -139,6 +142,7 @@
                     <span class={newganCls(r.detailed.isNewgan)}>{r.detailed.isNewgan}</span>
                   {:else}—{/if}
                 </td>
+                {#if hasGender}<td>{r.detailed?.gender || '—'}</td>{/if}
               {/if}
             </tr>
           {/each}

@@ -378,7 +378,7 @@ fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, Pa
 /// 识别失败 → Err("RTF 格式不合法：…")，文案带首个不合法字段定位，前端弹窗直接展示。
 fn scan_rtf_core(rtf_path: &str, logger: &impl LogSink) -> Result<(RtfScanResult, Vec<PlayerRecord>), String> {
     let mut scanner = RtfScanner::new();
-    scanner.detect_format(Path::new(rtf_path))?;
+    scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
     let data = scanner.parse_roster(Path::new(rtf_path), false, &NAT_TRANSLATION, logger)?;
     let summary = RtfScanResult {

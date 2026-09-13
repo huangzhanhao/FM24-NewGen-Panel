@@ -101,6 +101,9 @@
           {#if d?.isNewgan}
             <span class="meta accent">{t.table.colNewgan} · {d.isNewgan}</span>
           {/if}
+          {#if d?.gender}
+            <span class="meta">{t.table.colGender} <b>{d.gender}</b></span>
+          {/if}
         </div>
       </div>
       <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）。 -->

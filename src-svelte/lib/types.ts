@@ -2,16 +2,16 @@
 // 这里的每个接口都对应 Rust commands.rs 里的一个结构体（字段名用驼峰，与 Rust 的 camelCase 序列化一致）。
 // interface 只在编译期做类型检查，不会产生运行时代码；作用是让编辑器和编译器帮你提前发现字段名写错。
 
-/// 拓展名单才有的额外信息（对应 Rust 的 DetailedInfo），承载第 3-18 列及用户自定义列全部原文。
+/// 拓展名单才有的额外信息（对应 Rust 的 DetailedInfo），承载第 8-18 列及用户自定义列全部原文。
 export interface DetailedInfo {
   skinCode: string; avatar: string; isNewgan: string; club: string;
   age: string; height: string;
-  based: string;        // 俱乐部赛事级别/所在地（仅拓展球员）
+  based: string;        // 所在地/俱乐部赛事级别（仅拓展球员）
   preferredJob: string; // 偏好工作（仅拓展职员）
   ca: string; pa: string;
-  rca: string;          // 推荐能力 R.C.A（第 17 列，球员/职员都有）
-  gender: string;       // 性别（第 18 列，仅拓展职员）
-  extraFields: string[]; // 标准列之后的用户自定义列原文（球员第 18 列起 / 职员第 19 列起）
+  rca: string;          // 推荐能力 R.C.A（第 18 列，球员/职员都有；职员表头作 NP R.C.A）
+  gender: string;       // 性别原文（第 11 列，球员/职员都有）
+  extraFields: string[]; // 用户自定义列原文（第 19 列起）
 }
 
 /// 一个球员（对应 Rust 的 PlayerRecord）。detailed? 的 ? 表示可选（可能为 undefined）。

@@ -1,4 +1,4 @@
-//! 【新手导读】Profile（存档）/ 组管理：JSON 原子读写、切换时快照交换、旧版单档格式自动升级。
+//! Profile（存档）与组管理：JSON 原子读写、切换时快照交换、旧版单档格式自动升级。
 //! 自旧版 core/ProfileManager.py 移植；groups 用 BTreeMap 保证稳定顺序。
 //!
 //! 【两个核心概念】
@@ -6,6 +6,7 @@
 //!   组（group）：一个头像包目录。一个存档下可关联多个头像包，每个组记住自己的 RTF 名单。
 //! 【快照机制】切换存档时，先把当前存档各组的 config.xml 备份到 .user/<存档>/，
 //!   再把目标存档的快照恢复回头像包目录——这样不同存档共享同一头像包目录也不会互相覆盖。
+//! 【线程安全】ProfileManager 自身可变且非线程安全，由 commands::AppState 包在 Mutex 里串行化访问。
 use crate::json_store::{self, LoadError};
 use crate::paths::{group_xml_path, norm_dir};
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,7 @@ pub struct ProfileManager {
 
 impl ProfileManager {
     /// 创建管理器：读全局 profiles.json（缺失则初始化一个只含 'No Profile' 的默认配置），并加载当前存档。
-    /// 【启动交互】name=None 时固定从默认档（No Profile）开始，不自动恢复上次激活的存档。
+    /// name=None 时固定从默认档（No Profile）开始，不自动恢复上次激活的存档。
     pub fn new(name: Option<&str>, data_dir: &Path) -> Result<Self, String> {
         let user_dir = data_dir.join(".user");
         fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
@@ -80,7 +81,7 @@ impl ProfileManager {
             },
             Err(LoadError::Corrupt(e)) => return Err(e),
         };
-        // 【启动交互】程序启动固定从默认档（No Profile）开始，不自动恢复上次激活的存档，
+        // 程序启动固定从默认档（No Profile）开始，不自动恢复上次激活的存档，
         // 需要用户在下拉框手动选择。显式 name（内部调用/测试）仍可指定具体档。
         // profiles.json 的激活位仅运行中记录当前档：启动时全部归零（所有存档「未激活」），
         // 有残留激活位则落盘，保证后端状态与前端「未选择 Profile」的展示一致。
@@ -183,7 +184,7 @@ impl ProfileManager {
                 groups.insert(img_dir.clone(), GroupCfg { rtf });
             }
             let cfg = PrfCfg {
-                cur_group: (!img_dir.is_empty()).then_some(img_dir), // then_some：条件为真时包 Some
+                cur_group: (!img_dir.is_empty()).then_some(img_dir),
                 groups,
             };
             json_store::save(&path, &cfg)?; // 把升级后的新格式写回
@@ -262,7 +263,7 @@ impl ProfileManager {
             self.restore_group_xml(name, &img_dir);
         }
         // 4) 更新全局激活位：只有目标档为 true，其余置 false；并落盘 profiles.json
-        //    【修复】此前激活位变更不落盘，新建存档后重启会回到 No Profile。
+        //    （激活位必须落盘：此前漏写时新建存档重启会回到 No Profile）。
         for k in self.config.profile.keys().cloned().collect::<Vec<_>>() {
             if let Some(flag) = self.config.profile.get_mut(&k) {
                 *flag = k == name;

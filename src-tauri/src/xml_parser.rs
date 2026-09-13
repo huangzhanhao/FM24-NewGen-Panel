@@ -1,9 +1,10 @@
-//! 【新手导读】config.xml 读写：模板 + 行级正则替换（自旧版 core/XmlParser.py 移植）。
+//! config.xml 读写：模板 + 行级正则替换（自旧版 core/XmlParser.py 移植）。
+//!
 //! config.xml 是 FM 认的「头像映射表」，每行形如：
 //!   <record from="种族目录/图片名" to="graphics/pictures/person/<UID>/portrait"/>
-//! 意思是「把某张图片用于某个 UID 的球员头像」。本模块负责读、写、单行替换、备份这些配置。
-use crate::assets::CONFIG_TEMPLATE;        // 复用 assets 里的 config.xml 模板
-use crate::rtf_scanner::NEWGAN_UID_PREFIX;  // 复用 r- 前缀常量
+//! 即「把某张图片用于某个 UID 的球员头像」。本模块负责全量生成、整体解析、单行替换与滚动备份。
+use crate::assets::CONFIG_TEMPLATE;
+use crate::rtf_scanner::NEWGAN_UID_PREFIX;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,7 +39,6 @@ pub fn record_from(ethnicity: &str, image: &str) -> String {
 pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("读取 config.xml 失败: {e}"))?;
     let mut out = HashMap::new();
-    // captures_iter 遍历所有匹配项；cap[1]/cap[2] 分别是第 1/2 个捕获组。
     for cap in RECORD_RE.captures_iter(&text) {
         // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
         // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
@@ -128,7 +128,7 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let backup = img_dir.join(format!("config备份_{ts}.xml"));
     fs::copy(config_path, &backup).map_err(|e| e.to_string())?;
-    // 列出目录下所有备份文件（filter_map(|e| e.ok()) 跳过读取出错的项）。
+    // 列出目录下所有历史备份。
     let mut backups: Vec<_> = fs::read_dir(img_dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
@@ -181,7 +181,7 @@ pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(Stri
 }
 
 /// 探测实际图片文件（.png/.jpg/.jpeg，对等旧版 PlayerService.resolve_image_file）。
-/// 【为何】config.xml 里只存图片名不存扩展名，需要按常见扩展名依次试找出真实文件。
+/// config.xml 里只存图片名不存扩展名，需按常见扩展名依次试找出真实文件。
 /// ethnicity 为映射里的相对目录路径（"" = 包根，多级 "a/b" = 子/孙目录）。
 pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Option<String> {
     let mut base = img_dir.to_path_buf();
@@ -193,14 +193,14 @@ pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Optio
     for ext in ["png", "jpg", "jpeg"] {
         let p = base.join(format!("{image}.{ext}"));
         if p.is_file() {
-            return Some(p.to_string_lossy().to_string()); // to_string_lossy 把路径安全转为 String
+            return Some(p.to_string_lossy().to_string());
         }
     }
     None // 三种扩展名都没找到
 }
 
 /// 给 UID 补随机人前缀的辅助（查询缓存时兼容两种形态）。
-/// 【为何】同一球员 UID 在缓存里可能带 r- 也可能不带，返回两种形态方便都去查一下。
+/// 同一球员 UID 在缓存里可能带 r- 也可能不带（随机人带、原生不带），返回两种形态都查一遍。
 pub fn with_newgan_prefix_variants(uid: &str) -> [String; 2] {
     let prefixed = format!("{NEWGAN_UID_PREFIX}{uid}");
     [uid.to_string(), prefixed]

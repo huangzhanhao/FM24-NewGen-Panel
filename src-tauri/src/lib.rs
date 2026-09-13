@@ -1,13 +1,14 @@
-//! 【新手导读】Tauri 应用的「总装配车间」。这里把后端所有零件拼成一个可运行的桌面应用：
-//!   1) 声明并引入各个功能模块（mod xxx）；
-//!   2) 用 tauri::Builder 搭建应用：注册插件、初始化状态、创建主窗口；
-//!   3) 注册所有「命令」（command）——前端 JS 通过 invoke 调用它们来和 Rust 后端通信。
+//! Tauri 应用装配：模块声明、插件与状态注册、命令登记。
 //!
-//! 关键概念：Tauri = Rust 后端 + 网页前端（本项目用 Svelte）。
-//!   两者通过 IPC（进程间通信）交互：前端 invoke("命令名", 参数) → 后端带 #[tauri::command] 的函数。
+//! 【装配流程】run() 按固定次序装配：确定便携数据目录（日志 target 注册时就要用）→
+//! 注册插件（dialog / opener / 官方日志插件，日志第三路 target 接自研内存缓冲）→
+//! setup 里建目录、迁移旧版数据、编程式创建主窗口、装日志门面与 panic hook、
+//! 初始化 ProfileManager、导出标准规则默认文件、托管 AppState → 启动日志批推线程 →
+//! 登记全部前端可调用命令。
+//!
+//! 【命令登记】前端 invoke("命令名") 调到 commands 里带 #[tauri::command] 的函数；
+//! 新增命令必须同时登记在 invoke_handler 列表，否则前端调用报「命令未找到」。
 
-// 下面这些 `mod xxx;` 声明「本 crate 包含哪些模块」，每个对应同目录下的一个 .rs 文件。
-// 只有在这里声明过的模块，才能被 crate 内部使用（Rust 的模块需要显式声明）。
 mod assets;          // 编译期内嵌的只读映射表（国籍翻译、config.xml 模板、标准规则默认数据）
 mod commands;        // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper;     // 核心算法：球员 → 头像图片的映射
@@ -21,32 +22,28 @@ mod rtf_scanner;     // RTF 扫描器：识别并解析 FM 导出的 RTF 名单�
 mod templates;       // 头像包标准与抽图模型（一个标准一个自包含模块 + 规则配置聚合）
 mod xml_parser;      // 读写 config.xml（FM 认的头像映射配置）
 
-use commands::AppState;                 // 应用全局状态（被 Tauri 托管，命令里通过 State 取用）
-use logger::{LogMemory, Logger};        // 日志门面与内存缓冲（文件/控制台管道由官方插件承担）
-use std::path::{Path, PathBuf};         // Rust 的跨平台路径类型（Path 借用、PathBuf 拥有）
-use std::sync::atomic::AtomicBool;      // 原子布尔量：多线程间安全地传递「取消/运行中」标志
-use std::sync::{Arc, Mutex};            // Arc=多线程共享所有权；Mutex=互斥锁，保护共享数据
-use tauri::Manager;                     // 引入 Manager trait 才能用 app.manage() / app.handle()
+use commands::AppState;
+use logger::{LogMemory, Logger};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use tauri::Manager;
 use tauri_plugin_log::{fern, RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// 便携化数据目录：开发调试 → 项目根目录 data/；正式分发 → 可执行文件所在目录 data/
 /// （NSIS 以 currentUser 模式安装到用户可写目录，安装目录内可直接写数据）
 ///
-/// 【为什么这么做】传统应用把配置写到 C 盘 AppData，不方便携带。本项目把所有用户数据
-/// 集中到程序旁边的 data/ 目录，拷走整个文件夹就能带走全部配置。
-/// 返回类型 Result<PathBuf, String>：成功给出路径，失败给出中文错误描述（供前端弹窗）。
+/// 传统应用把配置写到 C 盘 AppData，不方便携带。本项目把所有用户数据集中到程序旁边的
+/// data/ 目录，拷走整个文件夹就能带走全部配置。失败时返回中文错误描述（供前端弹窗）。
 fn portable_data_dir() -> Result<PathBuf, String> {
     if cfg!(debug_assertions) {
-        // 开发模式：cfg!(debug_assertions) 是编译期布尔判断，调试构建时为 true。
-        // CARGO_MANIFEST_DIR = <项目根>/src-tauri，是编译期常量，由 env! 宏在编译时展开。
-        // .parent() 取其上级目录（即项目根），再拼接 data。
+        // 开发模式：CARGO_MANIFEST_DIR 指向 src-tauri，取其父级（项目根）再拼 data。
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .map(|root| root.join("data"))
             .ok_or_else(|| "无法定位项目根目录".to_string())
     } else {
-        // 正式模式：拿当前可执行文件的路径，取其所在目录再拼 data。
-        // 链式调用中用 ok()/and_then() 把可能失败的步骤优雅地串起来，任一步失败则回退到错误。
+        // 正式模式：可执行文件所在目录再拼 data。
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("data")))
@@ -57,26 +54,24 @@ fn portable_data_dir() -> Result<PathBuf, String> {
 /// 把 v1 的用户数据（.user/）迁移到便携数据目录（首次运行、目标缺失时）
 /// v1 便携模式在 <exe>/data，标准模式在 %LOCALAPPDATA%/NewGAN Manager
 ///
-/// 【背景】本项目是从旧版（Python v1）重写而来。老用户升级后，需要把他们以前的配置
-/// 自动搬到新位置，避免重新配置。此函数就是干这件事，仅在「新目录还没有数据」时才搬。
+/// 本项目从旧版（Python v1）重写而来，老用户升级后需要把以前的配置自动搬到新位置，
+/// 避免重新配置；仅在「新目录还没有数据」时才搬。
 fn migrate_legacy_user_data(data_dir: &std::path::Path) -> Result<(), String> {
-    // 如果新位置已经存在 .user/cfg.json，说明已经迁移过或本来就是新用户，直接返回，不覆盖。
+    // 新位置已有 .user/cfg.json：迁移过或本来就是新用户，不覆盖。
     if data_dir.join(".user").join("cfg.json").exists() {
-        return Ok(()); // 已有新数据
+        return Ok(());
     }
-    // 候选旧位置列表（按优先级）：先看可执行文件旁的 data/.user。
-    // Vec<Option<PathBuf>> 允许某些候选「拿不到」（比如环境变量缺失）时用 None 占位。
+    // 候选旧位置按优先级排列：先可执行文件旁的 data/.user，再 Windows 标准安装位置
+    // %LOCALAPPDATA%/NewGAN Manager/.user（环境变量缺失时该候选为 None）。
     let mut candidates: Vec<Option<PathBuf>> = vec![
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("data").join(".user"))),
     ];
-    // 再追加 Windows 标准安装位置 %LOCALAPPDATA%/NewGAN Manager/.user（环境变量存在时）。
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         candidates.push(Some(PathBuf::from(local).join("NewGAN Manager").join(".user")));
     }
-    // into_iter().flatten() 把 Vec<Option<T>> 展平为只包含 Some 值的迭代器（跳过 None）。
-    // 找到第一个真正含有 cfg.json 的旧目录，递归拷贝到新位置，然后返回。
+    // 找到第一个真正含有 cfg.json 的旧目录，递归拷贝到新位置。
     for src in candidates.into_iter().flatten() {
         if src.join("cfg.json").is_file() {
             let dst = data_dir.join(".user");
@@ -84,12 +79,10 @@ fn migrate_legacy_user_data(data_dir: &std::path::Path) -> Result<(), String> {
             return Ok(());
         }
     }
-    Ok(()) // 所有候选都没找到旧数据，也算成功（新用户本来就没有）
+    Ok(()) // 所有候选都没有旧数据，也算成功（新用户本来就没有）
 }
 
 /// 递归拷贝整个目录（含子目录和文件）。Rust 标准库没有现成的「拷目录」，故手写。
-/// 【错误处理】map_err(|e| e.to_string()) 把系统 IO 错误转成 String，方便统一返回给前端。
-/// 末尾的 `?` 是 Rust 的错误传播运算符：出错就立即 return Err，否则取出 Ok 里的值继续。
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -104,13 +97,11 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
-/// 【应用启动主函数】整个 Tauri 应用从这里装配并运行。
-/// 采用「建造者模式（Builder Pattern）」：一连串 .xxx() 链式调用逐步配置应用，最后 .run() 启动。
+/// 应用装配与启动主函数。
 #[cfg_attr(mobile, tauri::mobile_entry_point)] // 移动端构建时标记为入口点（桌面端忽略）
 pub fn run() {
     // 数据目录必须先于插件装配确定：日志文件的 Folder target 在 .plugin() 注册时就要用到它
     // （插件 setup 先于应用 setup 运行，全局 logger 在应用 setup 第一行日志前已就位）。
-    // tauri::Builder::default() 创建一个默认的应用构建器，接下来链式地往上叠加配置。
     let data_dir = portable_data_dir().expect("无法定位便携数据目录");
     // 内存环形缓冲 + 事件通道（logger.rs 自研补齐的部分）：Arc 一份给插件 fern 闭包，
     // 一份给 setup 里的 Logger；接收端最后交给后台聚批线程。
@@ -118,10 +109,8 @@ pub fn run() {
     let memory = Arc::new(memory);
     let memory_for_plugin = Arc::clone(&memory); // fern 闭包拿一份，setup 里的 Logger 拿原件
     tauri::Builder::default()
-        // .plugin(...) 注册官方插件：
-        //   dialog —— 提供原生弹框（提示/确认）和文件、目录选择对话框；
-        //   opener —— 提供打开外部链接、本地文件的能力。
-        // 注册后前端才能通过对应的 JS API 调用它们。
+        // 官方插件：dialog 提供原生弹框与文件/目录选择，opener 提供打开外部链接/本地文件的
+        // 能力；注册后前端才能通过对应的 JS API 调用它们。
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // 官方日志插件（tauri-plugin-log）：log 门面 + stdout + 滚动文件三合一，
@@ -133,9 +122,9 @@ pub fn run() {
                 .timezone_strategy(TimezoneStrategy::UseLocal)    // 本地时区（与 v1 一致）
                 .max_file_size(10 * 1024 * 1024)                  // 单文件 10MB，超过滚动（对齐 v1）
                 .rotation_strategy(RotationStrategy::KeepSome(3)) // 保留最近 3 份滚动备份（对齐 v1 的 .1~.3）
-                // 【关键】清掉插件根格式：fern 的父级格式化输出会「替换」record.args 再传
-                // 给子 target（实测正文会被嵌套成 [时间][级别] 前缀套 v1 格式）。清掉后
-                // 根直接透传原始 Record，各 target 自带格式互不污染（文件 v1 行/内存原始串）。
+                // 必须清掉插件根格式：fern 的父级格式化输出会「替换」record.args 再传给子
+                // target（实测正文会被嵌套成 [时间][级别] 前缀套 v1 格式）。清掉后根直接透传
+                // 原始 Record，各 target 自带格式互不污染（文件 v1 行/内存原始串）。
                 .clear_format()
                 .targets([
                     // ① 控制台：官方默认行样式（clear_format 后根不再兜底，此处自带；
@@ -178,8 +167,7 @@ pub fn run() {
                 ])
                 .build(),
         )
-        // .setup(...) 在应用启动、窗口创建前执行一次初始化。闭包参数 app 是应用句柄。
-        // 返回 Result：若初始化出错（用 ? 传播），应用会启动失败。
+        // .setup(...) 在应用启动、窗口创建前执行一次初始化。
         .setup(|app| {
             // 1) 便携数据目录（路径已在 run() 顶部确定，这里只补建目录）。
             std::fs::create_dir_all(&data_dir)?;
@@ -189,28 +177,27 @@ pub fn run() {
             // 3) 主窗口编程式创建（而非在 tauri.conf.json 里声明）：
             // 只有 Builder API 能指定 WebView2 数据目录为绝对路径，把浏览器缓存/localStorage
             // 一并便携化到 <data>\webview，避免 WebView2 默认写入 C 盘 AppData。
-            //（WebView2 是 Windows 上承载前端网页的内嵌浏览器内核）
             let webview_data = data_dir.join("webview");
             std::fs::create_dir_all(&webview_data)?;
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                 .title("NewGAN Manager")   // 窗口标题
                 .inner_size(1000.0, 640.0) // 初始内容区尺寸（宽×高，单位逻辑像素）
                 .resizable(true)           // 允许用户拖拽改变窗口大小
-                .data_directory(webview_data) // 关键：把浏览器数据目录指向便携位置
-                .build()?;                 // 真正创建窗口
+                .data_directory(webview_data) // 浏览器数据目录指向便携位置（便携化关键）
+                .build()?;
 
             // 4) 日志门面：官方插件已在 setup 之前装好全局 logger，这里起手即可写。
             //    Logger 只携带「打开文件路径 + 回查缓冲」，写入经 log 门面走官方管道。
             let logger = Arc::new(Logger::new(&data_dir, memory));
             // panic hook：官方生态不覆盖 panic——补上，让崩溃现场进日志文件（默认 hook
-            // 保留，stderr 照常输出）。info 的 Display 自带「位置 + 消息」。
+            // 保留，stderr 照常输出）。
             let default_hook = std::panic::take_hook();
             let panic_logger = logger.clone();
             std::panic::set_hook(Box::new(move |info| {
                 default_hook(info);
                 panic_logger.error("panic", format!("{info}"));
             }));
-            logger.info("app", "Starting Application v2"); // 写入启动日志
+            logger.info("app", "Starting Application v2");
 
             // 5) 初始化存档管理器（ProfileManager），读取或创建用户配置。
             let pm = profile_manager::ProfileManager::new(None, &data_dir)?;
@@ -221,9 +208,8 @@ pub fn run() {
                 logger.warn("rules", format!("导出标准规则默认文件失败: {e}"));
             }
 
-            // 6) app.manage(...) 把全局状态交给 Tauri 托管。
-            //    之后任何命令函数只需在参数里写 State<'_, AppState>，Tauri 就会自动把这个状态传进去。
-            //    AppState 内部用 Mutex/AtomicBool/Arc 包裹字段，保证多线程（命令、后台线程）安全访问。
+            // 6) app.manage(...) 把全局状态交给 Tauri 托管：之后任何命令函数只需在参数里写
+            //    State<'_, AppState>，Tauri 就会自动把这个状态传进去。
             app.manage(AppState {
                 pm: Mutex::new(pm),                          // 存档管理器（互斥锁保护）
                 logger: logger.clone(),                      // 日志器（Arc 共享）
@@ -239,10 +225,8 @@ pub fn run() {
             logger::spawn_emitter(app.handle().clone(), log_rx);
             Ok(())
         })
-        // .invoke_handler(...) 注册「前端可调用」的命令列表。
-        // generate_handler! 是 Tauri 宏，把这些 Rust 函数暴露为 IPC 命令；
-        // 前端 api.ts 里 invoke("get_app_state") 就会调到 commands::get_app_state。
-        // 【重要】新增命令时，必须同时在这里登记，否则前端调用会报「命令未找到」。
+        // .invoke_handler(...) 登记「前端可调用」的命令列表：前端 api.ts 里
+        // invoke("get_app_state") 就会调到 commands::get_app_state。新增命令必须在此登记。
         .invoke_handler(tauri::generate_handler![
             commands::get_app_state,        // 获取应用全局快照（存档/组/RTF/运行状态）
             commands::create_profile,       // 新建并激活存档
@@ -271,9 +255,7 @@ pub fn run() {
             commands::read_image,           // 读取图片字节（前端转 blob 显示）
             commands::query_logs            // 分页查询日志
         ])
-        // .run(...) 真正启动事件循环（阻塞直到窗口关闭）。
-        // generate_context! 宏在编译期读取 tauri.conf.json 生成上下文（图标、配置等）。
-        // expect(...) 表示：如果启动失败就直接 panic 并打印这句话。
+        // .run(...) 启动事件循环，阻塞直到窗口关闭；启动失败直接 panic。
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

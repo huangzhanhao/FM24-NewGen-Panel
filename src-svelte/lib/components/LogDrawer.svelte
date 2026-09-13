@@ -1,5 +1,4 @@
-<!-- 【新手导读】日志抽屉（从左侧滑出的面板）：按级别过滤展示日志，支持打开日志文件、清空显示。
-     重点演示：$effect 依赖追踪、虚拟列表 VList（只渲染可见行，万条日志也不卡）、snippet 插槽。 -->
+<!-- 日志抽屉（从左侧滑出）：按级别过滤展示日志，支持打开日志文件、清空显示；列表用虚拟滚动只渲染可见行。 -->
 <script lang="ts">
   import { VList } from 'virtua/svelte'; // 虚拟滚动列表组件（只渲染视口内的行，提升大数据量性能）
   import { openPath } from '@tauri-apps/plugin-opener'; // 用系统默认程序打开本地文件
@@ -11,10 +10,10 @@
   import type { LogLine } from '../types';
 
   // 抽屉打开期间，过滤条件变化 → 从 Rust 环形缓冲重查（前端缓冲仅承接事件增量）。
-  // $effect 里显式“读”了 level 和 only（void 表达式仅为触发依赖追踪），所以它们一变就重新拉取。
+  // 显式读取 level/only 以建立依赖，任一变化即重新拉取。
   $effect(() => {
     if (!ui.logOpen) return; // 抽屉关闭时不做任何事
-    void logStore.level; // void 读取：仅为让 $effect 依赖这个值（不使用其返回值）
+    void logStore.level;
     void logStore.only;
     void reloadLogs();
   });
@@ -41,7 +40,7 @@
         <span class="track"></span>
         {t.log.onlyLevel}
       </label>
-      <!-- bind:value 把下拉选中值与 logStore.level 双向绑定。级别值（DEBUG/INFO…）是过滤协议值，勿改。 -->
+      <!-- 级别值（DEBUG/INFO…）是过滤协议值，勿改。 -->
       <select bind:value={logStore.level}>
         {#each LEVELS as l}<option value={l}>{l}</option>{/each}
       </select>

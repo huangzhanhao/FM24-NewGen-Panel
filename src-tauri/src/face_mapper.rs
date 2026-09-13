@@ -1,16 +1,18 @@
-//! 【新手导读】球员 → 头像映射（自旧版 core/FaceMapper.py 移植，含 0-10 种族码修正规则）。
-//! 这是整个应用的「大脑」：根据每个球员的国籍 + 种族码，算出该用头像包里哪个种族目录，
-//! 再从目录里选一张图片，最终得到一条「球员 UID → 图片」的映射。
-use crate::facepack_scanner::{self, scan_pack, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack_scanner.rs）
-use crate::templates::{self, PickRule, RuleConfig};           // 抽图模型（一个标准一套）+ 规则配置聚合
+//! 球员 → 头像映射（自旧版 core/FaceMapper.py 移植，含 0-10 种族码修正规则）。
+//!
+//! 这是整个应用的「大脑」：按每个球员的国籍 + 种族码，经所选标准的抽图规则
+//! （templates::PickRule）算出目标种族目录并随机取图，产出「球员 UID → 图片」的映射条目。
+//! 三模式（保留/覆写/生成）决定与现有 config.xml 的合并方式；包布局扫描与标准判定在
+//! facepack_scanner，本模块只消费其结果。
+use crate::facepack_scanner::{self, scan_pack, PackLayout, PackScan};
+use crate::templates::{self, PickRule, RuleConfig};
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
-use std::collections::{BTreeSet, HashMap}; // BTreeSet = 有序集合，保证行为可复现
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering}; // 原子布尔：跨线程读取「是否已取消」
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// 替换模式（对应前端三个模式按钮）。
-/// enum 是「枚举」：值只能是这几个之一，比用字符串更安全。
+/// 替换模式（对应前端三个模式按钮）。用枚举而不是字符串，非法值在 parse 处即被拒绝。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Preserve,   // 保留：已换过的不动，只给新球员补图

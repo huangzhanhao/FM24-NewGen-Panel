@@ -1,17 +1,17 @@
-// 【新手导读】前端调用后端的「统一入口」。把 Tauri 的 invoke 封装成一组语义化方法。
-//
-// 【关键概念：invoke】invoke("命令名", 参数对象) 会异步调用 Rust 后端带 #[tauri::command] 的同名函数，
-// 返回一个 Promise：后端 Ok → resolve（拿到返回值）；后端 Err(字符串) → reject（抛异常，用 try/catch 接）。
-// 命令名和参数名必须与 Rust 端一致（Rust 蛇形参数在 invoke 里写驼峰，Tauri 会自动对应）。
-//
-// 【为何集中封装】组件里只需写 api.createProfile(name)，不必重复写 invoke 字符串，也方便类型提示。
+/**
+ * 前端调用后端的统一入口：把 Tauri 的 invoke 封装成一组语义化方法，组件里只需写 api.createProfile(name)，不必重复写 invoke 字符串，也方便类型提示。
+ *
+ * invoke("命令名", 参数对象) 异步调用 Rust 后端带 #[tauri::command] 的同名函数：
+ * 返回一个 Promise：后端 Ok → resolve（拿到返回值）；Err(字符串) → reject（抛异常，用 try/catch 接）。
+ * 命令名与参数名必须与 Rust 端一致：Rust 蛇形参数在 invoke 里写驼峰，Tauri 自动映射。
+ */
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, ImageScanResult, IntegrityResult, LogLine, PageResult, PlayerPreview,
   PlayerQuery, PlayerRecord, ReplaceArgs, RtfScanResult,
-} from './types'; // import type 仅导入类型，编译后会被完全抹去（不产生运行时代码）
+} from './types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
-// invoke<返回类型>('命令名', { 参数 }) —— 尖括号里的是告诉 TS 这个 Promise resolve 出什么类型。
+/** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
 export const api = {
   getAppState: () => invoke<AppSnapshot>('get_app_state'),
   createProfile: (name: string) => invoke<AppSnapshot>('create_profile', { name }),
@@ -19,11 +19,11 @@ export const api = {
   switchProfile: (name: string) => invoke<AppSnapshot>('switch_profile', { name }),
   selectImageDirectory: (path: string) => invoke<AppSnapshot>('select_image_directory', { path }),
   setCurrentRtf: (path: string) => invoke<AppSnapshot>('set_current_rtf', { path }),
-  // 注意：参数对象里写 imgDir（驼峰），Rust 端对应 img_dir（蛇形），Tauri 自动映射。
+  // 参数写 imgDir（驼峰），对应 Rust 端 img_dir（蛇形），Tauri 自动映射。
   setCurrentGroup: (imgDir: string) => invoke<AppSnapshot>('set_current_group', { imgDir }),
   deleteGroup: (imgDir: string) => invoke<AppSnapshot>('delete_group', { imgDir }),
   validateImageDirs: (imgDir: string) => invoke<string[]>('validate_image_dirs', { imgDir }),
-  // 检查完整性：识别三套头像包标准并给出可补全的缺失目录（仅“检查完整性”按钮使用）。
+  // 检查完整性：识别三套头像包标准并给出可补全的缺失目录（「检查完整性」按钮用）。
   checkIntegrity: (imgDir: string) => invoke<IntegrityResult>('check_integrity', { imgDir }),
   // 扫描头像：建图片索引缓存（供替换复用），结果写入后端日志。
   scanImages: () => invoke<ImageScanResult>('scan_images'),

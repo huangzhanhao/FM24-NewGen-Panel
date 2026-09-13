@@ -1,6 +1,5 @@
-<!-- 【新手导读】单人预览/微调：输入 UID 查看其头像与资料，或选一张新图单独替换。
-     重点演示：把后端返回的图片字节（ArrayBuffer）转成 blob URL 供 <img> 显示。
-     外观为「球员卡」：左列 168 圆角头像 + 映射路径，右列姓名/UID/元信息胶囊/信息格/替换行。 -->
+<!-- 单人预览/微调：输入 UID 查看其头像与资料，或选一张新图单独替换。
+     外观为「球员卡」：左列头像 + 映射路径，右列姓名/UID/元信息胶囊/信息格/替换行。 -->
 <script lang="ts">
   import { open, message } from '@tauri-apps/plugin-dialog';
   import { api } from '../api';
@@ -28,7 +27,7 @@
       const bytes = await api.readImage(preview.imagePath); // 拿到 ArrayBuffer
       const ext = preview.imagePath.split('.').pop()?.toLowerCase() ?? 'png'; // 推断扩展名
       const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`; // jpg 的 MIME 是 image/jpeg
-      blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime })); // 生成 blob URL
+      blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
     }
   }
 

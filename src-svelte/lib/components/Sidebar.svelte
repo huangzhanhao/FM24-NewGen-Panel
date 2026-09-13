@@ -1,6 +1,4 @@
-<!-- 【新手导读】左侧边栏：管理存档（Profile）与头像包（组）。
-     含新建/切换/删除存档、关联/选择/删除头像包、以及底部外部链接。
-     重点演示：bind:this（拿到 DOM 引用）、bind:value、{#each} 渲染列表。 -->
+<!-- 左侧边栏：管理存档（Profile）与头像包（组），含新建/切换/删除存档、关联/选择/删除头像包与底部外部链接。 -->
 <script lang="ts">
   import { open, ask } from '@tauri-apps/plugin-dialog'; // open=选目录；ask=确认框
   import { openUrl } from '@tauri-apps/plugin-opener';   // 用默认浏览器打开外部链接
@@ -141,7 +139,7 @@
     <!-- 存档下拉框：选中即「浏览」（组列表/当前任务卡随选中项刷新），不切档；
          点下方「激活」按钮才真正切换后端当前档。忙碌时禁用。 -->
     <select bind:this={profileSelect} value={appStore.selectedProfile} onchange={onSelectChange} disabled={busy} class="w-full">
-      <!-- {#each} 遍历所有存档名生成选项（snap 为空时用 ?? [] 兑底）。 -->
+      <!-- 遍历所有存档名生成选项（快照未加载时兜底为空数组）。 -->
       {#each snap?.profiles ?? [] as p}
         <option value={p}>{p}</option>
       {/each}
@@ -179,7 +177,7 @@
     <!-- 有组时渲染列表；否则显示空状态提示。 -->
     {#if snap && snap.groups.length > 0}
       <ul class="group-list">
-        <!-- {#each ... as g (g.imgDir)}：以目录为键；class:current 高亮当前组。 -->
+        <!-- 以目录为键；class:current 高亮当前组。 -->
         {#each snap.groups as g (g.imgDir)}
           <li class:current={snap.currentGroup === g.imgDir}>
             <!-- 点组名切为当前组（浏览态禁用——切组写后端当前档）；title 显示完整路径；g-rtf 显示是否已设 RTF。 -->

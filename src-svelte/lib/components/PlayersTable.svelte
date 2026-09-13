@@ -1,5 +1,4 @@
-<!-- 【新手导读】名单预览表格：分页、搜索、点表头排序。数据留在后端，每次只拉当前页。
-     重点演示：$effect 做“参数变化→防抖请求”，以及 {#each} 渲染表格行。 -->
+<!-- 名单预览表格：分页、搜索、点表头排序；数据留在后端，每次只拉当前页。 -->
 <script lang="ts">
   import { api } from '../api';
   import { appStore } from '../stores/app.svelte';
@@ -34,8 +33,7 @@
       newgan: newganQuery === 'any' ? null : newganQuery === 'yes',
     });
   }
-  // 参数变化自动刷新：effect 内同步读取依赖（runes 追踪），请求 300ms 防抖。
-  // void page 等是“显式读取”，让 $effect 知道要追踪这些变量；任一变化就重新执行。
+  // 参数变化自动刷新：显式读取依赖以建立追踪，请求做 300ms 防抖。
   // rosterVersion：「扫描RTF」成功后 +1，无需执行 Replace 即可在此预览名单。
   $effect(() => {
     void page; void search; void sortKey; void sortDesc; void newganQuery; void appStore.rosterVersion;
@@ -121,7 +119,7 @@
           </tr>
         </thead>
         <tbody>
-          <!-- {#each ... as r (r.uid)}：括号里的 (r.uid) 是“键”，帮 Svelte 高效复用 DOM。 -->
+          <!-- 以 uid 为键，便于 Svelte 复用 DOM 行。 -->
           {#each result.items as r (r.uid)}
             <tr>
               <td class="mono">{r.uid}</td>
@@ -131,7 +129,7 @@
               <td>{r.hairLength}</td>
               <td>{r.hairColor}</td>
               <td>{r.ethnicityCode}</td>
-              <!-- 详细列：?. 安全访问 detailed，为空时显示 —；随机人列用是/否胶囊着色。 -->
+              <!-- 详细列：detailed 为空时显示 —；随机人列按是/否着色。 -->
               {#if hasDetailed}
                 <td>{r.detailed?.skinCode ?? '—'}</td>
                 <td>{r.detailed?.club ?? '—'}</td>

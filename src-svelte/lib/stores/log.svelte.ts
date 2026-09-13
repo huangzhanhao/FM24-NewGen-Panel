@@ -1,5 +1,7 @@
-// 【新手导读】日志的前端状态与过滤工具。
-// 后端日志器也维护一个环形缓冲；前端这里另外维护一份“用于显示”的日志列表 + 过滤条件。
+/**
+ * 日志的前端显示状态与过滤工具。
+ * 后端日志器另有一份环形缓冲（供 query_logs 回查）；这里维护的是「用于显示」的列表 + 过滤条件。
+ */
 import type { LogLine } from '../types';
 
 const MAX = 10_000; // 前端显示上限（超出则从头部丢弃，与后端环形缓冲一致）
@@ -17,9 +19,9 @@ export const logStore = $state({
 
 /** 追写一批日志（收到后端 log:batch 事件时调），并保证不超 MAX。 */
 export function appendLogBatch(batch: LogLine[]) {
-  logStore.lines.push(...batch); // ... 是展开运算符，把数组元素逐个 push 进去
+  logStore.lines.push(...batch);
   if (logStore.lines.length > MAX) {
-    // splice(0, n) 从头部删掉多出的 n 条（保留最新的 MAX 条）。
+    // 从头部删掉多出的条数，保留最新 MAX 条（与后端环形缓冲同语义）。
     logStore.lines.splice(0, logStore.lines.length - MAX);
   }
 }

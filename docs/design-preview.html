@@ -703,33 +703,88 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
 <div class="doc hidden" id="view-philosophy">
  <div class="doc-inner">
   <h1>设计理念：教练席控制台（The Dugout）</h1>
-  <p class="lead">让 NewGAN Manager 看起来像 FM 的延伸，而不是一个通用蓝白 SaaS：玩家刚从深色皮肤的 FM 里切出来，视觉上无缝衔接。本页记录调研依据与设计取向；<strong>设计方案</strong>页给出令牌与组件规范，<strong>实施路径</strong>页给出分批落地计划。</p>
-  <div class="toc"><a href="#p-research">FM26 皮肤调研</a><a href="#p-common">六条共性</a><a href="#p-principles">四条原则</a><a href="#p-decisions">已确认决策</a></div>
+  <p class="lead">让 NewGAN Manager 看起来像 FM 的延伸，而不是一个通用蓝白 SaaS：玩家刚从深色皮肤的 FM 里切出来，视觉上无缝衔接。本页先把调研皮肤的特征收敛成「设计风格可选项」，再给出最终定稿的风格取向；<strong>设计方案</strong>页给出令牌与组件规范，<strong>实施路径</strong>页给出分批落地计划。</p>
+  <div class="toc"><a href="#p-traits">皮肤特征归纳</a><a href="#p-styles">风格最终确认</a><a href="#p-principles">四条原则</a><a href="#p-decisions">已确认决策</a></div>
 
-  <h2 id="p-research"><span class="no">1</span>FM26 热门皮肤调研</h2>
-  <p>按 FMScout / sortitoutsi / FMSkinBuilder 的浏览与下载量梳理 2026 赛季头部皮肤（调研时间：2026-09）：</p>
-  <div class="grid3">
-    <div class="skin-card"><div class="nm">Material Skin 26</div><div class="tags"><span class="skin-tag hot">50 万+ 浏览</span><span class="skin-tag">深浅皆可</span><span class="skin-tag">高信息密度</span></div><p>多年沿用的 Material 配色，重排世界杯面板、球员大脸 Profile、按钮统一样式。</p></div>
-    <div class="skin-card"><div class="nm">CTRL 26 · MW90</div><div class="tags"><span class="skin-tag hot">31 万+ 浏览</span><span class="skin-tag">clean</span><span class="skin-tag">dark</span><span class="skin-tag">minimal</span></div><p>官方自我标签即「干净 / 深色 / 极简」：弱化单选组、次级按钮加回细边框、表格斑马纹、移除紫渐变、状态色统一色相。</p></div>
-    <div class="skin-card"><div class="nm">Darkside v5</div><div class="tags"><span class="skin-tag hot">深蓝</span><span class="skin-tag">declutter</span><span class="skin-tag">动态瓷砖</span></div><p>明确主张「现代化、去杂乱、降低眼疲劳」，为单档数百小时的玩家设计；重排所有 Overview 页。</p></div>
-    <div class="skin-card"><div class="nm">MNB · AnSeOs</div><div class="tags"><span class="skin-tag hot">Muted Navy Blue</span><span class="skin-tag">低分辨率</span><span class="skin-tag">翡翠备选</span></div><p>柔和海军蓝配色，Portal 只放最重要的管理元素；另出翡翠绿主题包。</p></div>
-    <div class="skin-card"><div class="nm">TSO · DaveHouto</div><div class="tags"><span class="skin-tag">dark-blue</span><span class="skin-tag">比赛日重设</span></div><p>深蓝主题 + 可滚动瓷砖与快速切换按钮，强调清晰度、可用性与沉浸感。</p></div>
-    <div class="skin-card"><div class="nm">AlexMorak / Kojuro</div><div class="tags"><span class="skin-tag">去紫</span><span class="skin-tag">低眼疲劳</span></div><p>卖点即「去掉 FM26 烦人的紫蓝调」；Kojuro 仅换色不动结构，降低视觉刺激。</p></div>
-  </div>
-  <p style="margin-top:10px">另有 SAS26、skogr（La Liga 风直播图形、热图）、TinyHips OLED 纯黑等，方向一致。</p>
-
-  <h2 id="p-common"><span class="no">2</span>跨皮肤的六条共性</h2>
+  <h2 id="p-traits"><span class="no">1</span>调研皮肤的特征归纳</h2>
+  <p><strong>调研口径（2026-09-13 重新联网核验）</strong>：FMScout FM26 皮肤榜（12 款，带浏览量 / 下载量）、sortitoutsi FM26 皮肤区、FM Skin Builder 图库（15 款，支持一键应用与自动备份）、以及爆棚 / 贴吧等中文社区口碑。量级前三为 Material Skin 26（509,253 浏览 / 111,436 下载，v2.2.6）、AlexMorak FM26 Theme（419,324 / 81,167，已停更）、CTRL 26（323,954 / 99,369，v1.8）；其后依次为 ASF Skin、TinyHips' Dark Mode（OLED 友好）、SAS26、Diablo 26、Kojuro Theme、MNB（AnSeOs，低分辨率支持）、skogr（热图 / 西甲风直播图形）、TSO（DaveHouto）等。下面把这些皮肤的特征收敛成 14 条归纳，再在第 2 章逐维度选出本工具的风格取值。</p>
   <div class="doc-card">
+    <h3 style="margin-top:0">提炼依据：调研皮肤的 14 条特征</h3>
     <ol>
-      <li><strong>深海军蓝是绝对主流</strong>：Darkside / MNB / TSO / CTRL 全部 dark-navy，目标是长时间使用不刺眼。</li>
-      <li><strong>集体「去紫」</strong>：FM26 默认紫蓝被普遍替换为克制的海军蓝 + 单一强调色。</li>
-      <li><strong>降噪（Declutter）第一</strong>：弱化装饰、弱化单选组、统一状态色阶、表格加斑马纹、按钮加细边框。</li>
-      <li><strong>瓷砖（Tile）与背景层级取代粗边框卡片</strong>；导航靠激活区块高亮，而非图标堆砌。</li>
-      <li><strong>字体偏小偏紧、信息密度高</strong>：几乎所有皮肤都换字体，数据强调等宽对齐。</li>
-      <li><strong>球员档案页是视觉重心</strong>：大脸肖像、多边形切角（Lotsgon polygon）成为标志性语言。</li>
+      <li><strong>深色 / 深海军蓝是绝对主流</strong>：Darkside Base Skin、MNB、Diablo 26、TinyHips' Dark Mode、CTRL（官方自标 <code>dark</code>）、TSO 全部深色；Darkside 明确以「长时段游玩不刺眼」为目标。</li>
+      <li><strong>OLED 纯黑是深色的极端分支</strong>：TinyHips' Dark Mode 主打 OLED 友好与界面精简，受众窄但需求真实存在（其已停更，方向被后续皮肤部分继承）。</li>
+      <li><strong>集体「去紫去蓝」</strong>：AlexMorak 的卖点就是「去掉 FM26 大部分烦人的紫蓝色调」；CTRL 1.5 移除对话建议的紫色渐变、1.1 移除消息的蓝色底。</li>
+      <li><strong>状态色与评分色阶收敛到同一色相</strong>：CTRL 1.6 修正平均评分色阶不再跳色，并为球员状态新增主题化指示色，保证语义红绿不被杂色干扰。</li>
+      <li><strong>降噪优先：先删元素，再加装饰</strong>：MrTini23 以「重排布局、去掉杂乱」为核心目标；CTRL 1.6 刻意弱化单选组，1.3 清理消息卡片与按钮。</li>
+      <li><strong>导航靠分区高亮，不靠图标堆砌</strong>：CTRL 1.6 直接移除导航图标、恢复「当前分区高亮」，用高亮而非分割线区分区块。</li>
+      <li><strong>卡片重排以减少滚动与重叠</strong>：CTRL 1.5 重排 My History 与球员表现卡片避免元素重叠，1.8 放大租借卡片以显示更多信息。</li>
+      <li><strong>表格用弱交替行底色，而不是重网格线</strong>：CTRL 1.5 为表格交替行加低调背景色（zebra），靠行底而非描边维持可读性。</li>
+      <li><strong>次级按钮用细边框做界定</strong>：CTRL 1.5 给次级按钮重新加回边框，同时压低星标的金色饱和度、把属性变化图标改为更实心的样式，避免高强度装饰色。</li>
+      <li><strong>背景图与赛事主题承担氛围，但只在观赏型界面可行</strong>：CTRL 1.8 为球员报告 / 战术 / 阵容 / 俱乐部页统一铺主背景图，并为授权赛事铺低调的赛事主题背景；这类做法放到信息密集的工具界面会直接损伤可读性。</li>
+      <li><strong>字号偏小偏紧，以高分屏为前提，同时给低分屏兜底</strong>：CTRL 建议 1920×1080 以上并配合 Small 字体缩放；Material 更换字体并重设字号；MNB 与 Material 都单独提供低分辨率布局选项。</li>
+      <li><strong>数据前置：属性数值化 + 可视化</strong>：skogr 把体能 / 疲劳 / 属性直接数值化，并在传球图上叠加个人热图与西甲风格持球图形；CTRL 新增疲劳等级图标与传球图。</li>
+      <li><strong>球员档案页与头像母题是视觉重心</strong>：Material 的卖点之一是大头像档案页 + 双模板，并移除头像周围的圆形背景与渐变；Lotsgon 的 Player Polygon – Info View 把多边形属性图搬上档案页。</li>
+      <li><strong>主题「换色包化」，并按队伍出主题皮肤</strong>：Darkside Base Skin 直接提供 blue / red / green / original 多套 bundle，AnSeOs MNB 额外发布 Emerald Green 主题包，Darkside 还做俱乐部主题皮肤（Die roten Teufel、Mia san mia），Material 则提供「保留渐变」的可选版本。</li>
     </ol>
   </div>
-  <div class="callout info"><span class="ic">★</span><p>本工具恰好是一个「头像工具」——FM 皮肤里最标志性的多边形/圆角人像母题，与「给随机人长脸」的业务高度呼应，应作为品牌符号反复出现。</p></div>
+  <div class="callout info"><span class="ic">★</span><p>本工具恰好是一个「头像工具」——FM 皮肤里最标志性的人像母题（圆角 / 多边形切角）与「给随机人长脸」的业务高度呼应。2026 年 Lotsgon 的 Player Polygon 视图仍在 Skin Builder 图库上榜，说明该母题依然活跃，应作为品牌符号反复出现（对应下方「造型语言」维度）。</p></div>
+
+  <h2 id="p-styles"><span class="no">2</span>设计风格最终确认</h2>
+  <p>第 1 章的 14 条特征按 6 个维度归类后逐项定稿：每张卡标出候选方向、本次采用的取值与取舍依据（未采用的候选登记为二期储备，见本节末尾）。</p>
+
+  <h3>六个风格维度 · 候选与取舍（✓ = 本次采用）</h3>
+  <div class="grid3">
+    <div class="skin-card"><div class="nm">① 主题基调</div><div class="tags"><span class="skin-tag hot">深海军蓝 ✓</span><span class="skin-tag">中性炭灰</span><span class="skin-tag">OLED 纯黑</span><span class="skin-tag">浅色明亮</span></div><p>采用：深海军蓝为默认，浅色同期交付。依据：头部皮肤清一色深色；TinyHips 证明 OLED 纯黑可行但受众窄；FM 生态几乎没有主流浅色方案，而本工具是白天也会用的桌面工具，故双主题并做。</p></div>
+    <div class="skin-card"><div class="nm">② 强调色</div><div class="tags"><span class="skin-tag hot">青绿 Teal ✓</span><span class="skin-tag">翡翠绿</span><span class="skin-tag">俱乐部色换色包</span><span class="skin-tag">FM 紫蓝</span></div><p>采用：青绿 #2DD4A7 / #0DA880。依据：Material Skin 多年沿用 misty teal 且下载量第一；AnSeOs 的 Emerald Green 与 Darkside 的 blue / red / green bundle 说明「换色」确有需求，但首版不做多色包，列为二期储备；紫蓝被社区一致抛弃。</p></div>
+    <div class="skin-card"><div class="nm">③ 表面与深度</div><div class="tags"><span class="skin-tag hot">背景分层 ✓</span><span class="skin-tag">背景图 + 赛事主题</span><span class="skin-tag">粗边框卡片</span></div><p>采用：base / surface / raised 三层 + 发丝描边，仅弹层用柔和投影。依据：CTRL 1.8 用背景图与赛事主题承载氛围，对观赏型游戏界面合适，但对工具界面会伤可读性；粗边框卡片已被全行业淘汰。</p></div>
+    <div class="skin-card"><div class="nm">④ 造型语言</div><div class="tags"><span class="skin-tag hot">中圆角 6–12px ✓</span><span class="skin-tag">全直角</span><span class="skin-tag">大圆角胶囊</span></div><p>采用：圆角按控件分档（面板 10px / 控件 6–8px），人像为 12px 圆角矩形，多边形图作为辅助图形语言。依据：档案页与头像母题在 2026 仍是视觉重心，且需与面板圆角语言统一。</p></div>
+    <div class="skin-card"><div class="nm">⑤ 信息密度与字体</div><div class="tags"><span class="skin-tag hot">13px 高密度 ✓</span><span class="skin-tag">14px 舒适</span><span class="skin-tag">12px 极密</span></div><p>采用：13px 基准 + 等宽数字 + 紧凑表格，零新增字体依赖。依据：皮肤普遍小字紧缩，但 CTRL 的前提是 1920×1080 + Small 缩放；本工具最低要支持 1366×768，故取 13px 折中，靠斑马纹与等宽对齐控制长列表（30 万行级）噪声。</p></div>
+    <div class="skin-card"><div class="nm">⑥ 动效与装饰</div><div class="tags"><span class="skin-tag hot">轻量 ≤200ms ✓</span><span class="skin-tag">无动效</span><span class="skin-tag">丰富 / 发光玻璃</span></div><p>采用：轻量动效，禁用渐变文字、玻璃拟态与发光。依据：皮肤社区普遍克制（去渐变、去发光、去圆底头像）；本工具只保留进度与抽屉 / 模态的 ≤200ms 过渡，其余不动。</p></div>
+  </div>
+
+  <h3>定稿组合：教练席海军蓝（The Dugout）</h3>
+  <p>六张卡里的确认项合起来就是定稿风格：<strong>深海军蓝底 + 单一青绿强调 + 三层背景深度 + 中圆角与圆角人像 + 13px 高密度 + 200ms 内轻动效</strong>。这一组合与 2026 年社区实际选择一致——下载量第一的 Material Skin 走的就是同一路子（青绿 + 深色），「去紫去蓝 + 降噪」是头部皮肤的共识动作。深色与浅色只是同一组设计令牌的不同取值，切换主题不改变任何结构、密度与信息层级。</p>
+  <div class="grid3">
+    <div class="principle"><div class="p-no">定稿 · 色调</div><h4>深海军蓝 + 青绿</h4><p>三层背景 #0D1320 / #151D2E / #1D2942，全界面单一强调色青绿，红琥珀绿只承担语义状态。</p></div>
+    <div class="principle"><div class="p-no">定稿 · 形态</div><h4>三层深度 + 中圆角</h4><p>靠背景深浅与间距分组而非方框；面板 10px、控件 6–8px、人像 12px 圆角矩形。</p></div>
+    <div class="principle"><div class="p-no">定稿 · 节奏</div><h4>13px 高密度 + 轻动效</h4><p>13px 基准字与等宽数字；动画 ≤200ms、位移 ≤8px，并适配 reduced-motion。</p></div>
+  </div>
+  <div class="tok-dim">定稿色板 · 深色（默认）「教练席海军蓝」</div>
+  <div class="mini-ui">
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#2DD4A7"></span>--accent #2DD4A7</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#0D1320"></span>--bg-base #0D1320</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#151D2E"></span>--bg-surface #151D2E</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#1D2942"></span>--bg-raised #1D2942</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#34D399"></span>--ok #34D399</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#FBBF24"></span>--warn #FBBF24</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#F87171"></span>--danger #F87171</span>
+  </div>
+  <div class="tok-dim">定稿色板 · 浅色「日间球场」</div>
+  <div class="mini-ui">
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#0DA880"></span>--accent #0DA880</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#ECF0F6"></span>--bg-base #ECF0F6</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#FFFFFF"></span>--bg-surface #FFFFFF</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#F2F5FA"></span>--bg-raised #F2F5FA</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#12965A"></span>--ok #12965A</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#B45309"></span>--warn #B45309</span>
+    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#DC2626"></span>--danger #DC2626</span>
+  </div>
+  <div class="tok-dim">定稿风格实样（随深浅主题实时切换）</div>
+  <div class="mini-ui">
+    <button class="btn primary">主要操作</button>
+    <button class="btn">次级</button>
+    <div class="seg3" style="width:230px"><button class="active">保留</button><button>覆写</button><button>生成</button></div>
+    <label class="switch"><input type="checkbox" checked /><span class="track"></span>轻动效</label>
+    <span class="pill ok"><span class="dot"></span>就绪</span>
+    <span class="pill warn"><span class="dot"></span>进行中</span>
+    <span class="pill gray"><span class="dot"></span>未设置</span>
+  </div>
+  <div class="mini-ui">
+    <div class="progress-track" style="flex:1;min-width:200px"><div class="progress-fill" style="width:62%"></div></div>
+    <span style="font-size:12px;color:var(--text-2)">进度 8px · 过渡 150ms · 百分比等宽</span>
+  </div>
+  <p>完整令牌取值、字号阶与组件规范见「设计方案」页；本节只确定风格方向，不涉及实现细节。</p>
+  <div class="callout info"><span class="ic">i</span><p><strong>落选候选的去向</strong>：调研中被验证有真实需求但本次不做的三项，登记为二期储备 —— ①强调色换色包（Darkside blue / red / green bundle、AnSeOs Emerald Green 的做法，令牌化后成本很低）；②OLED 纯黑主题（TinyHips 路线，只需再补一档 <code>--bg-*</code> 取值）；③低分辨率 / 更小字号档（MNB 与 Material 的低分屏布局、CTRL 的 Small 缩放前提，本工具暂以 13px + 1366×768 兜底）。</p></div>
 
   <h2 id="p-principles"><span class="no">3</span>四条设计原则</h2>
   <div class="grid2">

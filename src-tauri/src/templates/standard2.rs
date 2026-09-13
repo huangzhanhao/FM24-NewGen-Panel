@@ -1,4 +1,4 @@
-//! 【新手导读】标准二：头像包按 14 个种族/大区分目录组织（African、Asian、Caucasian…）。
+//! 标准二：头像包按 14 个种族/大区分目录组织（African、Asian、Caucasian…）。
 //! 抽图逻辑 = 国籍查表（json `Ethnics`）→ 种族码修正（json `CodeRules`）→ 池优先级 → 随机抽图。
 //! 规则全部来自 `assets/standard2.json`（内置默认）与 `data/rules/standard2.json`（用户可编辑），
 //! 本模块不硬编码任何目录名或码表。
@@ -38,6 +38,7 @@ pub fn rule_file() -> RuleFile {
     RuleFile { name: "standard2", path: |data_dir: &Path| rule_path(data_dir), save: save_file }
 }
 
+/// 用户可编辑规则文件路径：<data_dir>/rules/standard2.json。
 fn rule_path(data_dir: &Path) -> PathBuf { data_dir.join("rules").join("standard2.json") }
 
 /// 解析 + 原子写回（json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
@@ -71,6 +72,7 @@ pub struct Standard2Rule {
 }
 
 impl Standard2Rule {
+    /// 按配置的 FolderList 过滤出抽图池（清单外目录与空目录都不进池），并持有配置的一份副本。
     pub fn new(faces_map: &BTreeMap<String, BTreeSet<String>>, cfg: &Standard2Config) -> Self {
         Self { pools: filter_pools(faces_map, &cfg.folder_list), cfg: cfg.clone() }
     }

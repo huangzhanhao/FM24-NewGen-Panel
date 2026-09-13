@@ -1,5 +1,4 @@
-<!-- 【新手导读】“替换执行”面板：选择模式与选项、发起/取消替换、显示进度条。
-     重点演示 bind:checked（双向绑定）、{#each} 循环渲染、以及“未就绪引导”的派生计算。 -->
+<!-- “替换执行”面板：选择模式与选项、发起/取消替换、显示进度条。 -->
 <script lang="ts">
   import { ask } from '@tauri-apps/plugin-dialog';
   import { api } from '../api';
@@ -12,7 +11,7 @@
   // value 发往后端（协议值），label 显示在模式按钮上，desc 显示在选中模式旁。
   const modeDesc = $derived(t.replace.modes.find((m) => m.value === mode)?.desc ?? '');
 
-  // 下面四个是表单选项，用 $state 声明；通过 bind:checked 与复选框双向绑定。
+  // 四个表单选项（与复选框双向绑定）；mode 的取值是发往后端的协议值。
   let mode = $state<'Preserve' | 'Overwrite' | 'Generate'>('Preserve');
   let allowDuplicates = $state(true);
   let filterNewgan = $state(true);
@@ -28,8 +27,7 @@
   const ready = $derived(
     !!snap && snap.currentProfile !== 'No Profile' && !!snap.currentGroup && !!snap.currentRtf,
   );
-  // 未就绪原因（引导用户补全，对等 v1 按钮三级禁用逻辑）。
-  // 把三个可能缺失的项组成数组，filter(Boolean) 去掉空字符串，剩下就是待完成项。
+  // 未就绪原因（引导用户补全，对等 v1 按钮三级禁用逻辑）：列出三个可能缺失的项。
   const missing = $derived([
     !snap || snap.currentProfile === 'No Profile' ? t.replace.needProfile : '',
     snap && !snap.currentGroup ? t.replace.needGroup : '',
@@ -63,8 +61,7 @@
 
 <div class="card">
   <div class="card-title">{t.replace.cardTitle}</div>
-  <!-- 模式选择：连体分段控件 seg3。{#each} 遍历 t.replace.modes 生成三个按钮，选中的加 active 类。
-       按钮显示 label（中文），点选后把 value（协议值）存进 mode。 -->
+  <!-- 模式选择：遍历 t.replace.modes 生成三个按钮，按钮显示 label，点选后把 value（协议值）存进 mode。 -->
   <div class="path-row two">
     <span class="row-label">{t.replace.modeLabel}</span>
     <div class="mode-line">

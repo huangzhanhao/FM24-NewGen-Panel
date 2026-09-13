@@ -1,4 +1,4 @@
-//! 【新手导读】退化布局：空包（Empty）与无法识别的包（Unknown）。
+//! 退化布局：空包（Empty）与无法识别的包（Unknown）。
 //! 这两种布局**不是标准**——它们没有目录组织约定可循，也没有 json 规则文件；
 //! 抽图逻辑 = 把包内所有子/孙目录（含根）的图片归入一个大池，完全随机抽。
 //! 对外的标准号映射（Empty → 1、Unknown → 0）只在 `PackLayout::standard()` 一处。
@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct UnknownRule { pools: BTreeMap<String, BTreeSet<String>> }
 
 impl UnknownRule {
+    /// 用递归全池（`scan.recursive_pools`，含根与全部子/孙目录）构造；`pick` 把全池展平后随机取图。
     pub fn new(pools: BTreeMap<String, BTreeSet<String>>) -> Self { Self { pools } }
 }
 

@@ -1,5 +1,4 @@
-<!-- 【新手导读】“当前任务”卡片：展示当前头像包与 RTF 路径，提供完整性检查与一键修复。
-     重点演示 $effect（副作用）和 use:action（上一文件介绍过的 pinScrollEnd）。 -->
+<!-- “当前任务”卡片：展示当前头像包与 RTF 路径，提供完整性检查与一键修复。 -->
 <script lang="ts">
   import { open, ask } from '@tauri-apps/plugin-dialog'; // open=文件/目录选择框；ask=确认框
   import { api } from '../api';
@@ -15,7 +14,7 @@
   let ruleEditor = $state<{ openEditor: () => void } | null>(null);   // 规则编辑对话框实例
 
   const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
-  const busy = $derived(!!snap?.replacing); // !! 把值强转为布尔（替换中时禁用按钮）
+  const busy = $derived(!!snap?.replacing); // 替换中时禁用按钮
   // 浏览态：下拉选中的存档 ≠ 后端当前激活档——展示只读预览；
   // 写「后端当前档」状态的操作（选择 RTF 等）禁用，读操作（检查完整性/扫描）自洽可用。
   const browseMode = $derived(
@@ -30,11 +29,10 @@
   );
 
   // 切档 / 换组后清掉上一次检查结论，不把旧组的结论显示到新组上。
-  // $effect(函数)：在组件挂载后运行，并在它“读取过的响应式值”变化时重新运行。
-  // 这里读了 snap?.currentGroup，所以当前组一变就会重新执行。
+  // 该 effect 读取了 snap.currentGroup，因此当前组一变就会重新执行。
   let lastGroup = '';
   $effect(() => {
-    const g = snap?.currentGroup ?? ''; // ?? 是空值合并：左边为 null/undefined 时取右边
+    const g = snap?.currentGroup ?? '';
     if (g !== lastGroup) { lastGroup = g; integrity = null; }
   });
 

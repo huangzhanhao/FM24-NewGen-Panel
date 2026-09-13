@@ -1,11 +1,12 @@
-//! 【新手导读】头像包布局扫描与判定。
+//! 头像包布局扫描与判定。
+//!
 //! 社区头像包有多套组织"标准"（标准一：图片直铺；标准二：14 种族目录；标准三：细分目录；
 //! 未来可扩展标准四/五/六……）。本模块职责：
 //!   1. 扫描：scan_pack 一次遍历建立图片索引（纯收集，不做判定）；
 //!   2. 判定：classify 按「各标准 json 的 FolderList」推断包属于哪个标准——
 //!      超集（含全部目录、可多出）或子集（有缺失）都算归属该标准，交叉/未知名 → Unknown。
 //!
-//! FolderList 来自 templates（用户可配置），本模块不再硬编码任何目录清单。
+//! FolderList 来自 templates（用户可配置），本模块不硬编码任何目录清单。
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -35,6 +36,7 @@ impl PackLayout {
             PackLayout::Unknown => 0,
         }
     }
+    /// 是否标准一（图片直铺）布局；「扫描头像」据它选图片总数口径：平铺数根图，其余数递归全池。
     pub fn is_flat(&self) -> bool { matches!(self, PackLayout::Flat) }
 }
 
@@ -80,6 +82,7 @@ pub struct PackScan {
     pub recursive_pools: BTreeMap<String, BTreeSet<String>>,
 }
 
+/// 按扩展名判断是否图片文件（png/jpg/jpeg，大小写不敏感）。
 fn is_image_ext(name: &str) -> bool {
     matches!(name.rsplit('.').next().map(|s| s.to_ascii_lowercase()).as_deref(),
              Some("png") | Some("jpg") | Some("jpeg"))

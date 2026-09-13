@@ -1,3 +1,4 @@
+/** api 封装的单元测试：校验命令名与参数对象（驼峰）与后端约定一致。 */
 import { describe, expect, it, vi } from 'vitest';
 
 // vi.mock 会被提升到文件顶部，必须用 vi.hoisted 共享 mock 实例

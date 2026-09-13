@@ -1,9 +1,8 @@
-/** Svelte actions（组件通用的 DOM 行为） */
-// 【新手导读：什么是 Svelte action】
-// action 是一个普通函数，用在模板里写 use:函数名={参数}，用于对某个 DOM 元素做“底层操作”。
-// 函数接收该 DOM 节点作为第一个参数，可选地返回 { update, destroy }：
-//   update(newValue) —— 参数变化时自动调用；destroy() —— 元素被移除时调用（用于清理监听/定时器）。
-// 适合封装那些“与具体组件无关、但需要直接操作 DOM”的行为（如下面的滚动定位）。
+/**
+ * Svelte actions：与具体组件无关、需要直接操作 DOM 的通用行为。
+ * action 是普通函数，模板里以 `use:函数名={参数}` 使用；接收 DOM 节点作第一个参数，
+ * 可返回 { update, destroy }：update(newValue) 在参数变化时调用，destroy() 在元素移除时清理监听/定时器。
+ */
 
 /**
  * 只读路径输入框：值或框宽变化后把滚动位置钉到最右侧，

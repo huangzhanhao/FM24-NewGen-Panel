@@ -1,5 +1,5 @@
-<!-- 【新手导读】标准规则编辑对话框：直接查看/修改/保存 data/rules/ 下的 standard2|standard3.json。
-     标准二/三用顶部 chip 切换；切换与关闭前若有未保存修改会弹确认；
+<!-- 标准规则编辑对话框：直接查看/修改/保存 data/rules/ 下的 standard2|standard3.json。
+     顶部 chip 切换标准二/三；切换与关闭前若有未保存修改会弹确认；
      保存时后端先按该标准 schema 校验（非法 JSON 直接报错，不会写入坏规则）。 -->
 <script lang="ts">
   import { ask } from '@tauri-apps/plugin-dialog';
@@ -29,6 +29,7 @@
     void load(active);
   }
 
+  /** 载入指定标准的规则文件内容，并把当前内容记为 baseline（用于判断有无未保存修改）。 */
   async function load(name: RuleName) {
     try {
       text = await api.readRuleFile(name);
@@ -37,6 +38,7 @@
     } catch (e) { await showError(e); }
   }
 
+  /** 切换标准；有未保存修改时先弹确认，用户放弃才切换。 */
   async function switchTo(name: RuleName) {
     if (name === active) return;
     if (dirty && !(await ask(t.ruleEditor.unsavedSwitch(LABELS[active]), { title: t.ruleEditor.unsavedTitle }))) return;
@@ -44,6 +46,7 @@
     await load(active);
   }
 
+  /** 保存当前标准：后端按 schema 校验并原子写回；成功后 baseline 同步为当前内容。 */
   async function save() {
     try {
       await api.saveRuleFile(active, text);
@@ -53,6 +56,7 @@
     } catch (e) { await showError(e); } // JSON 校验错误（后端拒绝写入坏规则）
   }
 
+  /** 关闭对话框；有未保存修改时先弹确认。 */
   async function close() {
     if (dirty && !(await ask(t.ruleEditor.unsavedClose(LABELS[active]), { title: t.ruleEditor.unsavedTitle }))) return;
     open = false;

@@ -1,12 +1,11 @@
-//! 【新手导读】Tauri 命令层：对等旧版 services/* + app.py。数据留在 Rust，IPC 只传摘要/分页。
+//! Tauri 命令层（对等旧版 services/* + app.py）：前端 invoke 的全部入口。
 //!
-//! 【核心概念：什么是 Tauri 命令】带 #[tauri::command] 的函数会自动暴露给前端。
-//! 前端写 invoke("create_profile", { name: "档A" })，就会调到本文件里的 create_profile 函数。
-//! 参数里的 State<'_, AppState> 由 Tauri 自动注入（就是 lib.rs 里 app.manage 托管的那个状态）。
-//! 返回 Result<T, String> 时：Ok → 前端 Promise resolve；Err(String) → 前端 Promise reject（抛异常）。
-use crate::assets::NAT_TRANSLATION;
+//! 【设计】数据留在 Rust，IPC 只传摘要/分页：大名单与日志在缓存里按页查询，
+//! 每次状态变更后回传 AppSnapshot 让前端整体刷新。命令可能在不同线程被调用、后台替换
+//! 也跑在单独线程，因此 AppState 的共享字段用 Mutex 保护、跨线程引用用 Arc、
+//! 运行/取消标志用 AtomicBool。返回 Result<T, String> 时，Err 的中文描述由前端直接弹窗展示。
 use crate::face_mapper::Mode;
-use crate::facepack_scanner::{self, PackLayout, PackScan}; // 标准识别/扫描的唯一来源（facepack_scanner.rs）
+use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::{LogPage, LogSink, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
@@ -17,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State}; // AppHandle=应用句柄（发事件用）；Emitter 提供 emit；State 注入托管状态
+use tauri::{AppHandle, Emitter, State};
 
 // 标准二的 14 目录常量保留在此 re-export（validate_image_dirs 与既有测试引用路径不变）；
 // 标准三目录清单已由 rule_config 的 standard3.json（FolderList）取代，不再有硬编码常量。
@@ -41,7 +40,7 @@ pub struct AppState {
 pub struct FaceIndex { pub img_dir: String, pub scan: Arc<PackScan> }
 
 // ---------------- 传给前端的类型（统一 camelCase） ----------------
-// 【说明】下面这些结构体是「前后端的数据契约」：Rust 端用蛇形命名，通过 serde 自动转成前端的驼峰命名。
+// 下面这些结构体是「前后端的数据契约」：Rust 端蛇形命名经 serde 自动转成前端的驼峰命名，
 // 前端 types.ts 里有与之对应的 TypeScript 接口，两边字段必须一致。
 
 /// 一个头像包（组）的摘要：目录 + 已设 RTF。
@@ -169,7 +168,7 @@ fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
     }
 }
 
-// #[tauri::command] 是关键：把这个函数注册为前端可调用的命令（还需在 lib.rs 的 invoke_handler 里登记）。
+// 命令函数带 #[tauri::command]（还需在 lib.rs 的 invoke_handler 里登记）。
 
 /// 获取应用全局快照（前端启动时、或需要强制刷新时调）。
 #[tauri::command]
@@ -179,7 +178,7 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppSnapshot { snapshot(&stat
 #[tauri::command]
 pub fn create_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let name = name.trim().to_string();
-    state.pm.lock().unwrap().create_profile(&name)?; // ? 将底层错误直接回传前端
+    state.pm.lock().unwrap().create_profile(&name)?;
     state.logger.info("profile", format!("创建并激活 Profile: {name}"));
     Ok(snapshot(&state))
 }
@@ -256,10 +255,10 @@ pub fn delete_group(state: State<'_, AppState>, img_dir: String) -> Result<AppSn
 }
 
 /// 校验头像包目录，返回缺失的种族子目录名（前端弹一次确认框后批量创建）。
-/// 【注意】这个命令不需要 State（不访问全局状态），只根据传入的 img_dir 扫描目录。
+/// 这个命令不需要 State（不访问全局状态），只根据传入的 img_dir 扫描目录。
 #[tauri::command]
 pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
-    // 先把目录下已有的子目录名收集到一个 HashSet（方便快速判存在）。
+    // 目录下已有的子目录名收集成集合，再对照标准 14 个目录筛出缺失项。
     let existing: std::collections::HashSet<String> = std::fs::read_dir(&img_dir)
         .into_iter()
         .flatten()
@@ -267,7 +266,6 @@ pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    // 对照标准 14 个目录，筛出「不在已有集合里」的，即缺失目录。
     FACEPACK_DIRS
         .iter()
         .filter(|d| !existing.contains(**d))
@@ -380,7 +378,7 @@ fn scan_rtf_core(rtf_path: &str, logger: &impl LogSink) -> Result<(RtfScanResult
     let mut scanner = RtfScanner::new();
     scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
-    let data = scanner.parse_roster(Path::new(rtf_path), false, &NAT_TRANSLATION, logger)?;
+    let data = scanner.parse_roster(Path::new(rtf_path), false, logger)?;
     let summary = RtfScanResult {
         total: data.len(),
         newgan: data.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count(),
@@ -419,7 +417,7 @@ pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, Strin
 }
 
 /// 用资源管理器打开目录（便携应用面向 Windows 的统一出口）。
-/// 【坑】组 key 经 norm_dir 带尾部分隔符，而 explorer 对引号内的尾反斜杠解析脆弱
+/// 组 key 经 norm_dir 带尾部分隔符，而 explorer 对引号内的尾反斜杠解析脆弱
 /// （`\"` 被当作转义引号，含空格的路径会打不开正确位置），传入前必须去掉尾部分隔符。
 fn explorer_open(dir: &Path, what: &str) -> Result<(), String> {
     let s = dir.to_string_lossy();
@@ -442,15 +440,15 @@ pub fn open_rules_dir(state: State<'_, AppState>) -> Result<(), String> {
     explorer_open(&dir, "规则目录")
 }
 
-/// 【最复杂的命令】启动批量替换。开一个后台线程跑流水线，避免阻塞界面。
-/// app: AppHandle 用于在线程里向前端 emit 事件；state 提供共享状态；args 是前端传来的参数。
+/// 启动批量替换：校验参数后开一个后台线程跑流水线，避免阻塞界面。
+/// app 用于在线程里向前端 emit 事件；args 是前端传来的参数。
 #[tauri::command]
 pub fn start_replace(
     app: AppHandle,
     state: State<'_, AppState>,
     args: ReplaceArgs,
 ) -> Result<(), String> {
-    // swap(true) 原子地把 running 置 true 并返回旧值；若旧值已是 true，说明有任务在跑，拒绝重入。
+    // swap(true) 原子地把 running 置 true 并返回旧值；旧值已是 true 说明有任务在跑，拒绝重入。
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("已有替换任务在执行".into());
     }
@@ -460,7 +458,7 @@ pub fn start_replace(
         let pm = state.pm.lock().unwrap();
         (pm.get_cur_rtf(), pm.cur_group.clone())
     };
-    // let ... else：img_dir 为 None 就报错退出（退出前记得把 running 置回 false）。
+    // 以下每条校验失败路径都必须先把 running 复位，否则界面全局禁用到重启。
     let Some(img_dir) = img_dir else {
         state.running.store(false, Ordering::SeqCst);
         return Err("请先选择头像包目录".into());
@@ -497,11 +495,10 @@ pub fn start_replace(
         pre_scan,
         rule_config,
     };
-    // 把需要跨线程使用的东西先 clone 出来（Arc::clone 只增加引用计数，不拷贝真实数据）。
+    // 后台线程需要的句柄先 clone 出来（Arc::clone 只涨引用计数，不拷贝真实数据）。
     let (cancel, running) = (state.cancel.clone(), state.running.clone());
     let (rtf_cache, mapping_cache) = (state.rtf_cache.clone(), state.mapping_cache.clone());
     let logger = state.logger.clone();
-    // std::thread::spawn 开后台线程；move 把上面 clone 的变量所有权移进线程。
     std::thread::spawn(move || {
         let emit_app = app.clone();
         // 跑流水线；progress 回调里通过 emit 把进度发给前端（事件名 replace:progress）。
@@ -602,7 +599,7 @@ pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerP
 }
 
 /// RTF 名单分页查询（大名单预览；数据留 Rust，IPC 只传当前页）。
-/// 【为何分页】名单可能上万条，一次全传会卡顿，所以只传当前页（前端每页 200 条）。
+/// 名单可能上万条，一次全传会卡顿，所以只传当前页（前端每页 200 条）。
 #[tauri::command]
 pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResult<PlayerRecord> {
     // 先把缓存整体 clone 出来（避免长时间持锁），再交给纯逻辑做筛选/排序/分页。
@@ -614,7 +611,7 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
 fn query_players_core(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageResult<PlayerRecord> {
     let search = query.search.to_lowercase();
     if !search.is_empty() {
-        // retain 保留满足条件的项：UID/姓名/国籍 任一包含搜索词即命中。
+        // UID/姓名/国籍任一包含搜索词即命中。
         rows.retain(|r| {
             r.uid.to_lowercase().contains(&search)
                 || r.name.to_lowercase().contains(&search)
@@ -636,7 +633,6 @@ fn query_players_core(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageR
         if query.sort_desc { ord.reverse() } else { ord }
     });
     let total = rows.len();
-    // skip + take 实现分页，只返回当前页。
     PageResult { total, items: rows.into_iter().skip(query.offset).take(query.limit).collect() }
 }
 
@@ -734,7 +730,7 @@ pub fn save_rule_file(state: State<'_, AppState>, name: String, content: String)
 }
 
 /// 读取预览图片字节（前端转 blob URL 显示）。
-/// 【为何不直接用文件路径】WebView 无权直接读本地磁盘图片，所以由 Rust 读出字节传给前端。
+/// WebView 无权直接读本地磁盘图片，所以由 Rust 读出字节传给前端：
 /// 返回 tauri::ipc::Response（二进制响应），前端收到的是 ArrayBuffer。
 #[tauri::command]
 pub fn read_image(path: String) -> Result<tauri::ipc::Response, String> {

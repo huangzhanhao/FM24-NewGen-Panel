@@ -1,9 +1,10 @@
-//! 【新手导读】Replace Faces 流水线（自旧版 services/replace_service.py 移植）。
-//! 把「校验 RTF → 解析 → 映射 → 写 config.xml」四个阶段串成一条完整流程。
-//! 进度通过回调上报（值与 v1 对齐：20/40/80/90/100），取消经 AtomicBool 逐球员生效。
-//! 【日志】关键步骤经 LogSink 记 INFO（模块 replace）：生产实现转发 log 门面，由官方
-//! 插件分发给 stdout/滚动文件/内存缓冲（内存侧再批量 emit 成 log:batch 推给前端）。
-use crate::assets::NAT_TRANSLATION;
+//! Replace Faces 流水线（自旧版 services/replace_service.py 移植）：
+//! 「识别并解析 RTF → 布局判定与拦截 → 逐球员抽图 → 写 config.xml」四阶段串行编排。
+//!
+//! 【约定】进度经 progress 回调上报（值与 v1 对齐：20/40/80/90/100）；取消经 AtomicBool
+//! 在阶段之间与映射循环内部逐项生效；关键步骤经 LogSink 记 INFO（模块 replace）——
+//! 生产实现转发 log 门面，由官方插件分发给 stdout/滚动文件/内存缓冲（内存侧再批量
+//! emit 成 log:batch 推给前端）。
 use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack_scanner::PackLayout;
 use crate::logger::LogSink;
@@ -45,7 +46,7 @@ pub struct RunResult {
     pub mapping: Vec<MappingEntry>,
 }
 
-/// 【核心函数】执行整条替换流水线。run 只做编排（进度与取消检查点），各阶段实现在下方 *_stage。
+/// 执行整条替换流水线。run 只做编排（进度与取消检查点），各阶段实现在下方 *_stage。
 /// progress 是回调函数（&mut dyn FnMut）：每进入一个阶段就调用它上报状态文字和百分比（emit 给前端）。
 /// logger 是日志出口（LogSink）：生产 = log 门面（官方插件承接），测试 = ChannelLogger 捕获。
 /// cancel 是跨线程取消标志：阶段之间、以及映射循环内部都会检查它。
@@ -110,7 +111,7 @@ fn parse_stage(
     progress("解析 RTF 文件…", 20);
     let t = Instant::now(); // 计时只覆盖解析（识别在上一步，不计入本行耗时）
     let rtf_data = scanner
-        .parse_roster(Path::new(&params.rtf_path), params.filter_newgen, &NAT_TRANSLATION, logger)
+        .parse_roster(Path::new(&params.rtf_path), params.filter_newgen, logger)
         .map_err(|e| failed(&e))?;
     // 解析完立即检查取消（原版口径）：不等头像包扫描跑完才停，大包扫描可能耗时很久。
     if is_cancelled(cancel) {

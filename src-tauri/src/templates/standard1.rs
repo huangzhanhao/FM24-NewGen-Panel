@@ -1,4 +1,4 @@
-//! 【新手导读】标准一：图片平铺在头像包根目录，没有种族/国籍子目录。
+//! 标准一：图片平铺在头像包根目录，没有种族/国籍子目录。
 //! 抽图逻辑 = 完全随机（忽略球员的国籍与种族码），因为包本身不含任何分类信息。
 //! 【为什么这个标准没有 json 规则文件】它没有任何可配数据：布局判定靠"无子目录 + 根目录有图"，
 //! 抽图靠单一根池。所以 `RuleConfig` 里没有它的字段，`folder_lists()` 里也没有它，
@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 pub struct Standard1Rule { pool: BTreeSet<String> }
 
 impl Standard1Rule {
+    /// 用包根图片池（`scan.root_images`）构造；`pick` 忽略球员的国籍与种族码，纯粹从池中随机取图。
     pub fn new(pool: BTreeSet<String>) -> Self { Self { pool } }
 }
 

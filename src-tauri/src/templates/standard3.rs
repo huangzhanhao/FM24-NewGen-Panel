@@ -1,4 +1,4 @@
-//! 【新手导读】标准三：头像包按细分目录组织（国籍级 + 族群级，如 Spain、China、Mestizo…）。
+//! 标准三：头像包按细分目录组织（国籍级 + 族群级，如 Spain、China、Mestizo…）。
 //! 抽图逻辑 = **规则块模型**：先按「国家 → 族群 → 全局默认」三级选出规则块，
 //! 再取该块里球员种族码对应的那条规则，把规则解析成候选目录，最后从目录池里随机抽图。
 //! 规则全部来自 `assets/standard3.json`（内置默认）与 `data/rules/standard3.json`（用户可编辑）。
@@ -315,6 +315,7 @@ pub fn rule_file() -> RuleFile {
     RuleFile { name: "standard3", path: |data_dir: &Path| rule_path(data_dir), save: save_file }
 }
 
+/// 用户可编辑规则文件路径：<data_dir>/rules/standard3.json。
 fn rule_path(data_dir: &Path) -> PathBuf { data_dir.join("rules").join("standard3.json") }
 
 /// 解析 + 结构校验 + 原子写回：非法内容不写盘，错误信息直接回显给规则编辑对话框。
@@ -334,6 +335,8 @@ pub struct Standard3Rule {
 }
 
 impl Standard3Rule {
+    /// 构造规则：`faces_map` 经 FolderList 过滤成主池（规则解析出的目录从这里取图），
+    /// `recursive_pools` 是 `Fallback::Random` 用的递归全池，`cfg.fallback` 决定第二级兜底策略。
     pub fn new(
         faces_map: &BTreeMap<String, BTreeSet<String>>,
         recursive_pools: &BTreeMap<String, BTreeSet<String>>,

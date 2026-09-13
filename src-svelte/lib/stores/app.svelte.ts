@@ -1,12 +1,16 @@
-// 【新手导读】全局应用状态 + 后端事件订阅。这是前端与后端交互的“中枢”。
-// listen 用于订阅 Tauri 后端 emit 发出的事件（与命令 invoke 不同：事件是后端主动推送）。
+/**
+ * 全局应用状态与后端事件订阅：前端与后端交互的中枢。
+ * listen 订阅后端 emit 的事件（与命令 invoke 相反：事件由后端主动推送）。
+ *
+ * 状态用 $state 声明；命令返回的快照整体替换 appStore.snapshot。
+ * 事件订阅是进程级副作用，initListeners 由 App 挂载时调用一次（内部用 inited 防重复）。
+ */
 import { listen } from '@tauri-apps/api/event';
 import { api } from '../api';
 import type { AppSnapshot, ProgressPayload, RtfScanResult } from '../types';
 import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 
-/** 全局应用状态（runes）。snapshot 由命令返回值整体替换。 */
-// $state 创建响应式对象：任何组件读 appStore.snapshot，当它变化时那些组件会自动重渲染。
+/** 全局应用状态（runes，响应式）。snapshot 由命令返回值整体替换。 */
 export const appStore = $state({
   snapshot: null as AppSnapshot | null, // 后端回传的全局快照（真实激活态；初始为 null，启动后填充）
   /** 浏览态预览快照：下拉选择存档但未点「激活」时的展示数据（null = 无浏览态）。

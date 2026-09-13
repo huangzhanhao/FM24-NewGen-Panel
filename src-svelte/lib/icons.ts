@@ -1,16 +1,13 @@
 /**
- * SVG 图标集中管理（不引入任何图标库依赖）
+ * SVG 图标集中管理（不引入任何图标库依赖）。
  *
- * 【新手导读：为什么图标要集中在一个文件？】
- * 所有图标都是 24×24 的线性 SVG，stroke 使用 currentColor（跟随文字颜色），
- * 这样一处改图标、全站生效，也便于统一线宽与圆角风格。
- *
- * 用法（在 .svelte 文件里）：
+ * 所有图标都是 24×24 的线性 SVG，stroke 使用 currentColor（跟随文字颜色），便于统一线宽与圆角风格，
+ * 一处改图标全站生效。用法（在 .svelte 文件里）：
  *   import { icons } from '../icons';
- *   <svg class="..." viewBox="0 0 24 24" fill="none" stroke="currentColor"
+ *   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
  *        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
- *        aria-hidden="true">{@html icons.folder}</svg>
- * filled=true 的图标（如播放）需要把外层 svg 的 fill 设为 currentColor 且不描边。
+ *        aria-hidden="true">{@html icons.folder.body}</svg>
+ * filled=true 的图标（如播放）需把外层 svg 的 fill 设为 currentColor 且不描边。
  */
 export interface IconDef {
   /** 放进 <svg> 内部的路径/形状标记 */

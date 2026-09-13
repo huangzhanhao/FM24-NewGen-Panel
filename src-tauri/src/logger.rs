@@ -1,26 +1,26 @@
-//! 【新手导读】应用日志：官方 tauri-plugin-log 插件承担管道，本模块只剩「官方没有」的内存缓冲。
+//! 应用日志：官方 tauri-plugin-log 插件承担管道，本模块只补「官方没有」的内存缓冲。
 //!
 //! 【分工】（重构前全部手写；重构后同功能用官方、缺口自己补——功能无损）
 //!   官方插件（tauri-plugin-log）负责：
 //!     ① log 门面：整个 Rust 生态（tauri / tao / wry 等依赖库）的日志统一汇入一处；
 //!     ② Stdout target：控制台输出（开发调试直读）；
-//!     ③ Folder target：滚动文件 newgan.log（10MB，滚动保留最近 3 份、文件名带日期，
-//!        替代原手写 rotate()）；行格式经 Target::format 保持 v1 兼容（见 v1_line）。
+//!     ③ Folder target：滚动文件 newgan.log（10MB，滚动保留最近 3 份、文件名带日期）；
+//!        行格式经 Target::format 保持 v1 兼容（见 v1_line）。
 //!   官方生态没有、本模块自研补齐的：
-//!     ④ LogMemory 内存环形缓冲（1 万条）供前端 query_logs 分页回查；
+//!     ④ LogMemory 内存环形缓冲（1 万条）供前端 query_logs 分页回查——官方没有「回查历史」能力；
 //!     ⑤ mpsc 批量事件（100ms / 单批上限 500）推给前端 log:batch，避免逐条 IPC 卡顿。
 //!
 //! 【数据流】任何 log::info!(target: "replace", ...) → 插件分发给三个 target：
 //!   stdout 打印 → 滚动文件落盘 → fern 闭包把原始记录组装成 LogLine 入缓冲+通道
 //!   → 后台线程聚批 emit("log:batch") → 前端日志面板。
 use serde::Serialize;
-use std::collections::VecDeque;              // 双端队列：可在两头增删，实现「环形缓冲」（满时从头部丢弃）
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};     // mpsc = 多生产者单消费者通道（线程间传递消息）
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex};
-use tauri::Emitter;                          // 引入 Emitter trait 才能用 app.emit() 向前端发事件
+use tauri::Emitter;
 
-const RING_MAX: usize = 10_000;              // 内存环形缓冲最大条数（_ 是数字分隔符，仅为易读）
+const RING_MAX: usize = 10_000; // 内存环形缓冲最大条数
 
 // 级别口径对齐 Rust log 门面（Trace/Debug/Info/Warn/Error），
 // 显示串沿用 v1 拼写（WARN→WARNING）；旧表的 CRITICAL 无产生源，由 TRACE 接替。
@@ -48,9 +48,7 @@ pub fn v1_line(ts: &str, level: &str, module: &str, message: &str) -> String {
     format!("| {ts} | NewGAN App | {level} | {module} | - {message}")
 }
 
-// #[derive(...)] 自动为结构体生成常用能力：
-//   Serialize → 可转 JSON 发给前端；Clone → 可复制；PartialEq → 可用 == 比较（测试用）。
-// #[serde(rename_all = "camelCase")] → Rust 的蛇形字段（如 is_newgan）序列化为前端的驼峰名（isNewgan）。
+// camelCase 序列化与前端 types.ts 对齐。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LogLine {
@@ -109,8 +107,7 @@ impl LogMemory {
     pub fn query(&self, level: &str, only: bool, offset: usize, limit: usize) -> LogPage {
         // want = 目标级别的序号（未知级别兜底为 INFO）。
         let want = LEVEL_ORDER.get(level).copied().unwrap_or(LEVEL_ORDER["INFO"]);
-        let buf = self.buf.lock().unwrap_or_else(|e| e.into_inner()); // 加锁读取内存缓冲
-        // filter 逐条判断是否保留：取该条级别序号 cur，按 only 决定「等于」还是「大于等于」want。
+        let buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         let all: Vec<&LogLine> = buf
             .iter()
             .filter(|l| {
@@ -118,10 +115,9 @@ impl LogMemory {
                 if only { cur == want } else { cur >= want }
             })
             .collect();
-        let total = all.len(); // 先记下总数，再切片取当前页
+        let total = all.len();
         LogPage {
             total,
-            // skip(offset) 跳过前面的，take(limit) 取 limit 条，cloned() 把 &LogLine 变为 LogLine。
             items: all.into_iter().skip(offset).take(limit).cloned().collect(),
         }
     }
@@ -136,6 +132,8 @@ pub struct Logger {
 }
 
 impl Logger {
+    /// 创建日志门面：`data_dir` 决定日志文件路径（`<data_dir>/newgan.log`），
+    /// `memory` 为自研内存环形缓冲（`query` 回查历史用），须与 lib.rs 里那份 Arc 指向同一实例。
     pub fn new(data_dir: &Path, memory: Arc<LogMemory>) -> Self {
         Self { path: data_dir.join("newgan.log"), memory }
     }
@@ -260,24 +258,21 @@ mod tests {
 }
 
 /// 每 100ms 批量把日志推给前端（避免逐条事件冲击 IPC）。
-/// 【机制】开一个后台线程死循环：阻塞等待最多 100ms 收到第一条，再把通道里剩余的一起取走（上限 500），
-/// 一次性 emit("log:batch", batch) 发给前端。move 闭包把 app、rx 的所有权移进线程。
+/// 后台线程死循环：最多等 100ms 收到第一条，再把通道里剩余的一起取走（上限 500），
+/// 一次性 emit("log:batch", batch) 发给前端（前端在 stores 里 listen("log:batch")）。
 pub fn spawn_emitter(app: tauri::AppHandle, rx: Receiver<LogLine>) {
     std::thread::spawn(move || loop {
         let mut batch = Vec::new();
-        // recv_timeout：最多等 100ms。收到第一条就放进 batch；超时无消息则 continue 继续下一轮。
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(first) => batch.push(first),
-            Err(_) => continue,
+            Err(_) => continue, // 超时无消息：下一轮继续等
         }
-        // try_recv 非阻塞地把通道里已有的全部取出（最多 500 条，防止单次批量过大）。
         while let Ok(line) = rx.try_recv() {
             batch.push(line);
             if batch.len() >= 500 {
-                break;
+                break; // 单批上限，防止一次 emit 载荷过大
             }
         }
-        // app.emit 把整批日志以事件形式发给所有前端监听者（前端在 stores 里 listen("log:batch")）。
         let _ = app.emit("log:batch", batch);
     });
 }

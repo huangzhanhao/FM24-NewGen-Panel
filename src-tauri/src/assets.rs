@@ -1,32 +1,32 @@
-//! 【新手导读】只读映射表与标准规则默认数据：编译期嵌入，内容随版本分发。
-//! 【关键手法】include_str!("...") 在「编译时」就把文件内容读进来变成字符串常量，
-//! 打包后不依赖外部文件。配合 LazyLock，这些数据在首次使用时解析一次，之后全局共享。
-use std::collections::HashMap; // HashMap=无序字典（查找快）
-use std::sync::LazyLock;                   // 「懒加载 + 线程安全」的全局静态量：首次访问时才初始化
+//! 编译期嵌入的只读数据资产：标准规则出厂默认、国籍对照表、config.xml 模板。
+//!
+//! 【嵌入方式】include_str! 在编译时把文件内容读成字符串常量，打包后不依赖外部文件；
+//! 需要按结构使用的（规则 json、国籍表）再用 LazyLock 在首次访问时解析一次、全局共享。
+//!
+//! 【双层来源】本文件只提供「出厂默认」；用户机器上的可编辑副本在 <data>/rules/standardN.json，
+//! 由 templates::ensure_user_files 首次启动时导出（已存在不覆盖），用哪份由 RuleConfig::load 决定。
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 // ---------------- 标准规则内置默认（templates::builtin 解析并导出为用户文件） ----------------
-// 注意：这两个文件是「出厂默认」，用户机器上的可编辑副本在 <data>/rules/standardN.json，
-// 由 templates::ensure_user_files 首次启动时导出（已存在不覆盖）。
-/// 标准二（14 种族目录）规则默认：FolderList + Ethnics（国籍码→目录）+ CodeRules（码修正）。
+/// 标准二（14 种族目录）规则的出厂默认：FolderList + Ethnics（国籍码→目录）+ CodeRules（种族码修正）。
 pub const STANDARD2_RAW: &str = include_str!("../assets/standard2.json");
-/// 标准三（细分目录）规则默认：FolderList + Ethnics + DefaultCodes + 族群映射规则块 + Fallback。
+/// 标准三（细分目录）规则的出厂默认：FolderList + Ethnics + DefaultCodes + 族群映射规则块 + Fallback。
 pub const STANDARD3_RAW: &str = include_str!("../assets/standard3.json");
 
 // ---------------- 国籍对照表（基础数据，非标准规则） ----------------
-/// 语言 → {国籍显示文本: 英文三字码}。
-/// 【作用】解析 RTF 名单时，把各语言显示的国籍文本归一化成三字码（如「美国」/"U.S.A." → "USA"），
-/// 方便后续模块统一按码处理。内层同时收录全称与简称/截断别名（如「美国」与列宽截断的「阿根」）。
-/// 【扩展】新增语言（德语、法语…）只需在 JSON 顶层加一个同名节点，扫描器按名单语言自动查表。
-/// 嵌套 HashMap：外层 key 是语言（如 "简体中文"），内层是「显示文本 → 三字码」的对照表。
+/// 语言 → {国籍显示文本: 三字码}。rtf_scanner 解析名单时按数据语言查它，把各语言的国籍显示文本
+/// 归一化成三字码（如「美国」/"U.S.A." → "USA"）；detect 判断数据语言也靠它——国籍值命中哪个
+/// 语言节点就是哪种语言。内层同时收录全称与简称/截断别名（如「美国」与列宽截断的「阿根」）。
+/// 新增语言（德语、法语…）只需在 JSON 顶层加一个同名节点，扫描器按名单语言自动查表。
 pub static NAT_TRANSLATION: LazyLock<HashMap<String, HashMap<String, String>>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../assets/nat_translation.json"))
         .expect("nat_translation.json 格式错误")
 });
 
-/// FM 全部三字母国籍码清单（nat_codes.json，与翻译表的码一一对应，另含暂无译名的码）。
-/// 【作用】国籍码的权威全集参照：校验翻译表覆盖度、供后续按码筛选/下拉列表等功能使用。
-/// 【allow(dead_code)】当前仅在测试中消费，属随版本分发的数据资产。
-#[allow(dead_code)]
+/// FM 全部国籍码的权威全集（nat_codes.json）：三位码、两位特例 "SC"、暂无译名的码都收录。
+/// rtf_scanner 用它判断「值本身已是国籍码」（严格国籍口径下的合法形态之一）；
+/// 本文件的自测另用它校验翻译表覆盖度（防两份资产脱节）。
 pub static NAT_CODES: LazyLock<Vec<String>> = LazyLock::new(|| {
     #[derive(serde::Deserialize)]
     struct Codes {
@@ -37,9 +37,8 @@ pub static NAT_CODES: LazyLock<Vec<String>> = LazyLock::new(|| {
     parsed.codes
 });
 
-/// config.xml 固定头尾模板，[players] 为占位符。
-/// 【作用】生成 config.xml 时，把球员映射行填到 [players] 位置，其余头尾结构保持不变（FM 要求的格式）。
-/// const 是编译期常量；include_str! 同样在编译时把模板文件内容嵌进来。
+/// config.xml 固定头尾模板，[players] 为占位符：xml_parser 生成文件时把映射行填进该位置，
+/// 头尾结构保持 FM 要求的格式。
 pub const CONFIG_TEMPLATE: &str = include_str!("../assets/config_template");
 
 #[cfg(test)]

@@ -23,6 +23,14 @@ export const appStore = $state({
   rosterVersion: 0,                     // 名单预览版本号：「扫描RTF」成功后 +1，触发 PlayersTable 重载
   /** 最近一次「扫描RTF」的摘要（null=尚未扫描过）。名单预览据此判断名单是否为拓展格式。 */
   lastRtfScan: null as RtfScanResult | null,
+  /** 结果区当前 Tab：'table'=名单预览 / 'viewer'=单人微调 / 'snapshot'=快照预览。
+   *  放全局态：「读取快照」成功后要跨组件（当前任务卡 → 结果区）切换到快照预览。 */
+  resultsView: 'table' as 'table' | 'viewer' | 'snapshot',
+  /** 最近一次「读取快照」的快照文件路径（null=尚未读取过）。
+   *  快照预览只认这份：当前展示的快照路径与它一致才拉数据，切档/切组后自动回到引导空态。 */
+  snapshotReadPath: null as string | null,
+  /** 快照预览版本号：「读取快照」成功后 +1，触发 SnapshotPreview 重载（同路径重读也生效）。 */
+  snapshotVersion: 0,
 });
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */

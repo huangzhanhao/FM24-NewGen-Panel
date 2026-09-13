@@ -8,7 +8,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, ImageScanResult, IntegrityResult, LogLine, PageResult, PlayerPreview,
-  PlayerQuery, PlayerRecord, ReplaceArgs, RtfScanResult,
+  PlayerQuery, PlayerRecord, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery,
 } from './types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
@@ -33,10 +33,13 @@ export const api = {
   openRulesDir: () => invoke<void>('open_rules_dir'),
   // 预览指定存档（下拉浏览展示，不切换后端当前档/激活状态）。
   previewProfile: (name: string) => invoke<AppSnapshot>('preview_profile', { name }),
-  // 用资源管理器打开当前展示组头像包目录（config.xml 所在目录，查看config）。
-  openPackConfigDir: (imgDir: string) => invoke<void>('open_pack_config_dir', { imgDir }),
-  // 用资源管理器打开当前展示档的存档 XML 快照所在目录（查看快照）。
+  // 用资源管理器打开当前展示档的存档 XML 快照所在目录（查看位置）。
   openSnapshotDir: (path: string) => invoke<void>('open_snapshot_dir', { path }),
+  // 读取快照：解析当前展示档的存档 XML 快照并缓存（「读取快照」按钮 → 快照预览的数据源）。
+  readSnapshot: (xmlPath: string) => invoke<SnapshotInfo>('read_snapshot', { xmlPath }),
+  // 快照预览分页查询：UID 筛选 + 只对当前页解析图片路径（imgDir 为当前展示组的头像包目录）。
+  querySnapshot: (xmlPath: string, imgDir: string, query: SnapshotQuery) =>
+    invoke<PageResult<SnapshotEntry>>('query_snapshot', { xmlPath, imgDir, query }),
   // 读取/保存标准规则文件（name ∈ standard2|standard3；保存时后端先按该标准 schema 校验）。
   readRuleFile: (name: 'standard2' | 'standard3') => invoke<string>('read_rule_file', { name }),
   saveRuleFile: (name: 'standard2' | 'standard3', content: string) =>
@@ -52,6 +55,8 @@ export const api = {
     invoke<boolean>('replace_single_face', { uid, imagePath, saveBackup }),
   // readImage 返回 ArrayBuffer（二进制图片字节），前端再转成 blob URL 显示。
   readImage: (path: string) => invoke<ArrayBuffer>('read_image', { path }),
+  // resolveAvatar：把名单「头像」列原文解析成当前头像包内的图片绝对路径（找不到为 null）。
+  resolveAvatar: (avatar: string) => invoke<string | null>('resolve_avatar', { avatar }),
   queryLogs: (level: string, only: boolean, offset: number, limit: number) =>
     invoke<{ total: number; items: LogLine[] }>('query_logs', { level, only, offset, limit }),
 };

@@ -218,6 +218,7 @@ pub fn run() {
                 rtf_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次解析的 RTF 球员缓存
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)),     // 「扫描头像」的包索引缓存（初始为空）
+                snapshot_cache: Arc::new(Mutex::new(None)),  // 「读取快照」的解析缓存（初始为空）
                 data_dir,                                    // 便携数据目录（标准规则在其下 rules/）
             });
 
@@ -242,17 +243,19 @@ pub fn run() {
             commands::scan_images,          // 扫描头像：建图片索引缓存（供替换复用），结果写日志
             commands::scan_rtf,             // 扫描RTF：解析名单并填充预览缓存，结果写日志
             commands::open_rules_dir,       // 打开标准规则目录（data/rules/，用户编辑 templateN.json）
-            commands::open_pack_config_dir, // 打开头像包目录（config.xml 所在目录，查看config）
-            commands::open_snapshot_dir,    // 打开存档 XML 快照所在目录（查看快照）
+            commands::open_snapshot_dir,    // 打开存档 XML 快照所在目录（查看位置）
             commands::preview_profile,      // 预览指定存档（下拉浏览展示，不切换当前档）
             commands::read_rule_file,       // 读取标准规则文件内容（规则编辑对话框）
             commands::save_rule_file,       // 保存标准规则文件（先校验 schema 再原子写回）
             commands::start_replace,        // 启动批量替换（后台线程）
             commands::cancel_replace,       // 请求取消正在进行的替换
             commands::query_players,        // 分页查询名单（预览）
+            commands::read_snapshot,        // 读取快照：解析存档 XML 快照并缓存（快照预览数据源）
+            commands::query_snapshot,       // 快照预览分页查询（UID 筛选 + 按页解析图片路径）
             commands::preview_player,       // 预览单个球员的映射与头像
             commands::replace_single_face,  // 单人换脸
             commands::read_image,           // 读取图片字节（前端转 blob 显示）
+            commands::resolve_avatar,       // 解析名单「头像」列原文为包内图片路径
             commands::query_logs            // 分页查询日志
         ])
         // .run(...) 启动事件循环，阻塞直到窗口关闭；启动失败直接 panic。

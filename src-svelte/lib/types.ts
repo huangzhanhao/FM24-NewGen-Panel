@@ -80,5 +80,14 @@ export interface PlayerPreview {
   record: PlayerRecord | null; mapping: MappingEntry | null; imagePath: string | null;
 }
 
+/** 「读取快照」返回摘要（对应 Rust 的 SnapshotInfo）。 */
+export interface SnapshotInfo { total: number; }
+
+/** 快照预览分页查询参数（对应 Rust 的 SnapshotQuery）；search 按 UID 子串筛选，空串=不筛选。 */
+export interface SnapshotQuery { offset: number; limit: number; search: string; }
+
+/** 快照预览的一行（对应 Rust 的 SnapshotEntry）；imagePath 为 null 表示头像包内找不到对应图片。 */
+export interface SnapshotEntry { uid: string; relPath: string; imagePath: string | null; }
+
 /** 一行日志（对应 Rust 的 LogLine）。 */
 export interface LogLine { ts: string; level: string; module: string; message: string; }

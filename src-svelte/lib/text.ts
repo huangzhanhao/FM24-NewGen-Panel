@@ -91,9 +91,9 @@ export const t = {
     selectRtfBrowseHint: '请先点击「激活」后再设置 RTF（当前为浏览预览）',
     scanRtfBtn: '扫描RTF',
     scanRtfHint: '解析 RTF 并填充名单预览（结果写入日志）',
-    viewConfigBtn: '查看config',
-    viewConfigHint: '打开头像包目录（config.xml 所在目录）',
-    viewSnapshotBtn: '查看快照',
+    viewConfigBtn: '读取快照',
+    viewConfigHint: '解析存档 XML 快照，在结果区「快照预览」中查看映射列表',
+    viewSnapshotBtn: '查看位置',
     viewSnapshotHint: '打开存档 XML 快照所在目录',
     noGroupGuide: '先在左侧「头像包（组）」关联一个头像包目录，或点击已有组。',
     tpl1Complete: '标准一：图片直铺，无种族子目录',
@@ -150,7 +150,8 @@ export const t = {
   /** 结果区顶部 Tab */
   results: {
     tabTable: '名单预览',
-    tabViewer: '单人微调',
+    tabViewer: '单人替换',
+    tabSnapshot: '快照预览',
   },
 
   /** 名单预览表（PlayersTable） */
@@ -161,6 +162,11 @@ export const t = {
     prevPage: '‹ 上一页',
     nextPage: '下一页 ›',
     pageOf: (current: number, total: number) => `第 ${current} / ${total} 页`,
+    /** 快速跳页：「前往 [输入框] 页 [跳转]」 */
+    gotoPrefix: '前往',
+    gotoSuffix: '页',
+    gotoBtn: '跳转',
+    gotoAria: '输入页码后回车快速跳转',
     colUid: 'UID',
     colNat: '国籍',
     col2ndNat: '第二国籍',
@@ -169,11 +175,22 @@ export const t = {
     colColor: '发色',
     colEth: '种族',
     colSkin: '肤色',
-    colClub: '俱乐部',
-    colAge: '年龄',
-    colHeight: '身高',
+    colAvatar: '头像',
     colNewgan: '随机人',
     colGender: '性别',
+    colAge: '年龄',
+    colHeight: '身高',
+    colClub: '俱乐部',
+    colBased: '所在地',
+    colJob: '偏好工作',
+    colCa: '能力',
+    colPa: '潜力',
+    colRca: 'R.C.A',
+    /** 头像列「预览」小按钮 + 悬停/点击气泡的状态文案。 */
+    avatarBtn: '预览',
+    avatarAria: '预览该球员的头像图片',
+    avatarLoading: '加载中…',
+    avatarNotFound: '未找到头像图片',
     /** 随机人筛选（仅拓展名单显示）：标签 + 三个选项的文案。 */
     newganFilterLabel: '随机人',
     newganAny: '任意',
@@ -187,6 +204,8 @@ export const t = {
     title: '球员预览',
     hint: '输入 UID 回车预览',
     colMapping: '当前映射',
+    /** 拓展名单第 19 列起的用户自定义列（后端只保留原文，无表头名，按序号命名）。 */
+    extraField: (n: number) => `自定义${n}`,
     noImage: '暂无图片',
     noMappingPlaceholder: '...\\...',
     imgPlaceholder: '输入新图片路径…',
@@ -198,20 +217,20 @@ export const t = {
     missingInput: '请填写 UID 并选择有效图片路径',
     replacedOk: (uid: string) => `已替换 UID ${uid} 的头像`,
     mappingNotFound: (uid: string) => `config.xml 中未找到 UID ${uid} 的现有映射，未做修改`,
-    labels: {
-      uid: 'UID:',
-      nat: '国籍:',
-      nat2: '第二国籍:',
-      name: '姓名:',
-      hair: '发长:',
-      color: '发色:',
-      eth: '种族:',
-      skin: '肤色:',
-      newgan: '随机人:',
-      club: '俱乐部:',
-      age: '年龄:',
-      height: '身高:',
-    },
+  },
+
+  /** 快照预览（SnapshotPreview）：展示「读取快照」解析出的存档快照映射。分页器与名单预览共用（TablePager，文案取 t.table.*） */
+  snapshot: {
+    searchPlaceholder: '按 UID 筛选…',
+    recordCount: (total: number) => `${total} 条`,
+    colUid: 'UID',
+    colPath: '头像相对路径',
+    colImage: '头像图',
+    noImage: '无图',
+    // 未读取（或切档/切组后失效）时的引导文案
+    readHint: '点击「当前任务」中的「读取快照」，解析存档 XML 快照后在此预览映射列表。',
+    noMatchHint: '没有匹配的 UID。',
+    emptyHint: '快照中没有映射记录。',
   },
 
   /** 底部状态栏 */

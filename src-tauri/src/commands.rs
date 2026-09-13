@@ -9,8 +9,8 @@ use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::{LogPage, LogSink, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
-use crate::templates::{self, RuleConfig};
 use crate::rtf_scanner::{PlayerRecord, RtfScanner, NEWGAN_UID_PREFIX};
+use crate::templates::{self, RuleConfig};
 use crate::xml_parser::{self, MappingEntry};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -26,18 +26,29 @@ pub use crate::facepack_scanner::FACEPACK_DIRS;
 /// 【为何这样包】命令可能在不同线程被调用，后台替换也跑在单独线程；
 /// 所以共享数据用 Mutex（互斥锁）保护，跨线程引用用 Arc（共享所有权），标志用 AtomicBool。
 pub struct AppState {
-    pub pm: Mutex<ProfileManager>,       // 存档管理器（Mutex 保证同一时刻只有一个线程操作）
-    pub logger: Arc<Logger>,             // 日志门面（Arc 跨线程共享；写入走 log 门面，回查走内存缓冲）
-    pub cancel: Arc<AtomicBool>,         // 请求取消标志
-    pub running: Arc<AtomicBool>,        // 是否正在替换
-    pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>,   // 最近一次解析的球员缓存
+    pub pm: Mutex<ProfileManager>, // 存档管理器（Mutex 保证同一时刻只有一个线程操作）
+    pub logger: Arc<Logger>,       // 日志门面（Arc 跨线程共享；写入走 log 门面，回查走内存缓冲）
+    pub cancel: Arc<AtomicBool>,   // 请求取消标志
+    pub running: Arc<AtomicBool>,  // 是否正在替换
+    pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>, // 最近一次解析的球员缓存
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存
-    pub faces_cache: Arc<Mutex<Option<FaceIndex>>>,   // 「扫描头像」的包索引缓存（替换可复用）
-    pub data_dir: PathBuf,               // 便携数据目录（标准规则 data/rules/ 在其下）
+    pub faces_cache: Arc<Mutex<Option<FaceIndex>>>, // 「扫描头像」的包索引缓存（替换可复用）
+    pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 「读取快照」的解析缓存（快照预览分页复用）
+    pub data_dir: PathBuf, // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
 /// 「扫描头像」产出的索引缓存：目录 + 完整扫描结果（仅按 img_dir 命中，切组即失效）。
-pub struct FaceIndex { pub img_dir: String, pub scan: Arc<PackScan> }
+pub struct FaceIndex {
+    pub img_dir: String,
+    pub scan: Arc<PackScan>,
+}
+
+/// 「读取快照」产出的解析缓存：快照文件路径 + 有序映射条目（快照预览分页查询复用）。
+/// 查询时按路径比对，路径不符即失效（切档/切组后由「读取快照」重新填充）。
+pub struct SnapshotCache {
+    pub xml_path: String,
+    pub entries: Vec<MappingEntry>,
+}
 
 // ---------------- 传给前端的类型（统一 camelCase） ----------------
 // 下面这些结构体是「前后端的数据契约」：Rust 端蛇形命名经 serde 自动转成前端的驼峰命名，
@@ -46,48 +57,60 @@ pub struct FaceIndex { pub img_dir: String, pub scan: Arc<PackScan> }
 /// 一个头像包（组）的摘要：目录 + 已设 RTF。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct GroupInfo { pub img_dir: String, pub rtf: String }
+pub struct GroupInfo {
+    pub img_dir: String,
+    pub rtf: String,
+}
 
 /// 当前组 config.xml 的路径与存在性（快照附带，前端渲染 config.xml 行）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigXmlInfo { pub path: String, pub exists: bool }
+pub struct ConfigXmlInfo {
+    pub path: String,
+    pub exists: bool,
+}
 
 /// 应用全局快照：一次性把前端需要的所有状态打包返回（前端拿到后整体替换本地状态）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
-    pub profiles: Vec<String>,      // 所有存档名
-    pub current_profile: String,    // 当前激活存档
-    pub groups: Vec<GroupInfo>,     // 当前存档下的所有组
-    pub current_group: Option<String>, // 当前选中组（Option 对应前端 null）
-    pub current_rtf: String,        // 当前组的 RTF
-    pub replacing: bool,            // 是否正在替换
+    pub profiles: Vec<String>,             // 所有存档名
+    pub current_profile: String,           // 当前激活存档
+    pub groups: Vec<GroupInfo>,            // 当前存档下的所有组
+    pub current_group: Option<String>,     // 当前选中组（Option 对应前端 null）
+    pub current_rtf: String,               // 当前组的 RTF
+    pub replacing: bool,                   // 是否正在替换
     pub config_xml: Option<ConfigXmlInfo>, // 当前组的 config.xml（无选中组为 None）
-    pub log_path: String,           // 日志文件路径
+    pub log_path: String,                  // 日志文件路径
 }
 
 /// 进度事件的载荷（通过 replace:progress 事件发给前端）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ProgressPayload { pub status: String, pub value: u8 }
+pub struct ProgressPayload {
+    pub status: String,
+    pub value: u8,
+}
 
 /// 「检查完整性」结果：头像包命中的标准 + 可修复的缺失目录（供 check_integrity 命令返回）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrityResult {
-    pub standard: u8,          // 命中的标准号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别
-    pub status: String,        // "complete" | "fixable" | "unknown"
-    pub missing: Vec<String>,  // fixable 时可一键创建的缺失目录（按标准 FolderList 原顺序）
-    pub extra: Vec<String>,    // 包内多出、未在标准 FolderList 配置的目录（不参与抽图）
-    pub found: usize,          // 已命中的子目录数
+    pub standard: u8,   // 命中的标准号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别
+    pub status: String, // "complete" | "fixable" | "unknown"
+    pub missing: Vec<String>, // fixable 时可一键创建的缺失目录（按标准 FolderList 原顺序）
+    pub extra: Vec<String>, // 包内多出、未在标准 FolderList 配置的目录（不参与抽图）
+    pub found: usize,   // 已命中的子目录数
     pub expected_total: usize, // 该标准 FolderList 的目录总数（标准一/无法识别为 0）
 }
 
 /// 「扫描头像」返回摘要：图片总数 + 命中的标准号（0=无法识别）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ImageScanResult { pub total: usize, pub standard: u8 }
+pub struct ImageScanResult {
+    pub total: usize,
+    pub standard: u8,
+}
 
 /// 「扫描RTF」返回摘要。
 #[derive(Serialize, Clone)]
@@ -125,7 +148,10 @@ pub struct PlayerQuery {
 /// 通用分页结果（<T> 是泛型，可装任何类型的条目）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PageResult<T> { pub total: usize, pub items: Vec<T> }
+pub struct PageResult<T> {
+    pub total: usize,
+    pub items: Vec<T>,
+}
 
 /// 单人预览的返回体：球员资料 + 映射 + 实际图片路径（三者都可能为 None/null）。
 #[derive(Serialize)]
@@ -136,18 +162,47 @@ pub struct PlayerPreview {
     pub image_path: Option<String>,
 }
 
+/// 「读取快照」返回摘要：快照里的映射总条数。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotInfo {
+    pub total: usize,
+}
+
+/// 快照预览的一行：UID + 头像相对路径（from 原文，平铺包无目录前缀）
+/// + 按当前展示组头像包解析出的实际图片路径（包内找不到为 None/null）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotEntry {
+    pub uid: String,
+    pub rel_path: String,
+    pub image_path: Option<String>,
+}
+
+/// 快照预览分页查询参数（search 按 UID 子串筛选，空串=不筛选）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotQuery {
+    pub offset: usize,
+    pub limit: usize,
+    pub search: String,
+}
+
 // ---------------- 命令实现 ----------------
 
 /// 把 ProfileManager 的当前状态汇总成一个 AppSnapshot（发给前端的快照）。
 /// 【复用】几乎每个命令改完状态后都会调它，把最新状态回传前端，前端据此刷新界面。
 fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
     let pm = state.pm.lock().unwrap(); // 加锁读取存档管理器（lock 期间独占）
-    // 当前组的存档 XML 快照路径（.user/<存档名>/<目录末段>.xml，存档资料里的那份）。
-    // 切组/替换后随快照自动刷新；从未替换过的组无快照（exists=false）。
+                                       // 当前组的存档 XML 快照路径（.user/<存档名>/<目录末段>.xml，存档资料里的那份）。
+                                       // 切组/替换后随快照自动刷新；从未替换过的组无快照（exists=false）。
     let config_xml = match pm.cur_group.as_ref() {
         Some(g) => {
             let path = crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, g);
-            Some(ConfigXmlInfo { path: path.to_string_lossy().to_string(), exists: path.is_file() })
+            Some(ConfigXmlInfo {
+                path: path.to_string_lossy().to_string(),
+                exists: path.is_file(),
+            })
         }
         None => None,
     };
@@ -158,7 +213,10 @@ fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
             .prf_cfg
             .groups
             .iter()
-            .map(|(dir, g)| GroupInfo { img_dir: dir.clone(), rtf: g.rtf.clone() })
+            .map(|(dir, g)| GroupInfo {
+                img_dir: dir.clone(),
+                rtf: g.rtf.clone(),
+            })
             .collect(),
         current_group: pm.cur_group.clone(),
         current_rtf: pm.get_cur_rtf(),
@@ -172,14 +230,18 @@ fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
 
 /// 获取应用全局快照（前端启动时、或需要强制刷新时调）。
 #[tauri::command]
-pub fn get_app_state(state: State<'_, AppState>) -> AppSnapshot { snapshot(&state) }
+pub fn get_app_state(state: State<'_, AppState>) -> AppSnapshot {
+    snapshot(&state)
+}
 
 /// 新建并激活存档。name 会先 trim 去首尾空白。
 #[tauri::command]
 pub fn create_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let name = name.trim().to_string();
     state.pm.lock().unwrap().create_profile(&name)?;
-    state.logger.info("profile", format!("创建并激活 Profile: {name}"));
+    state
+        .logger
+        .info("profile", format!("创建并激活 Profile: {name}"));
     Ok(snapshot(&state))
 }
 
@@ -200,18 +262,20 @@ pub fn switch_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
     let mut pm = state.pm.lock().unwrap();
     pm.load_profile(&name)?;
     // 切档后把全局配置 profiles.json 也落盘（记住新的激活位）。
-    crate::json_store::save(
-        &pm.user_cfg_path().join("profiles.json"),
-        &pm.config,
-    )?;
+    crate::json_store::save(&pm.user_cfg_path().join("profiles.json"), &pm.config)?;
     drop(pm);
-    state.logger.info("profile", format!("激活 Profile: {name}"));
+    state
+        .logger
+        .info("profile", format!("激活 Profile: {name}"));
     Ok(snapshot(&state))
 }
 
 /// 关联头像包目录（新目录自动建组并设为当前组）。未激活存档时不允许。
 #[tauri::command]
-pub fn select_image_directory(state: State<'_, AppState>, path: String) -> Result<AppSnapshot, String> {
+pub fn select_image_directory(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
     if pm.cur_prf == "No Profile" {
         return Err("请先创建并激活一个 Profile".into());
@@ -234,7 +298,10 @@ pub fn set_current_rtf(state: State<'_, AppState>, path: String) -> Result<AppSn
 
 /// 切换当前头像包（组）。
 #[tauri::command]
-pub fn set_current_group(state: State<'_, AppState>, img_dir: String) -> Result<AppSnapshot, String> {
+pub fn set_current_group(
+    state: State<'_, AppState>,
+    img_dir: String,
+) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
     if !pm.set_cur_group(&img_dir)? {
         return Err("组不存在".into());
@@ -276,7 +343,10 @@ pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
 /// 「检查完整性」：按 templates 的 FolderList（用户可配置）识别头像包归属哪个标准，
 /// 并给出可一键补全的缺失目录与未配置的多余目录。轻扫描：只列子目录名 + 探测根是否有图。
 #[tauri::command]
-pub fn check_integrity(state: State<'_, AppState>, img_dir: String) -> Result<IntegrityResult, String> {
+pub fn check_integrity(
+    state: State<'_, AppState>,
+    img_dir: String,
+) -> Result<IntegrityResult, String> {
     let config = RuleConfig::load(&state.data_dir)?;
     Ok(check_integrity_core(&img_dir, &config))
 }
@@ -291,11 +361,13 @@ fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
             let p = e.path();
             let fname = e.file_name().to_string_lossy().to_string();
             if p.is_dir() {
-                if !facepack_scanner::is_junk_dir(&fname) { subdirs.insert(fname); } // 跳过 __MACOSX 等
-            }
-            else if !fname.starts_with('.')   // 跳过 ._x.png 等隐藏文件，与 scan_pack 口径一致
+                if !facepack_scanner::is_junk_dir(&fname) {
+                    subdirs.insert(fname);
+                } // 跳过 __MACOSX 等
+            } else if !fname.starts_with('.')   // 跳过 ._x.png 等隐藏文件，与 scan_pack 口径一致
                 && p.extension().and_then(|x| x.to_str())
-                .map(|x| matches!(x.to_ascii_lowercase().as_str(), "png"|"jpg"|"jpeg")).unwrap_or(false) {
+                .map(|x| matches!(x.to_ascii_lowercase().as_str(), "png"|"jpg"|"jpeg")).unwrap_or(false)
+            {
                 has_images = true;
             }
         }
@@ -313,20 +385,36 @@ fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
     // missing = FolderList 中尚未出现的目录（可一键补全）；extra = 包内多出的未配置目录（不进抽图池）。
     let (missing, extra, expected_total) = match &layout {
         PackLayout::Standard { standard: n, .. } => {
-            let folders = config.folder_lists().into_iter()
+            let folders = config
+                .folder_lists()
+                .into_iter()
                 .find(|(t, _)| t == n)
                 .map(|(_, f)| f.clone())
                 .unwrap_or_default();
-            let missing = folders.iter().filter(|d| !subdirs.contains(*d)).cloned().collect();
-            let extra: Vec<String> =
-                subdirs.iter().filter(|d| !folders.contains(*d)).cloned().collect();
+            let missing = folders
+                .iter()
+                .filter(|d| !subdirs.contains(*d))
+                .cloned()
+                .collect();
+            let extra: Vec<String> = subdirs
+                .iter()
+                .filter(|d| !folders.contains(*d))
+                .cloned()
+                .collect();
             (missing, extra, folders.len())
         }
         _ => (Vec::new(), Vec::new(), 0),
     };
     // 标准一/无法识别的 found 与现状一致：标准一记 0，其余记命中的子目录数。
     let found = if standard == 1 { 0 } else { subdirs.len() };
-    IntegrityResult { standard, status: status.into(), missing, extra, found, expected_total }
+    IntegrityResult {
+        standard,
+        status: status.into(),
+        missing,
+        extra,
+        found,
+        expected_total,
+    }
 }
 
 /// 批量创建缺失目录（前端确认后调用）。
@@ -343,8 +431,14 @@ pub fn create_missing_dirs(img_dir: String, names: Vec<String>) -> Result<(), St
 
 /// 标准号的中文标注（写日志用）。目录数取自规则配置的 FolderList，不在这里硬编码。
 fn layout_label(standard: u8, config: &RuleConfig) -> String {
-    let dirs = |n: u8| config.folder_lists().into_iter()
-        .find(|(t, _)| *t == n).map(|(_, f)| f.len()).unwrap_or(0);
+    let dirs = |n: u8| {
+        config
+            .folder_lists()
+            .into_iter()
+            .find(|(t, _)| *t == n)
+            .map(|(_, f)| f.len())
+            .unwrap_or(0)
+    };
     match standard {
         1 => "标准一/图片直铺".to_string(),
         2 => format!("标准二/{} 目录", dirs(2)),
@@ -358,11 +452,17 @@ fn layout_label(standard: u8, config: &RuleConfig) -> String {
 fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, PackScan), String> {
     let scan = facepack_scanner::scan_pack(img_dir)?;
     // 布局判定与 FaceMapper::from_scan 同口径（垃圾目录不参与判定）。
-    let subdirs: std::collections::BTreeSet<String> = scan.faces_map.keys()
+    let subdirs: std::collections::BTreeSet<String> = scan
+        .faces_map
+        .keys()
         .filter(|n| !facepack_scanner::is_junk_dir(n))
         .cloned()
         .collect();
-    let layout = facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &config.folder_lists());
+    let layout = facepack_scanner::classify(
+        &subdirs,
+        !scan.root_images.is_empty(),
+        &config.folder_lists(),
+    );
     // 平铺包图片数 = 根图数；其余（含 Unknown 的子/孙目录）= 递归全量池图片总数。
     let total = if layout.is_flat() {
         scan.root_images.len()
@@ -374,14 +474,20 @@ fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, Pa
 
 /// 「扫描RTF」核心：格式识别 + 全量解析名单（全字段入库），返回 (摘要, 记录列表)。
 /// 识别失败 → Err("RTF 格式不合法：…")，文案带首个不合法字段定位，前端弹窗直接展示。
-fn scan_rtf_core(rtf_path: &str, logger: &impl LogSink) -> Result<(RtfScanResult, Vec<PlayerRecord>), String> {
+fn scan_rtf_core(
+    rtf_path: &str,
+    logger: &impl LogSink,
+) -> Result<(RtfScanResult, Vec<PlayerRecord>), String> {
     let mut scanner = RtfScanner::new();
     scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
     let data = scanner.parse_roster(Path::new(rtf_path), false, logger)?;
     let summary = RtfScanResult {
         total: data.len(),
-        newgan: data.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count(),
+        newgan: data
+            .iter()
+            .filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX))
+            .count(),
         detailed: data.iter().any(|p| p.detailed.is_some()),
         format: scanner.format.label().into(),
         language: scanner.language.clone(),
@@ -393,12 +499,29 @@ fn scan_rtf_core(rtf_path: &str, logger: &impl LogSink) -> Result<(RtfScanResult
 /// 【async】重扫描（递归遍历包内全部目录）跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
 pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, String> {
-    let img_dir = { state.pm.lock().unwrap().cur_group.clone().ok_or("请先选择头像包目录")? };
+    let img_dir = {
+        state
+            .pm
+            .lock()
+            .unwrap()
+            .cur_group
+            .clone()
+            .ok_or("请先选择头像包目录")?
+    };
     let config = RuleConfig::load(&state.data_dir)?; // 用户改坏规则 json → 报错提示
     let (total, standard, scan) = scan_images_core(&img_dir, &config)?;
     // Arc 包一层入缓存：替换复用时只涨引用计数，不复制整份图片索引。
-    *state.faces_cache.lock().unwrap() = Some(FaceIndex { img_dir, scan: Arc::new(scan) });
-    state.logger.info("scan", format!("扫描头像完成：{total} 张图片（{}）", layout_label(standard, &config)));
+    *state.faces_cache.lock().unwrap() = Some(FaceIndex {
+        img_dir,
+        scan: Arc::new(scan),
+    });
+    state.logger.info(
+        "scan",
+        format!(
+            "扫描头像完成：{total} 张图片（{}）",
+            layout_label(standard, &config)
+        ),
+    );
     Ok(ImageScanResult { total, standard })
 }
 
@@ -407,12 +530,19 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
 #[tauri::command]
 pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, String> {
     let rtf = { state.pm.lock().unwrap().get_cur_rtf() };
-    if rtf.is_empty() { return Err("请先选择 RTF 名单".into()); }
+    if rtf.is_empty() {
+        return Err("请先选择 RTF 名单".into());
+    }
     // &*state.logger：&Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）。
     let (summary, data) = scan_rtf_core(&rtf, &*state.logger)?;
     *state.rtf_cache.lock().unwrap() = data; // 名单预览（query_players）直接读这份缓存（全字段）
-    state.logger.info("scan", format!("扫描 RTF 完成：{} 条（随机人 {}，{}，{}）",
-        summary.total, summary.newgan, summary.format, summary.language));
+    state.logger.info(
+        "scan",
+        format!(
+            "扫描 RTF 完成：{} 条（随机人 {}，{}，{}）",
+            summary.total, summary.newgan, summary.format, summary.language
+        ),
+    );
     Ok(summary)
 }
 
@@ -423,7 +553,11 @@ fn explorer_open(dir: &Path, what: &str) -> Result<(), String> {
     let s = dir.to_string_lossy();
     let trimmed = s.trim_end_matches(['\\', '/']);
     // 盘根（`C:\`）去尾后是 `C:`（表示「该盘当前目录」而非根），需保留原样；裸分隔符同理。
-    let target = if trimmed.is_empty() || trimmed.ends_with(':') { s.as_ref() } else { trimmed };
+    let target = if trimmed.is_empty() || trimmed.ends_with(':') {
+        s.as_ref()
+    } else {
+        trimmed
+    };
     std::process::Command::new("explorer")
         .arg(target)
         .spawn()
@@ -453,7 +587,7 @@ pub fn start_replace(
         return Err("已有替换任务在执行".into());
     }
     state.cancel.store(false, Ordering::SeqCst); // 重置取消标志
-    // 先在锁内取出当前 RTF 和组目录，随即释锁（不能把 Mutex 带进新线程）。
+                                                 // 先在锁内取出当前 RTF 和组目录，随即释锁（不能把 Mutex 带进新线程）。
     let (rtf, img_dir) = {
         let pm = state.pm.lock().unwrap();
         (pm.get_cur_rtf(), pm.cur_group.clone())
@@ -483,8 +617,15 @@ pub fn start_replace(
         }
     };
     // 「扫描头像」缓存命中同一目录则复用其索引（避免重复扫盘）；切组即失效、现场新扫描。
-    let pre_scan = { state.faces_cache.lock().unwrap()
-        .as_ref().filter(|c| c.img_dir == img_dir).map(|c| c.scan.clone()) };
+    let pre_scan = {
+        state
+            .faces_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|c| c.img_dir == img_dir)
+            .map(|c| c.scan.clone())
+    };
     let params = ReplaceParams {
         rtf_path: rtf,
         img_dir,
@@ -506,7 +647,13 @@ pub fn start_replace(
         let result = replace_flow::run(
             &params,
             &mut |status: &str, value: u8| {
-                let _ = emit_app.emit("replace:progress", ProgressPayload { status: status.into(), value });
+                let _ = emit_app.emit(
+                    "replace:progress",
+                    ProgressPayload {
+                        status: status.into(),
+                        value,
+                    },
+                );
             },
             &cancel,
             &*logger, // &Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）
@@ -522,10 +669,16 @@ pub fn start_replace(
         let result_str = match result.outcome {
             Outcome::Finished => "finished",
             Outcome::Cancelled => "cancelled",
-            Outcome::Failed(ref m) => { logger.error("replace", m.clone()); "failed" }
+            Outcome::Failed(ref m) => {
+                logger.error("replace", m.clone());
+                "failed"
+            }
         };
         // 发「完成」事件（前端收到后刷新快照并弹提示）。
-        let _ = app.emit("replace:finished", serde_json::json!({ "result": result_str }));
+        let _ = app.emit(
+            "replace:finished",
+            serde_json::json!({ "result": result_str }),
+        );
         running.store(false, Ordering::SeqCst); // 标记任务结束，解除全局禁用
     });
     Ok(())
@@ -547,9 +700,10 @@ pub fn replace_single_face(
         pm.cur_group.clone().ok_or("当前没有选中组")?
     };
     let Some((pack, image)) = xml_parser::parse_image_path_in_pack(&img_dir, &image_path) else {
-        return Err("图片路径不合法，需为头像包内的图片文件".into());
+        return Err("所选图片不在当前头像包内（或文件不存在），请从当前头像包目录或其子目录中选择图片".into());
     };
-    let hit = xml_parser::single_replacement(&uid, &pack, &image, Path::new(&img_dir), save_backup)?;
+    let hit =
+        xml_parser::single_replacement(&uid, &pack, &image, Path::new(&img_dir), save_backup)?;
     if hit {
         // 同步内存映射缓存（对等旧版 update_mapping_cache），保证预览与实际一致。
         let mut cache = state.mapping_cache.lock().unwrap();
@@ -561,7 +715,13 @@ pub fn replace_single_face(
             }
         }
     }
-    state.logger.info("viewer", format!("单人换脸 {uid} → {}", xml_parser::record_from(&pack, &image)));
+    state.logger.info(
+        "viewer",
+        format!(
+            "单人换脸 {uid} → {}",
+            xml_parser::record_from(&pack, &image)
+        ),
+    );
     Ok(hit) // 返回是否命中（未命中 = config.xml 里本来就没这个 UID）
 }
 
@@ -595,7 +755,11 @@ pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerP
         let cache = state.rtf_cache.lock().unwrap();
         cache.iter().find(|p| variants.contains(&p.uid)).cloned()
     };
-    Ok(PlayerPreview { record, mapping, image_path })
+    Ok(PlayerPreview {
+        record,
+        mapping,
+        image_path,
+    })
 }
 
 /// RTF 名单分页查询（大名单预览；数据留 Rust，IPC 只传当前页）。
@@ -608,7 +772,10 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
 }
 
 /// 搜索/随机人筛选/排序/分页的纯逻辑（不碰后端状态，便于单测）。
-fn query_players_core(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageResult<PlayerRecord> {
+fn query_players_core(
+    mut rows: Vec<PlayerRecord>,
+    query: &PlayerQuery,
+) -> PageResult<PlayerRecord> {
     let search = query.search.to_lowercase();
     if !search.is_empty() {
         // UID/姓名/国籍任一包含搜索词即命中。
@@ -630,10 +797,104 @@ fn query_players_core(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageR
             "ethnicityCode" => a.ethnicity_code.cmp(&b.ethnicity_code),
             _ => a.uid.cmp(&b.uid),
         };
-        if query.sort_desc { ord.reverse() } else { ord }
+        if query.sort_desc {
+            ord.reverse()
+        } else {
+            ord
+        }
     });
     let total = rows.len();
-    PageResult { total, items: rows.into_iter().skip(query.offset).take(query.limit).collect() }
+    PageResult {
+        total,
+        items: rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect(),
+    }
+}
+
+// ---------------- 快照预览（「读取快照」按钮 → 结果区「快照预览」Tab） ----------------
+
+/// 「读取快照」：解析存档 XML 快照（.user/<存档>/<组>_snapshot.xml，config.xml 的存档副本）
+/// 并缓存有序条目，供「快照预览」分页查询。xml_path 由前端传当前展示档的快照全路径（浏览态自洽）；
+/// 每次点击都重读文件，展示的始终是快照文件的最新内容。
+/// 【async】大快照（可达数万行）的正则解析跑在异步运行时线程，避免阻塞主线程导致界面卡住。
+#[tauri::command]
+pub async fn read_snapshot(
+    state: State<'_, AppState>,
+    xml_path: String,
+) -> Result<SnapshotInfo, String> {
+    let path = PathBuf::from(&xml_path);
+    if !path.is_file() {
+        return Err("存档 XML 快照尚未生成（请先执行一次替换）".into());
+    }
+    let entries = xml_parser::parse_xml_entries(&path)?;
+    let total = entries.len();
+    *state.snapshot_cache.lock().unwrap() = Some(SnapshotCache { xml_path, entries });
+    state
+        .logger
+        .info("scan", format!("读取快照完成：{total} 条映射"));
+    Ok(SnapshotInfo { total })
+}
+
+/// 快照预览分页查询：UID 筛选 + 分页，数据留在缓存里，IPC 只传当前页。
+/// 只对当前页的条目解析实际图片路径——整表几万条逐一探测文件开销太大，按页解析才现实。
+#[tauri::command]
+pub fn query_snapshot(
+    state: State<'_, AppState>,
+    xml_path: String,
+    img_dir: String,
+    query: SnapshotQuery,
+) -> Result<PageResult<SnapshotEntry>, String> {
+    let mut cache = state.snapshot_cache.lock().unwrap();
+    // 正常流程「读取快照」已填好缓存且路径一致；路径不符（缓存被换走）时按请求路径重读兜底。
+    let hit = cache
+        .as_ref()
+        .map(|c| c.xml_path == xml_path)
+        .unwrap_or(false);
+    if !hit {
+        let path = PathBuf::from(&xml_path);
+        if !path.is_file() {
+            return Ok(PageResult {
+                total: 0,
+                items: Vec::new(),
+            });
+        }
+        *cache = Some(SnapshotCache {
+            xml_path: xml_path.clone(),
+            entries: xml_parser::parse_xml_entries(&path)?,
+        });
+    }
+    let entries = &cache.as_ref().unwrap().entries;
+    Ok(query_snapshot_core(entries, &img_dir, &query))
+}
+
+/// 快照预览的筛选/分页/图片解析纯逻辑（不碰后端状态，便于单测）。
+/// 每条图片解析最多探测 png/jpg/jpeg 三种扩展名，仅对当前页的条目执行。
+fn query_snapshot_core(
+    entries: &[MappingEntry],
+    img_dir: &str,
+    query: &SnapshotQuery,
+) -> PageResult<SnapshotEntry> {
+    let search = query.search.trim().to_lowercase();
+    let matched: Vec<&MappingEntry> = entries
+        .iter()
+        .filter(|e| search.is_empty() || e.uid.to_lowercase().contains(&search))
+        .collect();
+    let total = matched.len();
+    let root = Path::new(img_dir);
+    let items = matched
+        .into_iter()
+        .skip(query.offset)
+        .take(query.limit)
+        .map(|e| SnapshotEntry {
+            uid: e.uid.clone(),
+            rel_path: xml_parser::record_from(&e.ethnicity, &e.image),
+            image_path: xml_parser::resolve_image_file(root, &e.ethnicity, &e.image),
+        })
+        .collect();
+    PageResult { total, items }
 }
 
 // ---------------- 存档浏览预览（下拉选择存档 = 浏览，不切档） ----------------
@@ -647,7 +908,10 @@ pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSn
     // 浏览档的存档 XML 快照路径与存在性（与激活档口径一致）。
     let config_xml = cur_group.as_ref().map(|g| {
         let path = crate::paths::group_xml_path(&pm.user_cfg_path(), &name, g);
-        ConfigXmlInfo { path: path.to_string_lossy().to_string(), exists: path.is_file() }
+        ConfigXmlInfo {
+            path: path.to_string_lossy().to_string(),
+            exists: path.is_file(),
+        }
     });
     Ok(AppSnapshot {
         profiles: pm.config.profile.keys().cloned().collect(),
@@ -655,7 +919,10 @@ pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSn
         groups: prf_cfg
             .groups
             .iter()
-            .map(|(dir, g)| GroupInfo { img_dir: dir.clone(), rtf: g.rtf.clone() })
+            .map(|(dir, g)| GroupInfo {
+                img_dir: dir.clone(),
+                rtf: g.rtf.clone(),
+            })
             .collect(),
         current_group: cur_group.clone(),
         current_rtf: cur_group
@@ -669,23 +936,9 @@ pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSn
     })
 }
 
-// ---------------- 目录打开（「当前任务」卡 config.xml 行：查看config / 查看快照） ----------------
+// ---------------- 目录打开（「当前任务」卡 config.xml 行：读取快照 / 查看位置） ----------------
 
-/// 打开头像包目录（config.xml 就写在包根目录，「查看config」按钮）。
-/// 目录由前端传当前展示组的目录：浏览预览态打开的是被浏览档的组，与界面展示一致。
-#[tauri::command]
-pub fn open_pack_config_dir(img_dir: String) -> Result<(), String> {
-    if img_dir.is_empty() {
-        return Err("请先关联头像包目录".into());
-    }
-    let dir = PathBuf::from(img_dir);
-    if !dir.is_dir() {
-        return Err(format!("头像包目录不存在: {}", dir.display()));
-    }
-    explorer_open(&dir, "头像包目录")
-}
-
-/// 打开存档 XML 快照所在目录（.user/<存档名>/，「查看快照」按钮）。
+/// 打开存档 XML 快照所在目录（.user/<存档名>/，「查看位置」按钮）。
 /// 路径由前端传当前展示档的快照 XML 全路径（同上，浏览态自洽）。
 #[tauri::command]
 pub fn open_snapshot_dir(path: String) -> Result<(), String> {
@@ -706,7 +959,10 @@ fn rule_file(name: &str) -> Result<&'static templates::RuleFile, String> {
     // 表在首次调用时构造一次并常驻，换来命令层零 match（新增标准时本文件不用改）。
     static TABLE: std::sync::LazyLock<Vec<templates::RuleFile>> =
         std::sync::LazyLock::new(templates::rule_files);
-    TABLE.iter().find(|f| f.name == name).ok_or_else(|| format!("未知规则文件: {name}"))
+    TABLE
+        .iter()
+        .find(|f| f.name == name)
+        .ok_or_else(|| format!("未知规则文件: {name}"))
 }
 
 /// 读取标准规则文件内容（供规则编辑对话框；缺失时先导出内置默认）。
@@ -723,10 +979,54 @@ pub fn read_rule_file(state: State<'_, AppState>, name: String) -> Result<String
 /// 保存标准规则文件：先按该标准的结构解析并校验，合法才原子写回
 /// （json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
 #[tauri::command]
-pub fn save_rule_file(state: State<'_, AppState>, name: String, content: String) -> Result<(), String> {
+pub fn save_rule_file(
+    state: State<'_, AppState>,
+    name: String,
+    content: String,
+) -> Result<(), String> {
     let rf = rule_file(&name)?;
     let path = (rf.path)(&state.data_dir);
     (rf.save)(&path, &content)
+}
+
+/// 名单预览「头像」列预览：把列原文解析成当前头像包内的实际图片路径（找不到返回 null）。
+/// 先走确定性路径探测（xml_parser::resolve_avatar_path）；裸词干在包根没命中时，
+/// 再借「扫描头像」的递归索引在全部子/孙目录里找同名图（缓存缺失/切组则不做递归，避免现场扫盘卡顿）。
+#[tauri::command]
+pub fn resolve_avatar(
+    state: State<'_, AppState>,
+    avatar: String,
+) -> Result<Option<String>, String> {
+    let avatar = avatar.trim();
+    if avatar.is_empty() {
+        return Ok(None);
+    }
+    let pm = state.pm.lock().unwrap();
+    let img_dir = pm.cur_group.clone().ok_or("请先选择头像包目录")?;
+    drop(pm); // 与后续 faces_cache 是两把锁，显式提前释放避免嵌套持锁。
+              // 1) 绝对路径 / 相对包根（含补扩展名）。
+    if let Some(p) = xml_parser::resolve_avatar_path(Path::new(&img_dir), avatar) {
+        return Ok(Some(p));
+    }
+    // 2) 裸词干（无分隔符、无扩展名）才允许递归兜底；带路径的输入已在上面按其指定位置探测过。
+    let bare =
+        !avatar.contains('/') && !avatar.contains('\\') && Path::new(avatar).extension().is_none();
+    if !bare {
+        return Ok(None);
+    }
+    let cache = state.faces_cache.lock().unwrap();
+    let Some(idx) = cache.as_ref().filter(|c| c.img_dir == img_dir) else {
+        return Ok(None); // 没有同目录的扫描索引：提示用户可先「扫描头像」，不在悬停时现场扫大包
+    };
+    // 递归池按相对目录有序遍历，多个目录取字典序最前者（确定性行为）。
+    for (dir, stems) in &idx.scan.recursive_pools {
+        if stems.contains(avatar) {
+            if let Some(p) = xml_parser::resolve_image_file(Path::new(&img_dir), dir, avatar) {
+                return Ok(Some(p));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// 读取预览图片字节（前端转 blob URL 显示）。
@@ -740,7 +1040,13 @@ pub fn read_image(path: String) -> Result<tauri::ipc::Response, String> {
 
 /// 分页查询日志（前端打开日志面板、或切换过滤条件时调）。
 #[tauri::command]
-pub fn query_logs(state: State<'_, AppState>, level: String, only: bool, offset: usize, limit: usize) -> LogPage {
+pub fn query_logs(
+    state: State<'_, AppState>,
+    level: String,
+    only: bool,
+    offset: usize,
+    limit: usize,
+) -> LogPage {
     state.logger.query(&level, only, offset, limit)
 }
 
@@ -786,7 +1092,15 @@ mod tests {
         mk_dirs(tmp.path(), &shuffled);
         std::fs::write(tmp.path().join(FACEPACK_DIRS[0]).join("a.jpg"), b"x").unwrap();
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.missing.len(), r.expected_total), (2, "complete", 0, 14));
+        assert_eq!(
+            (
+                r.standard,
+                r.status.as_str(),
+                r.missing.len(),
+                r.expected_total
+            ),
+            (2, "complete", 0, 14)
+        );
     }
 
     #[test]
@@ -794,9 +1108,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // 按内置标准三 FolderList（62 目录）建包 → 恰好相等 → complete。
         let cfg = RuleConfig::builtin();
-        mk_dirs(tmp.path(), &cfg.standard3.folder_list.iter().map(String::as_str).collect::<Vec<_>>());
+        mk_dirs(
+            tmp.path(),
+            &cfg.standard3
+                .folder_list
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &cfg);
-        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 62));
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.expected_total),
+            (3, "complete", 62)
+        );
         assert!(r.extra.is_empty());
     }
 
@@ -806,12 +1130,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = RuleConfig::builtin();
         let mut dirs: Vec<String> = cfg.standard3.folder_list.clone();
-        dirs.push("Scandinavian".into());   // 清单外
-        dirs.push("SomeUnusedDir".into());  // 清单外
-        mk_dirs(tmp.path(), &dirs.iter().map(String::as_str).collect::<Vec<_>>());
+        dirs.push("Scandinavian".into()); // 清单外
+        dirs.push("SomeUnusedDir".into()); // 清单外
+        mk_dirs(
+            tmp.path(),
+            &dirs.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &cfg);
-        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "complete", 62));
-        assert_eq!(r.extra, vec!["Scandinavian".to_string(), "SomeUnusedDir".to_string()]);
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.expected_total),
+            (3, "complete", 62)
+        );
+        assert_eq!(
+            r.extra,
+            vec!["Scandinavian".to_string(), "SomeUnusedDir".to_string()]
+        );
     }
 
     #[test]
@@ -821,7 +1154,10 @@ mod tests {
         let present: Vec<&str> = FACEPACK_DIRS[..13].to_vec();
         mk_dirs(tmp.path(), &present);
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.found, r.expected_total), (2, "fixable", 13, 14));
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.found, r.expected_total),
+            (2, "fixable", 13, 14)
+        );
         assert_eq!(r.missing, vec!["YugoGreek".to_string()]);
     }
 
@@ -830,7 +1166,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 标准三 FolderList(62)
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.found, r.expected_total), (3, "fixable", 3, 62));
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.found, r.expected_total),
+            (3, "fixable", 3, 62)
+        );
         assert_eq!(r.missing.len(), 59); // 62 - 3
         assert!(!r.missing.contains(&"China".to_string()));
     }
@@ -865,7 +1204,10 @@ mod tests {
         mk_dirs(tmp.path(), &FACEPACK_DIRS);
         drop_aux_files(tmp.path());
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.missing.len()), (2, "complete", 0));
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.missing.len()),
+            (2, "complete", 0)
+        );
     }
 
     #[test]
@@ -874,7 +1216,10 @@ mod tests {
         mk_dirs(tmp.path(), &["China", "Japan", "Korea"]);
         drop_aux_files(tmp.path());
         let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str(), r.expected_total), (3, "fixable", 62));
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.expected_total),
+            (3, "fixable", 62)
+        );
     }
 
     #[test]
@@ -918,12 +1263,13 @@ mod tests {
             "| UID       | Nat  | 2nd Nat | Name          |    |    |   |\n\
              | 2000472008| ESP  | USA     | Pepe Sáenz    | 1  | 12 | 1 |\n\
              | 2002161479| BRA  |         | José·Milhomem | 1  | 16 | 3 |\n",
-        ).unwrap();
+        )
+        .unwrap();
         let logger = ChannelLogger::channel().0;
         let (summary, data) = scan_rtf_core(rtf.to_str().unwrap(), &logger).unwrap();
         assert_eq!(summary.total, 2);
         assert_eq!(summary.newgan, 2); // 两条 UID 均带 r- 前缀
-        assert!(!summary.detailed);    // 基础名单无拓展信息
+        assert!(!summary.detailed); // 基础名单无拓展信息
         assert_eq!(summary.format, "基础名单");
         assert_eq!(summary.language, "English");
         assert_eq!(data.len(), 2);
@@ -958,6 +1304,51 @@ mod tests {
         let no = query_players_core(rows, &q(Some(false)));
         assert_eq!(no.total, 1);
         assert_eq!(no.items[0].name, "真实球员乙");
+    }
+
+    #[test]
+    fn query_snapshot_core_filters_paginates_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let eth = tmp.path().join("SpanMed");
+        std::fs::create_dir_all(&eth).unwrap();
+        std::fs::write(eth.join("img1.png"), b"png").unwrap();
+        let entries = vec![
+            MappingEntry {
+                uid: "r-1001".into(),
+                ethnicity: "SpanMed".into(),
+                image: "img1".into(),
+            },
+            MappingEntry {
+                uid: "2000472008".into(),
+                ethnicity: String::new(),
+                image: "ghost".into(),
+            },
+        ];
+        let root = tmp.path().to_str().unwrap();
+        let q = |offset: usize, limit: usize, search: &str| SnapshotQuery {
+            offset,
+            limit,
+            search: search.into(),
+        };
+        // 全量：rel_path 复原 from 原文；能找到的图片解析出绝对路径，找不到的为 None。
+        let all = query_snapshot_core(&entries, root, &q(0, 10, ""));
+        assert_eq!(all.total, 2);
+        assert_eq!(all.items[0].rel_path, "SpanMed/img1");
+        assert!(all.items[0]
+            .image_path
+            .as_deref()
+            .unwrap()
+            .ends_with("img1.png"));
+        assert_eq!(all.items[1].rel_path, "ghost"); // 平铺条目无目录前缀
+        assert_eq!(all.items[1].image_path, None);
+        // UID 子串筛选。
+        let hit = query_snapshot_core(&entries, root, &q(0, 10, "1001"));
+        assert_eq!(hit.total, 1);
+        assert_eq!(hit.items[0].uid, "r-1001");
+        // 翻页：limit=1 时第 2 页恰好是第二条。
+        let page2 = query_snapshot_core(&entries, root, &q(1, 1, ""));
+        assert_eq!(page2.items.len(), 1);
+        assert_eq!(page2.items[0].uid, "2000472008");
     }
 
     #[test]

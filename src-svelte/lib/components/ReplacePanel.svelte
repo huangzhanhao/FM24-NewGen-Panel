@@ -1,18 +1,20 @@
 <!-- “替换执行”面板：选择模式与选项、发起/取消替换、显示进度条。 -->
 <script lang="ts">
-  import { ask } from '@tauri-apps/plugin-dialog';
-  import { api } from '../api';
-  import { showError } from '../dialog';
-  import { t } from '../text'; // 全局文案常量
-  import { appStore, refreshSnapshot } from '../stores/app.svelte';
-  import { icons } from '../icons';
+  import { ask } from "@tauri-apps/plugin-dialog";
+  import { api } from "../api";
+  import { showError } from "../dialog";
+  import { t } from "../text"; // 全局文案常量
+  import { appStore, refreshSnapshot } from "../stores/app.svelte";
+  import { icons } from "../icons";
 
   // 三个模式的取值/标签/说明统一在 text.ts 的 t.replace.modes 维护；
   // value 发往后端（协议值），label 显示在模式按钮上，desc 显示在选中模式旁。
-  const modeDesc = $derived(t.replace.modes.find((m) => m.value === mode)?.desc ?? '');
+  const modeDesc = $derived(
+    t.replace.modes.find((m) => m.value === mode)?.desc ?? "",
+  );
 
   // 四个表单选项（与复选框双向绑定）；mode 的取值是发往后端的协议值。
-  let mode = $state<'Preserve' | 'Overwrite' | 'Generate'>('Preserve');
+  let mode = $state<"Preserve" | "Overwrite" | "Generate">("Preserve");
   let allowDuplicates = $state(true);
   let filterNewgan = $state(true);
   let saveBackup = $state(true);
@@ -25,14 +27,11 @@
   );
   // ready：只有“已选 Profile + 已选头像包 + 已设 RTF”都满足才允许开始替换。
   const ready = $derived(
-    !!snap && snap.currentProfile !== 'No Profile' && !!snap.currentGroup && !!snap.currentRtf,
+    !!snap &&
+      snap.currentProfile !== "No Profile" &&
+      !!snap.currentGroup &&
+      !!snap.currentRtf,
   );
-  // 未就绪原因（引导用户补全，对等 v1 按钮三级禁用逻辑）：列出三个可能缺失的项。
-  const missing = $derived([
-    !snap || snap.currentProfile === 'No Profile' ? t.replace.needProfile : '',
-    snap && !snap.currentGroup ? t.replace.needGroup : '',
-    snap && !snap.currentRtf ? t.replace.needRtf : '',
-  ].filter(Boolean));
 
   /** 发起替换：先兜底校验目录完整性（识别三套标准），再调后端 start_replace。 */
   async function startReplace() {
@@ -41,21 +40,30 @@
       // 兜底校验：用户可能跳过配置卡的完整性检查，这里再查一次。
       // 标准归属由后端按规则 json 的 FolderList 判定；complete（含超集）→ 静默继续。
       const res = await api.checkIntegrity(snap.currentGroup);
-      if (res.status === 'fixable') {
+      if (res.status === "fixable") {
         const ok = await ask(
           t.replace.missingDirsConfirm(res.standard, res.missing.length),
           { title: t.replace.missingDirsTitle },
         );
         if (!ok) return;
         await api.createMissingDirs(snap.currentGroup, res.missing);
-      } else if (res.status === 'unknown') {
-        const ok = await ask(t.replace.unknownConfirm, { title: t.replace.unknownTitle });
+      } else if (res.status === "unknown") {
+        const ok = await ask(t.replace.unknownConfirm, {
+          title: t.replace.unknownTitle,
+        });
         if (!ok) return;
       } // complete（标准目录齐全，含多出未配置目录）→ 静默继续
       // 调后端启动替换（异步后台线程），随后刷新快照：replacing 变 true → 全局禁用。
-      await api.startReplace({ mode, filterNewgan, allowDuplicates, saveBackup });
+      await api.startReplace({
+        mode,
+        filterNewgan,
+        allowDuplicates,
+        saveBackup,
+      });
       await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效
-    } catch (e) { await showError(e); }
+    } catch (e) {
+      await showError(e);
+    }
   }
 </script>
 
@@ -67,7 +75,11 @@
     <div class="mode-line">
       <div class="seg3">
         {#each t.replace.modes as m}
-          <button class:active={mode === m.value} onclick={() => (mode = m.value)} disabled={busy}>{m.label}</button>
+          <button
+            class:active={mode === m.value}
+            onclick={() => (mode = m.value)}
+            disabled={busy}>{m.label}</button
+          >
         {/each}
       </div>
       <!-- 当前选中模式的说明文字。 -->
@@ -94,36 +106,64 @@
   </div>
   <!-- 开始/取消按钮：未就绪或忙碌时禁用开始；非忙碌时禁用取消。 -->
   <div class="cta-row">
-    <button class="btn primary" onclick={startReplace}
-            disabled={busy || browseMode || !ready}
-            title={browseMode ? t.replace.browseDisabledHint : ''}>
+    <button
+      class="btn primary"
+      onclick={startReplace}
+      disabled={busy || browseMode || !ready}
+      title={browseMode ? t.replace.browseDisabledHint : ""}
+    >
       {#if !busy}
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">{@html icons.play.body}</svg>
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="currentColor"
+          aria-hidden="true">{@html icons.play.body}</svg
+        >
       {/if}
       {busy ? t.replace.runningBtn : t.replace.startBtn}
     </button>
-    <button class="btn cancel" onclick={() => api.cancelReplace()} disabled={!busy}>{t.replace.cancelBtn}</button>
+    <button
+      class="btn cancel"
+      onclick={() => api.cancelReplace()}
+      disabled={!busy}>{t.replace.cancelBtn}</button
+    >
   </div>
-  {#if browseMode}
-    <p class="muted small">{t.replace.browseNotice(appStore.selectedProfile)}</p>
-  {/if}
   <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比，右侧跟「百分比 · 阶段文案」。 -->
   {#if busy || appStore.progress.value > 0}
     <div class="progress-line">
-      <div class="progress-track"><div class="progress-fill" style="width:{appStore.progress.value}%"></div></div>
-      <span class="progress-text">{appStore.progress.value}% · {appStore.progress.status}</span>
+      <div class="progress-track">
+        <div
+          class="progress-fill"
+          style="width:{appStore.progress.value}%"
+        ></div>
+      </div>
+      <span class="progress-text"
+        >{appStore.progress.value}% · {appStore.progress.status}</span
+      >
     </div>
-  {/if}
-  <!-- 未就绪时把待完成项列出来引导用户。 -->
-  {#if !ready && missing.length > 0}
-    <p class="muted small">{t.replace.todoPrefix}{missing.join(' · ')}</p>
   {/if}
 </div>
 
 <style>
   /* 模式行：分段控件定宽 360，右侧说明文字占用余宽（窄屏自动收缩） */
-  .mode-line { display: flex; align-items: center; gap: 14px; min-width: 0; }
-  .mode-line .seg3 { flex: 0 1 360px; }
+  .mode-line {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+  }
+  .mode-line .seg3 {
+    flex: 0 1 320px;
+  }
+  /* 仅收窄本面板分段按钮的纵向内边距（全局为 7px），不影响 RuleEditor 复用的 .seg3 */
+  .mode-line .seg3 button {
+    padding: 5px 10px;
+  }
   /* 选项行：三个开关 22px 间距换行 */
-  .opt-line { display: flex; gap: 22px; flex-wrap: wrap; }
+  .opt-line {
+    display: flex;
+    gap: 22px;
+    flex-wrap: wrap;
+  }
 </style>

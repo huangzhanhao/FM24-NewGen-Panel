@@ -32,32 +32,41 @@ const BACKUP_KEEP: usize = 10; // 最多保留的备份份数
 
 /// config.xml 的 from 值：平铺（ethnicity 空）只写图名，否则 "种族/图名"。
 pub fn record_from(ethnicity: &str, image: &str) -> String {
-    if ethnicity.is_empty() { image.to_string() } else { format!("{ethnicity}/{image}") }
+    if ethnicity.is_empty() {
+        image.to_string()
+    } else {
+        format!("{ethnicity}/{image}")
+    }
 }
 
-/// 解析 config.xml → {uid: entry}（用字典按 UID 快速查找）。
-pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
+/// 解析 config.xml → 有序条目列表（保留文件里的出现顺序，不做去重）。
+/// 【何时用】「快照预览」要展示快照的完整映射清单；按 UID 查找的场景用 parse_xml。
+pub fn parse_xml_entries(path: &Path) -> Result<Vec<MappingEntry>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("读取 config.xml 失败: {e}"))?;
-    let mut out = HashMap::new();
-    for cap in RECORD_RE.captures_iter(&text) {
-        // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
-        // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
-        let parts: Vec<&str> = cap[1].split('/').collect();
-        let (eth, img) = if parts.len() >= 2 {
-            (parts[..parts.len() - 1].join("/"), parts[parts.len() - 1])
-        } else {
-            (String::new(), parts[0])
-        };
-        out.insert(
-            cap[2].to_string(), // 以 UID 为键
+    Ok(RECORD_RE
+        .captures_iter(&text)
+        .map(|cap| {
+            // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
+            // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
+            let parts: Vec<&str> = cap[1].split('/').collect();
+            let (eth, img) = if parts.len() >= 2 {
+                (parts[..parts.len() - 1].join("/"), parts[parts.len() - 1])
+            } else {
+                (String::new(), parts[0])
+            };
             MappingEntry {
                 uid: cap[2].to_string(),
                 ethnicity: eth,
                 image: img.to_string(),
-            },
-        );
-    }
-    Ok(out)
+            }
+        })
+        .collect())
+}
+
+/// 解析 config.xml → {uid: entry}（用字典按 UID 快速查找；同 UID 重复行保留最后一条）。
+pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
+    let list = parse_xml_entries(path)?;
+    Ok(list.into_iter().map(|e| (e.uid.clone(), e)).collect())
 }
 
 /// 全量覆写 config.xml（对等旧版 write_xml：模板 [players] 占位替换）。
@@ -74,7 +83,8 @@ pub fn write_xml(data: &[MappingEntry], img_dir: &Path, save_backup: bool) -> Re
         .map(|m| {
             format!(
                 r#"<record from="{}" to="graphics/pictures/person/{}/portrait"/>"#,
-                record_from(&m.ethnicity, &m.image), m.uid
+                record_from(&m.ethnicity, &m.image),
+                m.uid
             )
         })
         .collect();
@@ -88,8 +98,8 @@ pub fn write_xml(data: &[MappingEntry], img_dir: &Path, save_backup: bool) -> Re
 /// 【何时用】「单人微调」功能：不改其他行，只把某个 UID 换成新图片。
 pub fn single_replacement(
     uid: &str,
-    pack: &str,     // 新图片所在种族目录
-    image: &str,    // 新图片名
+    pack: &str,  // 新图片所在种族目录
+    image: &str, // 新图片名
     img_dir: &Path,
     save_backup: bool,
 ) -> Result<bool, String> {
@@ -139,7 +149,7 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
         .map(|e| e.path())
         .collect();
     backups.sort(); // 文件名含时间戳，字典序 = 时间序
-    // 超过 10 份就删除最旧的（切片 [..len-10] 是前面的旧备份）。
+                    // 超过 10 份就删除最旧的（切片 [..len-10] 是前面的旧备份）。
     if backups.len() > BACKUP_KEEP {
         for old in &backups[..backups.len() - BACKUP_KEEP] {
             let _ = fs::remove_file(old);
@@ -148,36 +158,35 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 从用户选中的图片绝对路径反推 (相对目录路径, 图名)。平铺包（图片在 img_dir 根）→ 目录为空串；
-/// 子/孙目录图片 → 相对 img_dir 的目录路径，多级用 "/" 分隔（如 "MENA/sub"）。
+/// 从用户选中的图片绝对路径反推 (相对目录路径, 图名)。只认头像包内真实存在的图片：
+/// 包根图片 → 目录为空串；子/孙目录图片 → 相对包根的目录路径，多级用 "/" 分隔（如 "MENA/sub"）。
+/// 包外路径与不存在的文件一律返回 None——旧版对取不到相对路径的情况会退化成最后一级目录名，
+/// 把包外图片也写进 config.xml，FM 读不到那张图还污染映射表，故按「单人微调只认包内图片」收紧。
 /// 词干用 file_stem，与 facepack_scanner::scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
 pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(String, String)> {
     let p = Path::new(image_path);
     let ext = p.extension()?.to_str()?.to_ascii_lowercase();
-    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") { return None; }
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+        return None;
+    }
     let image = p.file_stem()?.to_string_lossy().to_string();
-    if image.starts_with('.') { return None; }   // 拒收 ._x.png 等隐藏名，与池侧口径一致
+    if image.starts_with('.') {
+        return None;
+    } // 拒收 ._x.png 等隐藏名，与池侧口径一致
+    if !p.is_file() {
+        return None;
+    } // 手输路径可能打错：不存在的文件写进 config.xml 会替换「成功」但 FM 显示空
+    // 两边 canonicalize 后做前缀剥离（Windows 大小写/分隔符不敏感的权威比较）；
+    // 剥离失败 = 图片在包外（含不同盘），直接拒绝，不再退化取目录名。
     let parent = p.parent()?;
-    let root = Path::new(img_dir);
-    // 优先 canonicalize（Windows 大小写/分隔符不敏感的权威比较），取父目录相对包根的路径。
-    let rel_dir = if let (Ok(p_abs), Ok(r_abs)) = (parent.canonicalize(), root.canonicalize()) {
-        match p_abs.strip_prefix(&r_abs) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-            // 不同盘等无法取相对路径：退化为最后一级目录名（与旧版行为一致）。
-            Err(_) => match parent.file_name() {
-                Some(n) => n.to_string_lossy().to_string(),
-                None => return None,
-            },
-        }
-    } else if parent == root {
-        String::new()
-    } else {
-        match parent.file_name() {
-            Some(n) => n.to_string_lossy().to_string(),
-            None => return None, // 裸相对文件名（无父目录）→ 不合法
-        }
-    };
-    Some((rel_dir, image))
+    let rel = parent
+        .canonicalize()
+        .ok()?
+        .strip_prefix(&Path::new(img_dir).canonicalize().ok()?)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some((rel, image))
 }
 
 /// 探测实际图片文件（.png/.jpg/.jpeg，对等旧版 PlayerService.resolve_image_file）。
@@ -186,7 +195,8 @@ pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(Stri
 pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Option<String> {
     let mut base = img_dir.to_path_buf();
     if !ethnicity.is_empty() {
-        for seg in ethnicity.split('/') { // 相对路径逐级拼接（"/" 统一分隔符）
+        for seg in ethnicity.split('/') {
+            // 相对路径逐级拼接（"/" 统一分隔符）
             base = base.join(seg);
         }
     }
@@ -197,6 +207,49 @@ pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Optio
         }
     }
     None // 三种扩展名都没找到
+}
+
+/// 解析名单「头像」列原文为头像包内的实际图片文件（名单预览悬停/点击预览用）。
+/// FM 导出时该列通常为空文本；非空时按用户可能填入的形态依次尝试：
+///   1. 绝对路径（盘上确实存在的图片文件，原样返回）；
+///   2. 相对头像包根的路径且自带扩展名（如 `African/face_1.png`），判存在即返回；
+///   3. 不带扩展名的相对路径/裸词干（如 `face_kuka`、`MENA/sub/face_2`），
+///      按 png/jpg/jpeg 依次探测（复用 resolve_image_file 的配置口径）。
+/// 裸词干在包根子目录里的递归兜底由命令层借助头像扫描索引完成，本函数只做确定性路径探测。
+pub fn resolve_avatar_path(img_dir: &Path, avatar: &str) -> Option<String> {
+    let avatar = avatar.trim();
+    if avatar.is_empty() {
+        return None;
+    }
+    let raw = Path::new(avatar);
+    // 1) 绝对路径：以文件真实存在为准。
+    if raw.is_absolute() {
+        return if raw.is_file() {
+            Some(raw.to_string_lossy().to_string())
+        } else {
+            None
+        };
+    }
+    let rel = img_dir.join(raw);
+    // 2) 自带扩展名：相对包根判存在。
+    if raw.extension().is_some() {
+        return if rel.is_file() {
+            Some(rel.to_string_lossy().to_string())
+        } else {
+            None
+        };
+    }
+    // 3) 无扩展名：拆成「相对目录 + 词干」，按三种扩展名探测
+    //    （裸词干的相对目录为空串 = 包根；多级用 "/" 分隔，与 resolve_image_file 同口径）。
+    let rel_dir = raw
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let stem = raw.file_stem()?.to_string_lossy().to_string();
+    if stem.is_empty() || stem == "." {
+        return None;
+    }
+    resolve_image_file(img_dir, &rel_dir, &stem)
 }
 
 /// 给 UID 补随机人前缀的辅助（查询缓存时兼容两种形态）。
@@ -224,8 +277,16 @@ mod tests {
         let pack = dir.path().join("pack");
         std::fs::create_dir_all(&pack).unwrap();
         let data = vec![
-            MappingEntry { uid: "r-2000472008".into(), ethnicity: "SpanMed".into(), image: "img1".into() },
-            MappingEntry { uid: "2001234568".into(), ethnicity: "African".into(), image: "img2".into() },
+            MappingEntry {
+                uid: "r-2000472008".into(),
+                ethnicity: "SpanMed".into(),
+                image: "img1".into(),
+            },
+            MappingEntry {
+                uid: "2001234568".into(),
+                ethnicity: "African".into(),
+                image: "img2".into(),
+            },
         ];
         write_xml(&data, &pack, false).unwrap();
         let parsed = parse_xml(&pack.join("config.xml")).unwrap();
@@ -239,17 +300,61 @@ mod tests {
     }
 
     #[test]
+    fn parse_xml_entries_keeps_order_and_matches_dict() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        write_xml(
+            &[
+                MappingEntry {
+                    uid: "2000000001".into(),
+                    ethnicity: "Asian".into(),
+                    image: "a1".into(),
+                },
+                MappingEntry {
+                    uid: "r-2000000002".into(),
+                    ethnicity: "MENA/sub".into(),
+                    image: "m9".into(),
+                },
+            ],
+            &pack,
+            false,
+        )
+        .unwrap();
+        // 有序版：保留文件顺序与多级目录拆分。
+        let list = parse_xml_entries(&pack.join("config.xml")).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].uid, "2000000001");
+        assert_eq!(list[1].ethnicity, "MENA/sub");
+        assert_eq!(list[1].image, "m9");
+        // 字典版与有序版内容一致（同 UID 保留最后一条的语义不变）。
+        let map = parse_xml(&pack.join("config.xml")).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["r-2000000002"].image, "m9");
+    }
+
+    #[test]
     fn single_replacement_hits_only_target_line() {
         let dir = tempfile::tempdir().unwrap();
         let pack = dir.path().join("pack");
         std::fs::create_dir_all(&pack).unwrap();
         write_xml(
             &[
-                MappingEntry { uid: "r-1001".into(), ethnicity: "Asian".into(), image: "a1".into() },
-                MappingEntry { uid: "r-1002".into(), ethnicity: "Asian".into(), image: "a2".into() },
+                MappingEntry {
+                    uid: "r-1001".into(),
+                    ethnicity: "Asian".into(),
+                    image: "a1".into(),
+                },
+                MappingEntry {
+                    uid: "r-1002".into(),
+                    ethnicity: "Asian".into(),
+                    image: "a2".into(),
+                },
             ],
-            &pack, false,
-        ).unwrap();
+            &pack,
+            false,
+        )
+        .unwrap();
         assert!(single_replacement("r-1001", "MENA", "m9", &pack, false).unwrap());
         let parsed = parse_xml(&pack.join("config.xml")).unwrap();
         assert_eq!(parsed["r-1001"].ethnicity, "MENA");
@@ -263,15 +368,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pack = dir.path().join("pack");
         std::fs::create_dir_all(&pack).unwrap();
-        write_xml(&[MappingEntry { uid: "r-1".into(), ethnicity: "Asian".into(), image: "x".into() }], &pack, false).unwrap();
+        write_xml(
+            &[MappingEntry {
+                uid: "r-1".into(),
+                ethnicity: "Asian".into(),
+                image: "x".into(),
+            }],
+            &pack,
+            false,
+        )
+        .unwrap();
         // 手动造 12 份历史备份（时间戳递增）
         for i in 0..12 {
             let name = format!("config备份_20260101-0000{:02}.xml", i);
             std::fs::copy(pack.join("config.xml"), pack.join(&name)).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1100)); // 秒级时间戳递增
         }
-        write_xml(&[MappingEntry { uid: "r-1".into(), ethnicity: "Asian".into(), image: "x".into() }], &pack, true).unwrap();
-        let count = std::fs::read_dir(&pack).unwrap()
+        write_xml(
+            &[MappingEntry {
+                uid: "r-1".into(),
+                ethnicity: "Asian".into(),
+                image: "x".into(),
+            }],
+            &pack,
+            true,
+        )
+        .unwrap();
+        let count = std::fs::read_dir(&pack)
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with("config备份_"))
             .count();
@@ -291,9 +415,15 @@ mod tests {
         std::fs::create_dir_all(&pack).unwrap();
         // 平铺条目：write 出 from="img1"（无目录前缀），parse 回 ("", "img1")
         write_xml(
-            &[MappingEntry { uid: "r-1001".into(), ethnicity: "".into(), image: "img1".into() }],
-            &pack, false,
-        ).unwrap();
+            &[MappingEntry {
+                uid: "r-1001".into(),
+                ethnicity: "".into(),
+                image: "img1".into(),
+            }],
+            &pack,
+            false,
+        )
+        .unwrap();
         let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
         assert!(text.contains(r#"from="img1""#));
         let parsed = parse_xml(&pack.join("config.xml")).unwrap();
@@ -302,7 +432,13 @@ mod tests {
         // 单人替换 pack="" → from="image"（平铺形态）
         assert!(single_replacement("r-1001", "", "img2", &pack, false).unwrap());
         let parsed2 = parse_xml(&pack.join("config.xml")).unwrap();
-        assert_eq!((parsed2["r-1001"].ethnicity.as_str(), parsed2["r-1001"].image.as_str()), ("", "img2"));
+        assert_eq!(
+            (
+                parsed2["r-1001"].ethnicity.as_str(),
+                parsed2["r-1001"].image.as_str()
+            ),
+            ("", "img2")
+        );
     }
 
     #[test]
@@ -342,8 +478,14 @@ mod tests {
             Some(("".into(), "a.1".into()))
         );
         // 非图片扩展名 → None；隐藏名 → None；裸相对文件名（无父目录）→ None
-        assert_eq!(parse_image_path_in_pack(&root_s, &dir.path().join("x.txt").to_string_lossy()), None);
-        assert_eq!(parse_image_path_in_pack(&root_s, &dir.path().join("._h.png").to_string_lossy()), None);
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &dir.path().join("x.txt").to_string_lossy()),
+            None
+        );
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &dir.path().join("._h.png").to_string_lossy()),
+            None
+        );
         assert_eq!(parse_image_path_in_pack(&root_s, "r9.png"), None);
         // resolve：嵌套命中种族目录；空 ethnicity 命中包根；找不到 → None
         assert_eq!(
@@ -355,5 +497,87 @@ mod tests {
             Some(dir.path().join("r1.png").to_string_lossy().to_string())
         );
         assert_eq!(resolve_image_file(dir.path(), "MENA", "nope"), None);
+    }
+
+    #[test]
+    fn parse_image_path_in_pack_rejects_outside_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_s = dir.path().to_string_lossy().to_string();
+        // 包根合法图作对照（能反推出空目录）
+        std::fs::write(dir.path().join("in.png"), b"png").unwrap();
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &dir.path().join("in.png").to_string_lossy()),
+            Some(("".into(), "in".into()))
+        );
+        // 包外同盘目录（tempdir 的兄弟目录）：旧版会退化取最后一级目录名放行，现在必须拒
+        let out = dir.path().parent().unwrap().join("ngm_out_of_pack");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("o1.png"), b"png").unwrap();
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &out.join("o1.png").to_string_lossy()),
+            None
+        );
+        // 路径在包内但文件不存在（手输打错字）
+        assert_eq!(
+            parse_image_path_in_pack(&root_s, &dir.path().join("ghost.png").to_string_lossy()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_avatar_path_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        // 包根图（裸词干，无扩展名 → png/jpg/jpeg 探测）。
+        std::fs::write(dir.path().join("face_kuka.png"), b"png").unwrap();
+        assert_eq!(
+            resolve_avatar_path(dir.path(), "face_kuka"),
+            Some(
+                dir.path()
+                    .join("face_kuka.png")
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+        // 自带扩展名的相对路径。
+        assert_eq!(
+            resolve_avatar_path(dir.path(), "face_kuka.png"),
+            Some(
+                dir.path()
+                    .join("face_kuka.png")
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+        // 子目录词干（多级相对路径，补扩展名）。
+        let sub = dir.path().join("MENA").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("face_2.jpg"), b"jpg").unwrap();
+        assert_eq!(
+            resolve_avatar_path(dir.path(), "MENA/sub/face_2"),
+            Some(sub.join("face_2.jpg").to_string_lossy().to_string())
+        );
+        // 反斜杠分隔同样成立（Windows 用户手写路径；Linux 下反斜杠不是路径分隔符，故仅 Windows 断言）。
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_avatar_path(dir.path(), r"MENA\sub\face_2"),
+            Some(sub.join("face_2.jpg").to_string_lossy().to_string())
+        );
+        // 绝对路径：存在才命中。
+        let abs = dir.path().join("abs_face.png");
+        std::fs::write(&abs, b"png").unwrap();
+        assert_eq!(
+            resolve_avatar_path(dir.path(), &abs.to_string_lossy()),
+            Some(abs.to_string_lossy().to_string())
+        );
+        // 空白 / 不存在的词干 / 不存在的绝对路径 → None（子目录递归查找不在本函数职责内）。
+        assert_eq!(resolve_avatar_path(dir.path(), "   "), None);
+        assert_eq!(resolve_avatar_path(dir.path(), "no_such_face"), None);
+        assert_eq!(
+            resolve_avatar_path(
+                dir.path(),
+                &dir.path().join("missing.png").to_string_lossy()
+            ),
+            None
+        );
     }
 }

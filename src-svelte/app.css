@@ -456,9 +456,12 @@ table.grid tbody tr:hover { background: var(--bg-raised); }
 /* ============================================================
    Stepper（五步旅程引导，纯展示）
    ============================================================ */
-.stepper {
-  display: flex; align-items: center; background: var(--bg-surface);
+.stepper-card {
+  background: var(--bg-surface);
   border: 1px solid var(--hairline); border-radius: var(--radius-lg); padding: 12px 18px;
+}
+.stepper {
+  display: flex; align-items: center;
   list-style: none; margin: 0; flex-wrap: wrap; row-gap: 6px;
 }
 .stepper li { list-style: none; }
@@ -482,25 +485,27 @@ table.grid tbody tr:hover { background: var(--bg-raised); }
    品牌区 / 主题切换
    ============================================================ */
 .brand-row { display: flex; align-items: center; gap: 10px; padding: 16px 16px 12px; }
+.brand-text { flex: 1; min-width: 0; }
 .brand-logo {
   width: 38px; height: 38px; border-radius: var(--radius-md); display: block;
   box-shadow: 0 0 0 1px var(--hairline-2);
 }
 .brand-name { font-weight: 700; font-size: 14.5px; line-height: 1.2; color: var(--text-1); }
+.brand-sub { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
 .brand-ver {
-  display: inline-block; margin-top: 3px; font-size: 10.5px; color: var(--accent);
+  display: inline-block; font-size: 11px; color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 99px; padding: 0 7px; line-height: 16px;
+  border-radius: 99px; padding: 0.5px 7px; line-height: 16px;
 }
 .theme-switch {
-  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
-  font-size: 11.5px; color: var(--text-2); background: var(--bg-raised);
-  border: 1px solid var(--hairline-2); border-radius: 99px; padding: 3px 10px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+  font-size: 11px; color: var(--text-2); background: var(--bg-raised);
+  border: 1px solid var(--hairline-2); border-radius: 99px; padding: 0.5px 8px; cursor: pointer;
 }
 .theme-switch:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ============================================================
-   球员卡（单人微调，B3）
+   球员卡（单人替换，B3）
    ============================================================ */
 .player-card { display: flex; gap: 22px; flex-wrap: wrap; }
 .face-col { flex-shrink: 0; display: flex; flex-direction: column; gap: 7px; align-items: flex-start; }
@@ -516,36 +521,36 @@ table.grid tbody tr:hover { background: var(--bg-raised); }
 .mapping::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
 .mapping.set::before { background: var(--accent); }
 .player-info { flex: 1; min-width: 380px; display: flex; flex-direction: column; gap: 14px; }
-.player-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* 头部：UID 输入框在最左（与姓名同级字号），姓名在右 */
+.player-head { display: flex; align-items: baseline; justify-content: flex-start; gap: 18px; flex-wrap: wrap; }
 .player-head h2 { font-size: 21px; font-weight: 700; margin: 0; letter-spacing: .2px; }
 .uid-chip {
   font-family: var(--mono); font-size: 12px; color: var(--text-2); background: var(--bg-inset);
   border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 4px 10px;
 }
-/* UID 胶囊在球员卡里是可输入框（保留输入 + 回车预览语义） */
-input.uid-chip { width: 160px; max-width: 100%; padding: 4px 10px; font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+/* UID 胶囊在球员卡里是可输入框（保留输入 + 回车预览语义）；视觉尺寸与姓名 h2 同级，固定在头部最左。 */
+input.uid-chip {
+  flex-shrink: 0; width: 13ch; max-width: 100%; padding: 1px 12px;
+  font-family: var(--mono); font-size: 21px; font-weight: 700; line-height: 1.35; color: var(--text-1);
+}
+/* 三行信息胶囊：作为 player-info 直接子级，左缘与 UID 输入框对齐；行间距小于卡片级 gap */
+.capsule-rows { display: flex; flex-direction: column; gap: 7px; }
 .meta-row { display: flex; gap: 7px; flex-wrap: wrap; }
 .meta {
   display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2);
   background: var(--bg-raised); border-radius: var(--radius-sm); padding: 3px 10px;
 }
 .meta b { color: var(--text-1); font-weight: 600; }
-.meta.accent { color: var(--accent); }
-.dl-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
-  background: var(--hairline); border: 1px solid var(--hairline);
-  border-radius: var(--radius-md); overflow: hidden;
-}
-.dl-grid .cell { background: var(--bg-surface); padding: 9px 12px; }
-.dl-grid .cell.wide { grid-column: span 2; }
-.dl-grid dt { font-size: 11px; color: var(--text-3); margin-bottom: 2px; }
-.dl-grid dd { margin: 0; font-size: 13px; color: var(--text-1); }
-.dl-grid dd.mono { font-family: var(--mono); font-size: 11.5px; }
+.meta.accent, .meta.accent b { color: var(--accent); }
+/* 等宽胶囊：当前映射等路径类值，长路径可自然换行 */
+.meta.mono b { font-family: var(--mono); font-weight: 500; white-space: normal; word-break: break-all; }
 .replace-row { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; align-items: center; }
 .replace-row .input-wrap { flex: 1; min-width: 240px; }
 
 /* 表格工具栏（B3） */
 .table-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+/* 总条数：数字与「条」必须同行，空间不足时由搜索框收缩让位 */
+.table-toolbar .record-count { white-space: nowrap; flex-shrink: 0; }
 .search { position: relative; flex: 0 1 320px; }
 .search > svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--text-3); }
 .search input { width: 100%; padding-left: 30px; }

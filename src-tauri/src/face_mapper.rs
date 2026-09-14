@@ -4,13 +4,25 @@
 //! （templates::PickRule）算出目标种族目录并随机取图，产出「球员 UID → 图片」的映射条目。
 //! 三模式（保留/覆写/生成）决定与现有 config.xml 的合并方式；包布局扫描与标准判定在
 //! facepack_scanner，本模块只消费其结果。
-use crate::facepack_scanner::{self, scan_pack, PackLayout, PackScan};
+use crate::facepack_scanner::{self, scan_pack_progress, PackLayout, PackScan};
 use crate::templates::{self, PickRule, RuleConfig};
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// `generate_mapping` 内部两个「可数」子步骤。
+/// 【为何要这个枚举】两段的进度要落在总进度条的不同区间上，否则前一段走满 100% 之后，
+/// 后一段又从 0% 起算，状态栏会看到进度往回跳。由调用方（replace_flow）负责把
+/// 「第 n 个 / 共 total 个」折算进各自区间，本模块只报原始计数、不认识百分比。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapStep {
+    /// 读现有 config.xml（只有 Preserve/Overwrite 会做；Generate 从零开始，跳过）。
+    ReadXml,
+    /// 逐球员抽图。
+    Players,
+}
 
 /// 替换模式（对应前端三个模式按钮）。用枚举而不是字符串，非法值在 parse 处即被拒绝。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,9 +54,14 @@ pub struct FaceMapper {
 }
 
 impl FaceMapper {
-    /// 扫描头像包并建立索引。扫描交给 facepack_scanner::scan_pack，标准判定与模型选择交给 templates。
-    pub fn new(img_dir: &str, config: &RuleConfig) -> Result<Self, String> {
-        let scan = scan_pack(img_dir)?;
+    /// 扫描头像包并建立索引。扫描交给 facepack_scanner::scan_pack_progress（逐一级子目录上报），
+    /// 标准判定与模型选择交给 templates。progress 供调用方把「第 n 个 / 共 total 个」折算成百分比。
+    pub fn new(
+        img_dir: &str,
+        config: &RuleConfig,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Self, String> {
+        let scan = scan_pack_progress(img_dir, progress)?;
         Self::from_scan(img_dir, &scan, config)
     }
 
@@ -63,22 +80,30 @@ impl FaceMapper {
 
     /// 三模式映射总入口；返回 None 表示被取消（对等旧版 generate_mapping）。
     /// cancel 是跨线程的「取消标志」，处理大名单时逐项检查，用户点取消能及时停下。
+    /// progress 只报原始计数（MapStep + 第 n 个 / 共 total 个），百分比折算由调用方负责。
     pub fn generate_mapping(
         &mut self,
         rtf_data: &[PlayerRecord],
         mode: Mode,
         duplicates: bool,      // 是否允许图片复用
         cancel: &AtomicBool,
+        progress: &mut dyn FnMut(MapStep, usize, usize),
     ) -> Option<Vec<MappingEntry>> {
         // 开始前先看一眼是否已取消（Ordering::Relaxed 是最宽松的内存顺序，这里只需原子性）。
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
         // Preserve/Overwrite 需要现有 config.xml 作为基础；Generate 从零开始，用空表。
+        // 读进来的过程按条上报（大包 config.xml 可上万行）。Generate 没有这一步，连 ReadXml
+        // 都不报——否则状态栏会先亮一下「读取现有映射」又立刻切到下一阶段。
         let xml_data = match mode {
             Mode::Preserve | Mode::Overwrite => {
-                xml_parser::parse_xml(&Path::new(&self.img_dir).join("config.xml"))
-                    .unwrap_or_default() // 解析失败（如没文件）就用空字典
+                progress(MapStep::ReadXml, 0, 0); // 步骤锚点：先让状态栏亮出「读取现有映射」，再逐条报
+                xml_parser::parse_xml_progress(
+                    &Path::new(&self.img_dir).join("config.xml"),
+                    &mut |done, total| progress(MapStep::ReadXml, done, total),
+                )
+                .unwrap_or_default() // 解析失败（如没文件）就用空字典
             }
             Mode::Generate => HashMap::new(),
         };
@@ -90,11 +115,13 @@ impl FaceMapper {
                 .collect();
             self.rule.exclude_used(&used);
         }
-        // 按模式分发到具体处理函数。
+        // 按模式分发到具体处理函数。抽图前先报一次步骤锚点（0/0）：Generate 没有读 XML 那一步，
+        // 这个锚点是它唯一的机会把状态栏从「读取头像包索引」切到「映射球员头像」。
+        progress(MapStep::Players, 0, 0);
         match mode {
-            Mode::Preserve => self.process_preserve(rtf_data, &xml_data, duplicates, cancel),
-            Mode::Overwrite => self.process_overwrite(rtf_data, &xml_data, duplicates, cancel),
-            Mode::Generate => self.process_generate(rtf_data, duplicates, cancel),
+            Mode::Preserve => self.process_preserve(rtf_data, &xml_data, duplicates, cancel, progress),
+            Mode::Overwrite => self.process_overwrite(rtf_data, &xml_data, duplicates, cancel, progress),
+            Mode::Generate => self.process_generate(rtf_data, duplicates, cancel, progress),
         }
     }
 
@@ -105,16 +132,24 @@ impl FaceMapper {
         xml_data: &HashMap<String, MappingEntry>,
         duplicates: bool,
         cancel: &AtomicBool,
+        progress: &mut dyn FnMut(MapStep, usize, usize),
     ) -> Option<Vec<MappingEntry>> {
         let mut mapping = Vec::new();
-        // filter 只留下 XML 中还没有的 UID（即新球员）。
-        for p in rtf_data.iter().filter(|p| !xml_data.contains_key(&p.uid)) {
+        // filter 只留下 XML 中还没有的 UID（即新球员）。先收集成 Vec：进度分母要的是「本次真正要抽图的
+        // 球员数」（过滤后的），拿 rtf_data.len() 当分母会让进度条永远走不满。
+        let targets: Vec<&PlayerRecord> = rtf_data
+            .iter()
+            .filter(|p| !xml_data.contains_key(&p.uid))
+            .collect();
+        let total = targets.len();
+        for (i, p) in targets.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return None; // 逐项检查取消，及时中断
             }
             if let Some(m) = self.build_player_mapping(p, duplicates) {
                 mapping.push(m);
             }
+            progress(MapStep::Players, i + 1, total);
         }
         // 原样保留 XML 中所有旧映射。
         mapping.extend(xml_data.values().cloned());
@@ -128,10 +163,12 @@ impl FaceMapper {
         xml_data: &HashMap<String, MappingEntry>,
         duplicates: bool,
         cancel: &AtomicBool,
+        progress: &mut dyn FnMut(MapStep, usize, usize),
     ) -> Option<Vec<MappingEntry>> {
         let mut rest = xml_data.clone(); // 先把旧映射全部拷贝一份，后续逐个剔除名单内的
         let mut mapping = Vec::new();
-        for p in rtf_data {
+        let total = rtf_data.len();
+        for (i, p) in rtf_data.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
@@ -139,6 +176,7 @@ impl FaceMapper {
                 mapping.push(m);
                 rest.remove(&p.uid); // 名单内球员全部重抽（从 rest 中移除旧的）
             }
+            progress(MapStep::Players, i + 1, total);
         }
         mapping.extend(rest.into_values()); // 剩下的（名单外）保留
         Some(mapping)
@@ -150,15 +188,18 @@ impl FaceMapper {
         rtf_data: &[PlayerRecord],
         duplicates: bool,
         cancel: &AtomicBool,
+        progress: &mut dyn FnMut(MapStep, usize, usize),
     ) -> Option<Vec<MappingEntry>> {
         let mut mapping = Vec::new();
-        for p in rtf_data {
+        let total = rtf_data.len();
+        for (i, p) in rtf_data.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
             if let Some(m) = self.build_player_mapping(p, duplicates) {
                 mapping.push(m);
             }
+            progress(MapStep::Players, i + 1, total);
         }
         Some(mapping)
     }
@@ -212,14 +253,14 @@ mod tests {
     fn generate_mode_maps_into_ethnic_dir() {
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let data = vec![
             player("r-2001", "ESP", "1"),  // ESP → SpanMed
             player("r-2002", "USA", "0"),  // USA → Caucasian
         ];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, true, &cancel)
+            .generate_mapping(&data, Mode::Generate, true, &cancel, &mut |_, _, _| {})
             .unwrap();
         assert_eq!(mapping.len(), 2);
         assert_eq!(mapping[0].ethnicity, "SpanMed");
@@ -246,11 +287,11 @@ mod tests {
             std::fs::write(eth_dir.join(format!("s{i}.png")), b"png").unwrap();
         }
         let img = dir.path().to_string_lossy().to_string();
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let data: Vec<PlayerRecord> = (0..3).map(|i| player(&format!("r-30{i}"), "ESP", "1")).collect();
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, false, &cancel)
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &mut |_, _, _| {})
             .unwrap();
         assert_eq!(mapping.len(), 3);
         let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
@@ -266,11 +307,11 @@ mod tests {
             &[MappingEntry { uid: "r-2001".into(), ethnicity: "African".into(), image: "old".into() }],
             Path::new(&img), false,
         ).unwrap();
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "ESP", "1")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Preserve, true, &cancel)
+            .generate_mapping(&data, Mode::Preserve, true, &cancel, &mut |_, _, _| {})
             .unwrap();
         // r-2001 保留旧映射，r-2002 新建
         let e = mapping.iter().find(|m| m.uid == "r-2001").unwrap();
@@ -282,10 +323,10 @@ mod tests {
     fn cancel_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let cancel = AtomicBool::new(true); // 已取消
         let data = vec![player("r-2001", "ESP", "1")];
-        assert!(mapper.generate_mapping(&data, Mode::Generate, true, &cancel).is_none());
+        assert!(mapper.generate_mapping(&data, Mode::Generate, true, &cancel, &mut |_, _, _| {}).is_none());
     }
 
     /// 标准一平铺包 fixture：根目录 5 张普通图 + 1 张点号文件名（锁定 file_stem 词干规则）。
@@ -302,12 +343,12 @@ mod tests {
         // facepack() 恰为 14 个合法种族目录 → 按内置 FolderList 判标准二且走种族匹配规则。
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         assert_eq!(mapper.layout, PackLayout::Standard { standard: 2, complete: true });
         let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "USA", "0")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, true, &cancel)
+            .generate_mapping(&data, Mode::Generate, true, &cancel, &mut |_, _, _| {})
             .unwrap();
         assert_eq!(mapping.len(), 2);
         assert_eq!(mapping[0].ethnicity, "SpanMed"); // 按 correct_ethnic 进种族目录
@@ -321,13 +362,13 @@ mod tests {
     fn flat_generate_maps_everyone_randomly() {
         let dir = tempfile::tempdir().unwrap();
         let img = flatpack(&dir);
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         assert_eq!(mapper.layout, PackLayout::Flat);
         // ZZZ 不在标准映射：平铺必须忽略国籍/种族码，未知国籍球员同样被映射。
         let data = vec![player("r-3001", "ZZZ", "1"), player("r-3002", "ESP", "9")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, true, &cancel)
+            .generate_mapping(&data, Mode::Generate, true, &cancel, &mut |_, _, _| {})
             .unwrap();
         assert_eq!(mapping.len(), 2);
         for m in &mapping {
@@ -341,11 +382,11 @@ mod tests {
     fn flat_no_duplicates_exhausts_pool() {
         let dir = tempfile::tempdir().unwrap();
         let img = flatpack(&dir); // 池共 6 张
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let data: Vec<PlayerRecord> = (0..8).map(|i| player(&format!("r-40{i}"), "ESP", "1")).collect();
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, false, &cancel)
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &mut |_, _, _| {})
             .unwrap();
         assert_eq!(mapping.len(), 6); // 池耗尽后其余球员被跳过
         let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
@@ -361,11 +402,11 @@ mod tests {
             &[MappingEntry { uid: "r-3001".into(), ethnicity: "".into(), image: "face0".into() }],
             Path::new(&img), false,
         ).unwrap();
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let data = vec![player("r-3001", "ESP", "1"), player("r-3002", "ESP", "1")];
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Preserve, true, &cancel)
+            .generate_mapping(&data, Mode::Preserve, true, &cancel, &mut |_, _, _| {})
             .unwrap();
         // r-3001 保留旧平铺映射；r-3002 新建且种族为空。
         let e = mapping.iter().find(|m| m.uid == "r-3001").unwrap();
@@ -383,14 +424,14 @@ mod tests {
         std::fs::write(dir.path().join("weirdA/i.png"), b"png").unwrap();
         std::fs::write(dir.path().join("weirdA/sub/j.png"), b"png").unwrap();
         std::fs::write(dir.path().join("root.png"), b"png").unwrap();
-        let mut mapper = FaceMapper::new(&img, &config()).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         assert_eq!(mapper.layout, PackLayout::Unknown);
         // 禁重复 + 池恰好 3 张、球员 3 名 → 必然抽完全部图片（确定性断言，不依赖随机）。
         let data: Vec<PlayerRecord> =
             (0..3).map(|i| player(&format!("r-50{i}"), "ZZZ", "1")).collect();
         let cancel = AtomicBool::new(false);
         let mapping = mapper
-            .generate_mapping(&data, Mode::Generate, false, &cancel)
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &mut |_, _, _| {})
             .unwrap();
         assert_eq!(mapping.len(), 3);
         let froms: BTreeSet<String> = mapping

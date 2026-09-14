@@ -56,8 +56,14 @@ export interface AppSnapshot {
   replacing: boolean; configXml: ConfigXmlInfo | null; logPath: string;
 }
 
-/** 进度事件载荷（对应 Rust 的 ProgressPayload）。 */
-export interface ProgressPayload { status: string; value: number; }
+/** 进度事件载荷（对应 Rust 的 ProgressPayload）：替换流水线的进度。
+ *  current/total 是阶段内的「第 n 个 / 共 total 个」（如逐球员抽图 3500/30000）；
+ *  纯阶段锚点或该阶段无可数单位时为 0/0，状态栏据此只显示百分比。 */
+export interface ProgressPayload { status: string; value: number; current: number; total: number; }
+
+/** 轻量任务的进度载荷（对应 Rust 的 TaskProgressPayload）：「检查完整性 / 扫描头像 / 扫描RTF /
+ *  读取快照」四个按钮的进度。value 由 current/total 折算而来，状态栏另显示「n/total」原始口径。 */
+export interface TaskProgressPayload { status: string; value: number; current: number; total: number; }
 
 /** 发起替换的参数（对应 Rust 的 ReplaceArgs）；mode 用字面量联合限定三个合法值（协议值）。 */
 export interface ReplaceArgs {

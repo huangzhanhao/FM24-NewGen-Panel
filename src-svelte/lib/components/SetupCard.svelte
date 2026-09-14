@@ -6,7 +6,7 @@
   import { t } from "../text"; // 全局文案常量
   import { pinScrollEnd } from "../actions"; // 把长路径钉到最右的 action
   import { icons } from "../icons";
-  import { appStore, applySnapshot } from "../stores/app.svelte";
+  import { appStore, applySnapshot, runTask } from "../stores/app.svelte";
   import type { IntegrityResult } from "../types";
   import RuleEditor from "./RuleEditor.svelte";
 
@@ -57,8 +57,12 @@
   /** 检查完整性：按规则 json 的 FolderList 识别头像包归属哪个标准（可能因用户改坏 json 报错）。 */
   async function checkIntegrity() {
     if (!snap?.currentGroup) return;
+    // 先取出目录到局部变量：闭包里 TS 的判空收窄会失效，且 runTask 包的正是这条命令。
+    const imgDir = snap.currentGroup;
     try {
-      integrity = await api.checkIntegrity(snap.currentGroup);
+      // runTask(任务名, 命令)：命令执行期间由底部状态栏接管进度条（后端 task:progress 事件实时驱动），
+      // 传任务名让状态栏在第一条事件到达前就显示正确的名字，不残留上一个任务。
+      integrity = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
     } catch (e) {
       await showError(e);
     }
@@ -77,9 +81,10 @@
    *  成功后记录已读路径、切到结果区「快照预览」并触发其重载。浏览态自洽（读操作）。 */
   async function readSnapshot() {
     if (!snap?.configXml?.exists) return;
+    const xmlPath = snap.configXml.path; // 取到局部变量：闭包里 TS 的判空收窄会失效
     try {
-      await api.readSnapshot(snap.configXml.path);
-      appStore.snapshotReadPath = snap.configXml.path;
+      await runTask(t.setup.viewConfigBtn, () => api.readSnapshot(xmlPath));
+      appStore.snapshotReadPath = xmlPath;
       appStore.resultsView = "snapshot";
       appStore.snapshotVersion++;
     } catch (e) {
@@ -101,7 +106,7 @@
   async function scanImages() {
     if (!snap?.currentGroup) return;
     try {
-      await api.scanImages();
+      await runTask(t.setup.scanImagesBtn, () => api.scanImages());
     } catch (e) {
       await showError(e);
     }
@@ -111,7 +116,7 @@
   async function scanRtf() {
     if (!snap?.currentRtf) return;
     try {
-      appStore.lastRtfScan = await api.scanRtf();
+      appStore.lastRtfScan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
       appStore.rosterReady = true; // 名单缓存已填充：名单预览据此渲染工具条
       appStore.rosterVersion++;
       appStore.resultsView = 'table'; // 扫描成功：结果区切到「名单预览」，让用户直接看到扫描结果
@@ -133,9 +138,13 @@
       { title: t.setup.missingDirsTitle },
     );
     if (!ok) return; // 用户取消
+    // 取到局部变量：闭包里 TS 的判空收窄会失效（下面 runTask 包的正是一条闭包）。
+    const imgDir = snap.currentGroup;
     try {
-      await api.createMissingDirs(snap.currentGroup, integrity.missing);
-      integrity = await api.checkIntegrity(snap.currentGroup); // 复检，得到权威结论
+      await api.createMissingDirs(imgDir, integrity.missing);
+      // 复检和「检查完整性」按钮是同一条命令，同样经 runTask 让状态栏接管进度：
+      // 不包的话后端照样发 task:progress，进度条会动而状态文字还停在「就绪」。
+      integrity = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
     } catch (e) {
       await showError(e);
     }

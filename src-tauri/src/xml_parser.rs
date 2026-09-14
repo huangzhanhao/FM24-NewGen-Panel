@@ -43,31 +43,57 @@ pub fn record_from(ethnicity: &str, image: &str) -> String {
 /// 解析 config.xml → 有序条目列表（保留文件里的出现顺序，不做去重）。
 /// 【何时用】「快照预览」要展示快照的完整映射清单；按 UID 查找的场景用 parse_xml。
 pub fn parse_xml_entries(path: &Path) -> Result<Vec<MappingEntry>, String> {
+    parse_xml_entries_progress(path, &mut |_, _| {})
+}
+
+/// 同 `parse_xml_entries`，额外把「已解析第 n 条 / 共 total 条」上报给进度回调（「读取快照」状态栏进度用）。
+/// 【为何先数一遍】captures_iter 是懒迭代器，不先取总数就没有分母；find_iter 只定位、不建对象，开销很小。
+pub fn parse_xml_entries_progress(
+    path: &Path,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<MappingEntry>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("读取 config.xml 失败: {e}"))?;
-    Ok(RECORD_RE
-        .captures_iter(&text)
-        .map(|cap| {
-            // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
-            // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
-            let parts: Vec<&str> = cap[1].split('/').collect();
-            let (eth, img) = if parts.len() >= 2 {
-                (parts[..parts.len() - 1].join("/"), parts[parts.len() - 1])
-            } else {
-                (String::new(), parts[0])
-            };
-            MappingEntry {
-                uid: cap[2].to_string(),
-                ethnicity: eth,
-                image: img.to_string(),
-            }
-        })
-        .collect())
+    let total = RECORD_RE.find_iter(&text).count(); // 映射条数（进度分母）
+    let mut done = 0usize;
+    let mut entries = Vec::new();
+    for cap in RECORD_RE.captures_iter(&text) {
+        done += 1;
+        progress(done, total); // 逐条上报（订阅方按百分比去重后才 emit，不会刷爆 IPC）
+
+        // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
+        // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
+        let parts: Vec<&str> = cap[1].split('/').collect();
+        let (eth, img) = if parts.len() >= 2 {
+            (parts[..parts.len() - 1].join("/"), parts[parts.len() - 1])
+        } else {
+            (String::new(), parts[0])
+        };
+        entries.push(MappingEntry {
+            uid: cap[2].to_string(),
+            ethnicity: eth,
+            image: img.to_string(),
+        });
+    }
+    Ok(entries)
 }
 
 /// 解析 config.xml → {uid: entry}（用字典按 UID 快速查找；同 UID 重复行保留最后一条）。
 pub fn parse_xml(path: &Path) -> Result<HashMap<String, MappingEntry>, String> {
-    let list = parse_xml_entries(path)?;
-    Ok(list.into_iter().map(|e| (e.uid.clone(), e)).collect())
+    parse_xml_progress(path, &mut |_, _| {})
+}
+
+/// 同 `parse_xml`，额外把「已解析第 n 条 / 共 total 条」上报给进度回调
+/// （替换流水线按 Preserve/Overwrite 读现有 config.xml 时用）。
+/// 【为何委托给 entries 版】两者本就是同一趟解析，只是最后收成字典还是保留顺序；
+/// 摊开写第二遍会把「先数一遍拿分母」的口径复制一份，容易两处走偏。
+pub fn parse_xml_progress(
+    path: &Path,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<HashMap<String, MappingEntry>, String> {
+    Ok(parse_xml_entries_progress(path, progress)?
+        .into_iter()
+        .map(|e| (e.uid.clone(), e))
+        .collect())
 }
 
 /// 全量覆写 config.xml（对等旧版 write_xml：模板 [players] 占位替换）。

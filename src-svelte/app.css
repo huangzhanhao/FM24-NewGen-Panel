@@ -425,6 +425,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 }
 .statusbar .dot.busy { background: var(--warn); animation: pulse 1.3s infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* 最新一行日志预览：允许收缩，空间不够时省略号截断（min-width:0 是 flex 子项能截断的前提）。 */
+.statusbar .last-log {
+  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  color: var(--text-3);
+}
+/* 进度计数「n/total」：与百分比同格，且不许被右侧日志预览挤缩。 */
+.statusbar .counter { flex: none; white-space: nowrap; }
 .badge {
   background: var(--danger); color: #fff; border-radius: 99px; font-size: 10.5px;
   min-width: 16px; height: 16px; display: inline-grid; place-items: center;
@@ -595,7 +602,7 @@ input.uid-chip {
 .drawer-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .drawer-tools strong { font-size: 13.5px; font-weight: 600; }
 .drawer-body .log-line {
-  padding: 0 12px; white-space: nowrap;
+  padding: 0 12px; white-space: pre-wrap; word-break: break-all; /* 响应式换行：长行折行显示，不横向截断 */
   font-family: var(--mono); font-size: 11.5px; line-height: 1.75;
 }
 /* 模态标题区内的分段控件不撑满 */

@@ -4,7 +4,7 @@
   import { api } from "../api";
   import { showError } from "../dialog";
   import { t } from "../text"; // 全局文案常量
-  import { appStore, refreshSnapshot } from "../stores/app.svelte";
+  import { appStore, refreshSnapshot, runTask } from "../stores/app.svelte";
   import { icons } from "../icons";
 
   // 三个模式的取值/标签/说明统一在 text.ts 的 t.replace.modes 维护；
@@ -24,21 +24,32 @@
   const busy = $derived(appStore.busy);
   const browseMode = $derived(appStore.browseMode);
   const ready = $derived(appStore.replaceReady);
+  // 进度里的「第 n 个 / 共 total 个」：只有可数阶段（逐球员抽图、逐行解析）才有；
+  // 纯阶段锚点（如「生成 config.xml…」）total 为 0，不显示计数（口径与底部状态栏一致）。
+  const counter = $derived(
+    appStore.progress.total > 0
+      ? `${appStore.progress.current}/${appStore.progress.total} · `
+      : "",
+  );
 
   /** 发起替换：先兜底校验目录完整性（识别三套标准），再调后端 start_replace。 */
   async function startReplace() {
     if (!snap?.currentGroup) return;
+    // 取到局部变量：闭包里 TS 的判空收窄会失效（runTask 包的正是一条闭包）。
+    const imgDir = snap.currentGroup;
     try {
       // 兜底校验：用户可能跳过配置卡的完整性检查，这里再查一次。
       // 标准归属由后端按规则 json 的 FolderList 判定；complete（含超集）→ 静默继续。
-      const res = await api.checkIntegrity(snap.currentGroup);
+      // 经 runTask 让状态栏显示「检查完整性」进度：这条命令同样会发 task:progress，
+      // 且平铺大包的顶层条目很多，用户点完「替换头像」正是最需要反馈的时刻。
+      const res = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
       if (res.status === "fixable") {
         const ok = await ask(
           t.replace.missingDirsConfirm(res.standard, res.missing.length),
           { title: t.replace.missingDirsTitle },
         );
         if (!ok) return;
-        await api.createMissingDirs(snap.currentGroup, res.missing);
+        await api.createMissingDirs(imgDir, res.missing);
       } else if (res.status === "unknown") {
         const ok = await ask(t.replace.unknownConfirm, {
           title: t.replace.unknownTitle,
@@ -121,7 +132,7 @@
       disabled={!busy}>{t.replace.cancelBtn}</button
     >
   </div>
-  <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比，右侧跟「百分比 · 阶段文案」。 -->
+  <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比，右侧跟「计数 · 百分比 · 阶段文案」。 -->
   {#if busy || appStore.progress.value > 0}
     <div class="progress-line">
       <div class="progress-track">
@@ -131,7 +142,7 @@
         ></div>
       </div>
       <span class="progress-text"
-        >{appStore.progress.value}% · {appStore.progress.status}</span
+        >{counter}{appStore.progress.value}% · {appStore.progress.status}</span
       >
     </div>
   {/if}

@@ -316,19 +316,39 @@ impl RtfScanner {
     /// * 国籍必须能在 nat_translation.json（显示文本）或 nat_codes.json（国籍码）里查到，否则该行
     ///   判为非法：丢弃并逐行记 Warn 日志，便于用户据日志增删翻译表（国籍错会连累后续抽图，需严格）。
     /// * 其它行级问题（字段不合法、列数不符）同样丢行并记日志；整份文件是否合法已在 detect 阶段检查。
+    /// 【仅测试】生产的两条路径（「扫描RTF」命令、替换流水线）都要报进度，一律走 parse_roster_progress；
+    /// 留这个无进度版只是让测试少写一个空回调，故标 cfg(test) 免得在发布构建里报 dead_code。
+    #[cfg(test)]
     pub fn parse_roster(
         &self,
         path: &Path,
         keep_only_newgen: bool,
         logger: &impl LogSink,
     ) -> Result<Vec<PlayerRecord>, String> {
+        self.parse_roster_progress(path, keep_only_newgen, logger, &mut |_, _| {})
+    }
+
+    /// 同 `parse_roster`，额外把「已解析第 n 条 / 共 total 条」上报给进度回调（「扫描RTF」状态栏进度用）。
+    /// 【为何先数一遍数据行】table_rows 是懒迭代器，不先取总数就没有分母，「第 n 条 / 共 N 条」无从谈起；
+    /// 计数只做行切分、不做字段解析，相对完整解析开销很小。
+    pub fn parse_roster_progress(
+        &self,
+        path: &Path,
+        keep_only_newgen: bool,
+        logger: &impl LogSink,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Vec<PlayerRecord>, String> {
         if !self.is_valid {
             return Err("RTF 格式无效，请先执行格式识别".into());
         }
         let text = fs::read_to_string(path).map_err(|e| format!("读取 RTF 失败: {e}"))?;
+        let total = table_rows(&text).count(); // 数据行总数（进度分母）
         let mut data = Vec::new();
         let mut dropped = 0usize;
+        let mut done = 0usize;
         for (row_no, cells) in table_rows(&text) {
+            done += 1;
+            progress(done, total); // 逐行上报（订阅方按百分比去重后才 emit，不会刷爆 IPC）
             match classify_row(&cells, self.format) {
                 RowVerdict::Data => {
                     let record = match self.format {

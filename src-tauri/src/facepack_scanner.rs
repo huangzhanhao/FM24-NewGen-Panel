@@ -9,7 +9,7 @@
 //! FolderList 来自 templates（用户可配置），本模块不硬编码任何目录清单。
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 14 个种族目录（标准二出厂默认的 FolderList 数据，也是 validate_image_dirs 的对照基准）。
 pub const FACEPACK_DIRS: [&str; 14] = [
@@ -149,36 +149,58 @@ fn walk_recursive(dir: &Path, rel: String, pools: &mut BTreeMap<String, BTreeSet
 }
 
 /// 重扫描：建 faces_map + root_images + 递归全量池（纯收集；布局判定由调用方用 classify 完成）。
+/// 【仅测试】生产的两条路径（「扫描头像」命令、替换流水线）都要报进度，一律走 scan_pack_progress；
+/// 留这个无进度版只是让测试少写一个空回调，故标 cfg(test) 免得在发布构建里报 dead_code。
+#[cfg(test)]
 pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
+    scan_pack_progress(img_dir, &mut |_, _| {})
+}
+
+/// 同 `scan_pack`，额外把「已扫完第 n 个 / 共 total 个一级子目录」上报给进度回调。
+/// 【为何以一级子目录为进度单位】第一趟只列目录拿到分母、第二趟逐个扫（每个含整棵子树），
+/// 不必为算进度多遍历一遍磁盘，又让「扫描头像」的进度条真实反映工作量（标准二 14 目录 → 14 步）。
+pub fn scan_pack_progress(
+    img_dir: &str,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<PackScan, String> {
     let root = Path::new(img_dir);
     let mut faces_map = BTreeMap::new();
     let mut root_images = BTreeSet::new();
     let mut recursive_pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // 第一趟：只列顶层（不递归），分出「一级子目录」与根图——拿到子目录清单就有进度分母了。
+    let mut subdirs: Vec<(String, PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(root).map_err(|e| format!("读取头像包目录失败: {e}"))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let fname = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            // faces_map：一级子目录 → 其直接图片（保持旧 FaceMapper::new 口径，标准二专用）。
-            let mut imgs = BTreeSet::new();
-            if let Ok(files) = std::fs::read_dir(&path) {
-                for f in files.flatten() {
-                    if f.path().is_file() {
-                        let n = f.file_name().to_string_lossy().to_string();
-                        if let Some(stem) = legacy_face_stem(&n) { imgs.insert(stem); }
-                    }
-                }
-            }
-            faces_map.insert(fname.clone(), imgs);
-            // 递归全量池：垃圾目录整棵跳过。
-            if !is_junk_dir(&fname) {
-                walk_recursive(&path, fname, &mut recursive_pools);
-            }
+            subdirs.push((fname, path));
         } else if is_image_ext(&fname) && !fname.starts_with('.') {
             // 根图词干走 image_stem 唯一口径（与 parse_image_path_in_pack 同规则，"a.1.png"→"a.1"）；
             // 跳过 . 开头文件（macOS AppleDouble 的 ._x.png 会以 "._x" 入池、污染 resolve）。
             if let Some(stem) = image_stem(&fname) { root_images.insert(stem); }
         }
+    }
+    let total = subdirs.len(); // 进度分母（0 = 平铺包/空包，订阅方按 total==0 直接给 100%）
+
+    // 第二趟：逐个一级子目录建索引，每扫完一个上报一次进度。
+    for (i, (fname, path)) in subdirs.iter().enumerate() {
+        // faces_map：一级子目录 → 其直接图片（保持旧 FaceMapper::new 口径，标准二专用）。
+        let mut imgs = BTreeSet::new();
+        if let Ok(files) = std::fs::read_dir(path) {
+            for f in files.flatten() {
+                if f.path().is_file() {
+                    let n = f.file_name().to_string_lossy().to_string();
+                    if let Some(stem) = legacy_face_stem(&n) { imgs.insert(stem); }
+                }
+            }
+        }
+        faces_map.insert(fname.clone(), imgs);
+        // 递归全量池：垃圾目录整棵跳过。
+        if !is_junk_dir(fname) {
+            walk_recursive(path, fname.clone(), &mut recursive_pools);
+        }
+        progress(i + 1, total);
     }
     // 根目录图片也归入递归池（键 = 空串），全随机规则据此连根图一起抽。
     recursive_pools.entry(String::new()).or_default().extend(root_images.iter().cloned());
@@ -199,11 +221,13 @@ pub fn classify_scan(scan: &PackScan, folder_lists: &[(u8, &Vec<String>)]) -> Pa
 
 /// 「扫描头像」核心（纯函数）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
 /// 标准号按 templates 的 FolderList 判定（用户可配置，不硬编码）；总数口径见 PackScan::total_for。
-pub fn scan_and_total(
+/// 额外把扫描进度透传给 `scan_pack_progress`（「扫描头像」状态栏进度用）。
+pub fn scan_and_total_progress(
     img_dir: &str,
     folder_lists: &[(u8, &Vec<String>)],
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(usize, u8, PackScan), String> {
-    let scan = scan_pack(img_dir)?;
+    let scan = scan_pack_progress(img_dir, progress)?;
     let layout = classify_scan(&scan, folder_lists);
     let total = scan.total_for(&layout);
     Ok((total, layout.standard(), scan))
@@ -223,21 +247,40 @@ pub struct IntegrityResult {
 
 /// 检查完整性（纯函数，读盘但无副作用）：轻扫描子目录名 + 探测根是否有图 → classify →
 /// 汇总缺失/多余目录。判定与缺失/多余计算全部以标准 FolderList 为基准（用户改 json 即改判定口径）。
-pub fn check_integrity(img_dir: &str, folder_lists: &[(u8, &Vec<String>)]) -> IntegrityResult {
-    let mut subdirs: BTreeSet<String> = BTreeSet::new();
-    let mut has_images = false;
+/// 额外把「已核对第 n 个 / 共 total 个顶层条目」上报给进度回调（「检查完整性」状态栏进度用）。
+/// 【为何先把条目收集到 Vec】read_dir 是迭代器、事先不知道总数，先收集一遍才有进度分母。
+pub fn check_integrity_progress(
+    img_dir: &str,
+    folder_lists: &[(u8, &Vec<String>)],
+    progress: &mut dyn FnMut(usize, usize),
+) -> IntegrityResult {
+    // 第一趟：只收集关心的顶层条目（子目录 / 图片文件），拿到分母。
+    let mut entries: Vec<(bool, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(img_dir) {
         for e in rd.flatten() {
             let p = e.path();
             let fname = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
-                if !is_junk_dir(&fname) {
-                    subdirs.insert(fname);
-                } // 跳过 __MACOSX 等
-            } else if !fname.starts_with('.') && is_image_ext(&fname) {
-                has_images = true; // 跳过 ._x.png 等隐藏文件，与 scan_pack 口径一致
+            let is_dir = p.is_dir();
+            // 子目录全收（垃圾目录在下面判定时再滤）；根图只认非隐藏的图片文件（与 scan_pack 口径一致）。
+            if is_dir || (!fname.starts_with('.') && is_image_ext(&fname)) {
+                entries.push((is_dir, fname));
             }
         }
+    }
+    let total = entries.len(); // 进度分母（空包/读不到目录时为 0）
+
+    // 第二趟：逐条核对，每核对一条上报一次进度。
+    let mut subdirs: BTreeSet<String> = BTreeSet::new();
+    let mut has_images = false;
+    for (i, (is_dir, fname)) in entries.iter().enumerate() {
+        if *is_dir {
+            if !is_junk_dir(fname) {
+                subdirs.insert(fname.clone());
+            } // 跳过 __MACOSX 等
+        } else {
+            has_images = true; // 走到这里的一定是非隐藏图片文件（隐藏文件上一步已被滤掉）
+        }
+        progress(i + 1, total);
     }
 
     let layout = classify(&subdirs, has_images, folder_lists);
@@ -434,16 +477,16 @@ mod tests {
         std::fs::write(root.join("备注.txt"), b"note").unwrap();
     }
 
-    /// 以内置 FolderList 判定完整性（cfg 只活在函数内，folder_lists 借用它）。
+    /// 以内置 FolderList 判定完整性（cfg 只活在函数内，folder_lists 借用它）；不关心进度传空回调。
     fn integrity(dir: &Path) -> IntegrityResult {
         let cfg = crate::templates::RuleConfig::builtin();
-        check_integrity(dir.to_str().unwrap(), &cfg.folder_lists())
+        check_integrity_progress(dir.to_str().unwrap(), &cfg.folder_lists(), &mut |_, _| {})
     }
 
-    /// 以内置 FolderList 扫描并计数。
+    /// 以内置 FolderList 扫描并计数；不关心进度传空回调。
     fn scan_total(dir: &Path) -> Result<(usize, u8, PackScan), String> {
         let cfg = crate::templates::RuleConfig::builtin();
-        scan_and_total(dir.to_str().unwrap(), &cfg.folder_lists())
+        scan_and_total_progress(dir.to_str().unwrap(), &cfg.folder_lists(), &mut |_, _| {})
     }
 
     #[test]

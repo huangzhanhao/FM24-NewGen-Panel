@@ -87,11 +87,112 @@ pub struct AppSnapshot {
 }
 
 /// 进度事件的载荷（通过 replace:progress 事件发给前端）。
+/// current/total = 阶段内的「第 n 个 / 共 total 个」（纯阶段锚点或该阶段无可数单位时为 0/0，
+/// 前端据此只显示百分比、不显示计数）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressPayload {
     pub status: String,
     pub value: u8,
+    pub current: usize,
+    pub total: usize,
+}
+
+/// 轻量任务（检查完整性 / 扫描头像 / 扫描RTF / 读取快照）的进度载荷：
+/// 除任务名与百分比外，多带「第 current 个 / 共 total 个」，状态栏据此显示「n/total」原始口径。
+/// 【为何不复用 ProgressPayload】替换流水线只报阶段与百分比（没有可数的单位），两者载荷形状与
+/// 消费方都不同；拆成两个事件（replace:progress / task:progress）后互不干扰。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProgressPayload {
+    pub status: String,
+    pub value: u8,
+    pub current: usize,
+    pub total: usize,
+}
+
+/// 「轻量任务」进度事件名（前端 stores 里 listen("task:progress")）。
+const TASK_PROGRESS_EVENT: &str = "task:progress";
+
+/// 轻量任务的进度上报器：把「第 n 个 / 共 total 个」折算成百分比 emit 给前端状态栏。
+/// 【为何按百分比去重】几个扫描都是逐项上报（大名单可达数万行），每次都 emit 会刷爆 IPC——
+/// 只在百分比真的变了才发，最多 101 条事件。
+struct TaskProgress {
+    app: AppHandle,
+    status: &'static str,
+    current: usize,   // 最近一次上报的「已完成个数」
+    total: usize,     // 最近一次上报的「总个数」
+    last: Option<u8>, // 上一次发出的百分比（None = 还没发过）
+}
+
+impl TaskProgress {
+    /// 新建上报器；status 是状态栏上显示的任务名（如「扫描RTF」）。
+    fn new(app: &AppHandle, status: &'static str) -> Self {
+        Self {
+            app: app.clone(),
+            status,
+            current: 0,
+            total: 0,
+            last: None,
+        }
+    }
+
+    /// 上报「已完成第 current 个 / 共 total 个」（total == 0 视为无事可做 → 直接 100%）。
+    fn report(&mut self, current: usize, total: usize) {
+        self.current = current;
+        self.total = total;
+        let value = if total == 0 {
+            100
+        } else {
+            ((current * 100) / total).min(100) as u8
+        };
+        self.emit(value);
+    }
+
+    /// 收尾上报 100%：命令成功返回前必须调一次——总数为 0（无子目录/无数据行）或小任务跑得太快时，
+    /// 进度条也不会停在半路。
+    fn finish(&mut self) {
+        self.emit(100);
+    }
+
+    fn emit(&mut self, value: u8) {
+        if self.last == Some(value) {
+            return; // 百分比没变：不重复 emit
+        }
+        self.last = Some(value);
+        let _ = self.app.emit(
+            TASK_PROGRESS_EVENT,
+            TaskProgressPayload {
+                status: self.status.into(),
+                value,
+                current: self.current,
+                total: self.total,
+            },
+        );
+    }
+}
+
+/// `replace` 通道的事件去重器：只在「阶段文案 或 百分比」变化时放行。
+/// 【为何键里不能带 current/total】替换流水线的阶段内部现在按项上报（逐球员抽图可达数万次），
+/// 计数每项都在变——把计数放进键等于没去重，照样刷爆 IPC。百分比本就是由 current/total 折算来的，
+/// 放行时把当时的计数一并带出去，两者自洽。
+struct ProgressDedup {
+    last: Option<(String, u8)>,
+}
+
+impl ProgressDedup {
+    /// 返回 true 表示这次该 emit（并把本次的 (阶段文案, 百分比) 记为上次）。
+    fn should_emit(&mut self, status: &str, value: u8) -> bool {
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|(s, v)| s == status && *v == value)
+        {
+            return false;
+        }
+        self.last = Some((status.to_string(), value));
+        true
+    }
 }
 
 /// 「检查完整性」结果 IntegrityResult 已下沉到 facepack_scanner（属头像包分类判定的领域产物）。
@@ -290,15 +391,26 @@ pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
 }
 
 /// 「检查完整性」：按 templates 的 FolderList（用户可配置）识别头像包归属哪个标准，
-/// 并给出可一键补全的缺失目录与未配置的多余目录。判定逻辑在 facepack_scanner::check_integrity，
-/// 命令层只负责加载规则配置并把结果回传前端（IPC）。
+/// 并给出可一键补全的缺失目录与未配置的多余目录。判定逻辑在 facepack_scanner::check_integrity_progress，
+/// 命令层只负责加载规则配置、把结果回传前端（IPC），并把核对进度发给状态栏。
+/// 【async】与另外三个扫描命令一致：标准一平铺包的顶层条目可达数万，同步命令跑在主线程上，
+/// 会把 task:progress 事件和界面重绘一起堵住，进度条反而看不出实时变化。
 #[tauri::command]
-pub fn check_integrity(
+pub async fn check_integrity(
+    app: AppHandle,
     state: State<'_, AppState>,
     img_dir: String,
 ) -> Result<IntegrityResult, String> {
     let config = RuleConfig::load(&state.data_dir)?;
-    Ok(facepack_scanner::check_integrity(&img_dir, &config.folder_lists()))
+    // 进度以「头像包顶层条目」为单位（先列目录拿到分母再逐条核对），状态栏显示 n/total。
+    let mut progress = TaskProgress::new(&app, "检查完整性");
+    let result = facepack_scanner::check_integrity_progress(
+        &img_dir,
+        &config.folder_lists(),
+        &mut |done, total| progress.report(done, total),
+    );
+    progress.finish();
+    Ok(result)
 }
 
 /// 批量创建缺失目录（前端确认后调用）。
@@ -336,11 +448,12 @@ fn layout_label(standard: u8, config: &RuleConfig) -> String {
 fn scan_rtf_core(
     rtf_path: &str,
     logger: &impl LogSink,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(RosterSummary, Vec<PlayerRecord>), String> {
     let mut scanner = RtfScanner::new();
     scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
-    let data = scanner.parse_roster(Path::new(rtf_path), false, logger)?;
+    let data = scanner.parse_roster_progress(Path::new(rtf_path), false, logger, progress)?;
     // 摘要口径统一收在 RosterSummary（随机人前缀判定、拓展信息判定都不在这里重复一遍）。
     Ok((RosterSummary::from_records(&scanner, &data), data))
 }
@@ -348,7 +461,10 @@ fn scan_rtf_core(
 /// 「扫描头像」：扫描当前组头像包、缓存索引（供替换复用），结果写日志。
 /// 【async】重扫描（递归遍历包内全部目录）跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
-pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, String> {
+pub async fn scan_images(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ImageScanResult, String> {
     let img_dir = {
         state
             .pm
@@ -359,7 +475,14 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
             .ok_or("请先选择头像包目录")?
     };
     let config = RuleConfig::load(&state.data_dir)?; // 用户改坏规则 json → 报错提示
-    let (total, standard, scan) = facepack_scanner::scan_and_total(&img_dir, &config.folder_lists())?;
+
+    // 进度以「一级子目录」为单位（见 scan_pack_progress），扫完一个大包能明显看到进度在走。
+    let mut progress = TaskProgress::new(&app, "扫描头像");
+    let (total, standard, scan) = facepack_scanner::scan_and_total_progress(
+        &img_dir,
+        &config.folder_lists(),
+        &mut |done, total| progress.report(done, total),
+    )?;
     // Arc 包一层入缓存：替换复用时只涨引用计数，不复制整份图片索引。
     *state.faces_cache.lock().unwrap() = Some(FaceIndex {
         img_dir,
@@ -372,19 +495,24 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
             layout_label(standard, &config)
         ),
     );
+    progress.finish(); // 收尾 100%（空包/平铺包没有子目录可报，进度条也得走满）
     Ok(ImageScanResult { total, standard })
 }
 
 /// 「扫描RTF」：解析当前组 RTF 并填充名单预览缓存（无需先 Replace），结果写日志。
 /// 【async】大名单解析跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
-pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RosterSummary, String> {
+pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<RosterSummary, String> {
     let rtf = { state.pm.lock().unwrap().get_cur_rtf() };
     if rtf.is_empty() {
         return Err("请先选择 RTF 名单".into());
     }
+    // 进度以「数据行」为单位（解析前先数一遍行数拿到分母，见 parse_roster_progress）。
+    let mut progress = TaskProgress::new(&app, "扫描RTF");
     // &*state.logger：&Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）。
-    let (summary, data) = scan_rtf_core(&rtf, &*state.logger)?;
+    let (summary, data) = scan_rtf_core(&rtf, &*state.logger, &mut |done, total| {
+        progress.report(done, total)
+    })?;
     *state.rtf_cache.lock().unwrap() = data; // 名单预览（query_players）直接读这份缓存（全字段）
     state.logger.info(
         "scan",
@@ -393,6 +521,7 @@ pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RosterSummary, Strin
             summary.total, summary.newgan, summary.format, summary.language
         ),
     );
+    progress.finish(); // 收尾 100%（空名单/无数据行时进度条也得走满）
     Ok(summary)
 }
 
@@ -501,14 +630,21 @@ pub fn start_replace(
         let emit_app = app.clone();
         // 跑流水线；progress 回调里通过 emit 把进度发给前端（事件名 replace:progress）。
         // 流水线关键步骤的日志经 logger 记录，由 log:batch 事件实时回显前端日志面板。
+        // 阶段内部按项上报（逐球员抽图可达数万次），去重后才 emit——见 ProgressDedup。
+        let mut dedup = ProgressDedup { last: None };
         let result = replace_flow::run(
             &params,
-            &mut |status: &str, value: u8| {
+            &mut |status: &str, value: u8, current: usize, total: usize| {
+                if !dedup.should_emit(status, value) {
+                    return;
+                }
                 let _ = emit_app.emit(
                     "replace:progress",
                     ProgressPayload {
                         status: status.into(),
                         value,
+                        current,
+                        total,
                     },
                 );
             },
@@ -648,6 +784,7 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
 /// 【async】大快照（可达数万行）的正则解析跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
 pub async fn read_snapshot(
+    app: AppHandle,
     state: State<'_, AppState>,
     xml_path: String,
 ) -> Result<SnapshotInfo, String> {
@@ -655,18 +792,27 @@ pub async fn read_snapshot(
     if !path.is_file() {
         return Err("存档 XML 快照尚未生成（请先执行一次替换）".into());
     }
-    let total = cache_snapshot(&state.snapshot_cache, &path)?;
+    // 进度以「映射条数」为单位（解析前先数一遍条目拿到分母，见 parse_xml_entries_progress）。
+    let mut progress = TaskProgress::new(&app, "读取快照");
+    let total = cache_snapshot(&state.snapshot_cache, &path, &mut |done, total| {
+        progress.report(done, total)
+    })?;
     state
         .logger
         .info("scan", format!("读取快照完成：{total} 条映射"));
+    progress.finish(); // 收尾 100%（空 config.xml / 无映射时进度条也得走满）
     Ok(SnapshotInfo { total })
 }
 
-/// 解析快照文件并写入快照缓存，返回条目数。两条路径共用：「读取快照」命令（用户显式读），
-/// 以及替换收尾的自动同步（sync_group_snapshot）。缓存里存的路径即传入路径的字符串形式——
+/// 解析快照文件并写入快照缓存，返回条目数。两条路径共用：「读取快照」命令（用户显式读，带进度上报），
+/// 以及替换收尾的自动同步（sync_group_snapshot，传无操作回调）。缓存里存的路径即传入路径的字符串形式——
 /// 前端两处拿到的都是同一套 `group_xml_path` 结果，快照预览查询时按此路径比对命中。
-fn cache_snapshot(cache: &Mutex<Option<SnapshotCache>>, xml_path: &Path) -> Result<usize, String> {
-    let entries = xml_parser::parse_xml_entries(xml_path)?;
+fn cache_snapshot(
+    cache: &Mutex<Option<SnapshotCache>>,
+    xml_path: &Path,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<usize, String> {
+    let entries = xml_parser::parse_xml_entries_progress(xml_path, progress)?;
     let total = entries.len();
     *cache.lock().unwrap() = Some(SnapshotCache {
         xml_path: xml_path.to_string_lossy().to_string(),
@@ -708,7 +854,8 @@ fn sync_group_snapshot(
         );
         return;
     }
-    match cache_snapshot(cache, snapshot_path) {
+    // 替换收尾的同步不报进度（此时状态栏归替换流水线接管），传无操作回调。
+    match cache_snapshot(cache, snapshot_path, &mut |_, _| {}) {
         Ok(total) => logger.info("replace", format!("同步存档快照完成：{total} 条映射")),
         // 解析失败：宁缺勿旧——清空缓存而不是留着可能正是这份路径的旧数据（留着会让预览显示替换前的旧表）；
         // 清空后快照预览查询会按磁盘上新文件重读一次。
@@ -928,7 +1075,8 @@ mod tests {
         )
         .unwrap();
         let logger = ChannelLogger::channel().0;
-        let (summary, data) = scan_rtf_core(rtf.to_str().unwrap(), &logger).unwrap();
+        let (summary, data) =
+            scan_rtf_core(rtf.to_str().unwrap(), &logger, &mut |_, _| {}).unwrap();
         assert_eq!(summary.total, 2);
         assert_eq!(summary.newgan, 2); // 两条 UID 均带 r- 前缀
         assert!(!summary.detailed); // 基础名单无拓展信息
@@ -938,8 +1086,22 @@ mod tests {
         // 非法 RTF → Err，文案带「RTF 格式不合法」
         let bad = dir.path().join("bad.rtf");
         std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
-        let err = scan_rtf_core(bad.to_str().unwrap(), &logger).err().unwrap();
+        let err = scan_rtf_core(bad.to_str().unwrap(), &logger, &mut |_, _| {})
+            .err()
+            .unwrap();
         assert!(err.contains("RTF 格式不合法"), "{err}");
+    }
+
+    #[test]
+    fn progress_dedup_keys_on_status_and_value_only() {
+        // 替换流水线阶段内部逐项上报：计数每项都在变，但同一百分比只该发一条事件。
+        // 这个用例正是为了防住「把 current/total 放进去重键」——那样等于没去重。
+        let mut d = ProgressDedup { last: None };
+        assert!(d.should_emit("映射球员头像…", 51));
+        assert!(!d.should_emit("映射球员头像…", 51)); // 同百分比：计数变了也不重复发
+        assert!(!d.should_emit("映射球员头像…", 51));
+        assert!(d.should_emit("映射球员头像…", 52));
+        assert!(d.should_emit("读取现有映射…", 52)); // 百分比相同但阶段名变了：要发
     }
 
     #[test]

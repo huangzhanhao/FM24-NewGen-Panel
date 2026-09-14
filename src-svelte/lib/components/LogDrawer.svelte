@@ -1,7 +1,7 @@
 <!-- 日志抽屉（从左侧滑出）：按级别过滤展示日志，支持打开日志文件、清空显示；列表用虚拟滚动只渲染可见行。 -->
 <script lang="ts">
   import { VList } from 'virtua/svelte'; // 虚拟滚动列表组件（只渲染视口内的行，提升大数据量性能）
-  import { openPath } from '@tauri-apps/plugin-opener'; // 用系统默认程序打开本地文件
+  import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener'; // 用系统默认程序打开本地文件；失败时降级为资源管理器定位
   import { appStore, reloadLogs } from '../stores/app.svelte';
   import { clearDisplay, filterLines, LEVELS, logStore } from '../stores/log.svelte';
   import { ui } from '../stores/ui.svelte';
@@ -21,9 +21,16 @@
   // 当前要显示的日志：按级别与“仅该级别”过滤后的结果（依赖变化时自动重算）。
   const shown = $derived(filterLines(logStore.lines, logStore.level, logStore.only));
 
-  /** 用系统默认程序打开日志文件（路径来自快照的 logPath）。 */
+  /** 用系统默认程序打开日志文件（路径来自快照的 logPath）。
+   *  打开失败（如 .log 无默认关联程序）时降级：在资源管理器里定位该文件，保证按钮总有可见反应。 */
   async function openLogFile() {
-    if (appStore.snapshot?.logPath) await openPath(appStore.snapshot.logPath);
+    const p = appStore.snapshot?.logPath;
+    if (!p) return;
+    try {
+      await openPath(p);
+    } catch {
+      await revealItemInDir(p);
+    }
   }
 </script>
 
@@ -57,10 +64,10 @@
       <VList data={shown} style="height:100%">
         <!-- {#snippet children(line)} 定义每一行的渲染模板（VList 会逐行回调它）。 -->
         {#snippet children(line: LogLine)}
-          <!-- 行内类名用级别小写（如 .error），对应不同颜色；padEnd(8) 把级别补齐到 8 字符对齐。
+          <!-- 行内类名用级别小写（如 .error），对应不同颜色。
                字号/等宽/内边距由全局 .drawer-body .log-line 提供。 -->
           <div class="log-line {line.level.toLowerCase()}">
-            | {line.ts} | {line.level.padEnd(8)} | {line.module} | {line.message}
+            | {line.ts} | {line.level} | {line.module} | {line.message}
           </div>
         {/snippet}
       </VList>

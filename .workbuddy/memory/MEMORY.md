@@ -28,6 +28,38 @@
   切入时 `restore_group_xml` 取；替换收尾的同步只是提前做同一件事，不改变语义。
 - Rust 侧 `RunResult`（replace_flow）是「事件载荷的来源」：新增要回传前端的字段就加在这里，
   命令层 `start_replace` 负责拼 `replace:finished` 的 JSON，前端 store 只读不猜。
+- 状态栏进度有**两条通道**（别合并成一条，但**载荷形状必须一致**）：替换流水线走 `replace:progress`
+  → `appStore.progress`；「检查完整性/扫描头像/扫描RTF/读取快照」走 `task:progress` → `appStore.task`。
+  两者都是 `{status, value, current, total}`——形状一致，StatusBar 才能用 `shown = showTask ? task :
+  progress` 一套逻辑渲染百分比与「n/total」计数。纯阶段锚点传 current/total = 0（前端只显示百分比）。
+  要给某个扫描类命令加进度：命令签名加 `app: AppHandle` + `TaskProgress::new(&app, "任务名")`，
+  在对应扫描器上加 `*_progress(..., &mut dyn FnMut(usize, usize))` 变体并先算出总数当分母。
+  四个扫描命令都必须是 **async fn**（同步命令跑在主线程，会把 emit 与重绘一起堵住）。
+- 替换流水线的阶段内进度：`replace_flow` 用 `ProgressFn = &mut dyn FnMut(&str, u8, usize, usize)`，
+  阶段锚点沿用 v1 的 0/20/40/80/90/100，阶段内部用 `item()` 把 done/total 折算进
+  `STAGE_RTF(20,40)/STAGE_INDEX(40,46)/STAGE_XML(46,52)/STAGE_PLAYERS(52,80)`。
+  **区间必须相邻不重叠**，否则后一阶段的 0% 会把进度条拉回去。face_mapper 只报原始计数
+  （`MapStep::{ReadXml, Players}` + 步骤起始的 `(step, 0, 0)` 锚点），百分比折算在 replace_flow。
+- `replace` 通道的事件去重器是 `commands.rs::ProgressDedup`，键 = **(阶段文案, 百分比)**。
+  **键里绝不能带 current/total**——阶段内逐项上报时计数每项都变，带上去等于没去重、刷爆 IPC。
+  有单测 `progress_dedup_keys_on_status_and_value_only` 守这条。
+- `runTask(label, fn)` 是 task 通道的**唯一生命周期管理者**，契约四条：
+  1) 进入时 `task = { status: label, value: 0, current: 0, total: 0 }`（否则第一条事件到达前会闪出
+     上一个任务的名称与计数）；2) 命令成功后补 `value = 100, current = total`（小包几毫秒、后端来不及
+     `finish()`，不补就一闪而过等于没反馈；失败则保持 0 不谎报）；3) `finally` 复位 `taskRunning`；
+  4) 收尾排 `scheduleBarClear()`：**跑完的 100% 在状态栏留 `BAR_LINGER_MS`（20 秒）再清空**，
+     新任务开始 / `replace:progress` 推进时撤掉旧定时器，定时器回调里再判一次
+     `taskRunning || replacing`。`replace:finished` 也排一次清空。
+  前端所有调用四条命令的地方都要经它（SetupCard 四个按钮 + `fixMissing` 复检 + ReplacePanel 替换前兜底校验）。
+- StatusBar 取值的优先级：`replacing` > 任务通道。`showTask = !replacing && (taskRunning || task.value > 0)`
+  ——`taskRunning=false 但 value>0` 表示「刚跑完还没到清空时刻」，进度条保留 100% 让用户看到
+  （即「● 就绪 ▬▬▬ 100%」）。因此 `replace:progress` 监听里必须把 `task` 清零，否则取消替换后
+  状态栏会退回显示旧任务的 100%。
+  前端单测在 `src-svelte/lib/stores/app.store.test.ts`，改动 runTask / StatusBar 先跑它。
+- 无进度版的扫描/解析包装函数（`facepack_scanner::scan_pack`、`RtfScanner::parse_roster`）在生产
+  已无调用方，保留给测试用，标了 `#[cfg(test)]` —— 这样发布构建不报 dead_code，测试又不用到处写
+  空回调。（更早的 `check_integrity`/`scan_and_total` 当时是直接删掉并改测试调用点，两种做法都行，
+  以「少改测试」优先时选 cfg(test)。）
 - 改完 Rust 自检：`$env:CARGO_TARGET_DIR='<repo>\target'; cargo test --manifest-path src-tauri/Cargo.toml`
   （构建产物在仓库根的 target，不在 src-tauri/target）。仓库整体不是 `cargo fmt --check` 干净的，
   别全量 fmt，只保证新代码不新增 fmt 差异。

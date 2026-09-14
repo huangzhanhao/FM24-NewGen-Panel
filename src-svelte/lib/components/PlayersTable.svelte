@@ -1,4 +1,6 @@
-<!-- 名单预览表格：分页、搜索、点表头排序；数据留在后端，每次只拉当前页。 -->
+<!-- 名单预览表格：分页、搜索、点表头排序；数据留在后端，每次只拉当前页。
+     判据与快照预览同款：后端名单缓存还没被填上（既没「扫描RTF」也没跑过替换）时不渲染工具条
+     （搜索框/筛选/分页器），只留引导空态。 -->
 <script lang="ts">
   import { api } from "../api";
   import { appStore } from "../stores/app.svelte";
@@ -34,6 +36,11 @@
     result ? Math.max(1, Math.ceil(result.total / PAGE_SIZE)) : 1,
   );
 
+  // 可读态：与快照预览同款判据——只认 appStore 里记录「后端名单缓存被填上」的标记。
+  // 填充者有两处：「扫描RTF」成功，以及替换结束（成功填上/失败取消清空），都由 store 统一维护。
+  // 未填充过时工具条（搜索框/筛选/分页器）整块不渲染，只留引导空态。
+  const readable = $derived(appStore.rosterReady);
+
   /** 拉当前页数据（把页码/搜索/随机人筛选/排序传给后端）。 */
   async function load() {
     result = await api.queryPlayers({
@@ -46,7 +53,7 @@
     });
   }
   // 参数变化自动刷新：显式读取依赖以建立追踪，请求做 300ms 防抖。
-  // rosterVersion：「扫描RTF」成功后 +1，无需执行 Replace 即可在此预览名单。
+  // rosterVersion：名单缓存被填充/清空时 +1（「扫描RTF」成功、替换结束），据此重载当前页。
   $effect(() => {
     void page;
     void search;
@@ -113,51 +120,56 @@
   let avatarPop = $state<AvatarPopoverApi | null>(null);
 </script>
 
-<!-- 工具条：搜索框（放大镜图标）+ 总条数 + 右侧分页。组件根是纵向 flex，撑满卡片正文高度。 -->
+<!-- 工具条：搜索框（放大镜图标）+ 随机人筛选 + 总条数 + 右侧分页；缓存未填上时不渲染
+     （与快照预览的 {#if readable} 同款）。组件根是纵向 flex，撑满卡片正文高度。 -->
 <div class="table-pane">
-  <div class="table-toolbar">
-    <div class="search">
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        aria-hidden="true">{@html icons.search.body}</svg
-      >
-      <input
-        type="search"
-        placeholder={t.table.searchPlaceholder}
-        bind:value={search}
-        oninput={() => (page = 0)}
-        aria-label={t.table.searchPlaceholder}
-      />
-    </div>
-    <!-- 随机人筛选：仅拓展名单显示（默认「任意」）；切换后回到第 1 页再查询。 -->
-    {#if isExtRoster}
-      <label class="newgan-filter">
-        <span class="muted small">{t.table.newganFilterLabel}</span>
-        <select
-          bind:value={newganFilter}
-          onchange={() => (page = 0)}
-          aria-label={t.table.newganFilterLabel}
+  {#if readable}
+    <div class="table-toolbar">
+      <div class="search">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          aria-hidden="true">{@html icons.search.body}</svg
         >
-          <option value="any">{t.table.newganAny}</option>
-          <option value="yes">{t.table.newganYes}</option>
-          <option value="no">{t.table.newganNo}</option>
-        </select>
-      </label>
-    {/if}
-    {#if result}<span class="muted small record-count"
-        >{t.table.recordCount(result.total)}</span
-      >{/if}
-    <span class="spacer"></span>
-    <!-- 分页器（含快速跳页）与快照预览共用同一组件，样式/行为单点维护。 -->
-    <TablePager bind:page {totalPages} />
-  </div>
+        <input
+          type="search"
+          placeholder={t.table.searchPlaceholder}
+          bind:value={search}
+          oninput={() => (page = 0)}
+          aria-label={t.table.searchPlaceholder}
+        />
+      </div>
+      <!-- 随机人筛选：仅拓展名单显示（默认「任意」）；切换后回到第 1 页再查询。 -->
+      {#if isExtRoster}
+        <label class="newgan-filter">
+          <span class="muted small">{t.table.newganFilterLabel}</span>
+          <select
+            bind:value={newganFilter}
+            onchange={() => (page = 0)}
+            aria-label={t.table.newganFilterLabel}
+          >
+            <option value="any">{t.table.newganAny}</option>
+            <option value="yes">{t.table.newganYes}</option>
+            <option value="no">{t.table.newganNo}</option>
+          </select>
+        </label>
+      {/if}
+      {#if result}<span class="muted small record-count"
+          >{t.table.recordCount(result.total)}</span
+        >{/if}
+      <span class="spacer"></span>
+      <!-- 分页器（含快速跳页）与快照预览共用同一组件，样式/行为单点维护。 -->
+      <TablePager bind:page {totalPages} />
+    </div>
+  {/if}
 
-  <!-- 有数据时渲染表格；否则显示虚线空状态引导。 -->
-  {#if result && result.items.length > 0}
+  <!-- 缓存未填上 → 引导空态；有数据 → 表格；已填上但当前筛选无结果 → 提示文案（与快照预览同款三层结构）。 -->
+  {#if !readable}
+    <div class="empty">{t.table.emptyHint}</div>
+  {:else if result && result.items.length > 0}
     <div class="table-scroll">
       <table class="grid">
         <!-- 列宽：长文本列（姓名/俱乐部/所在地）给宽余量吃剩余空间；码值/数值列收窄并居中。 -->
@@ -271,8 +283,8 @@
         </tbody>
       </table>
     </div>
-  {:else}
-    <div class="empty">{t.table.emptyHint}</div>
+  {:else if result}
+    <div class="empty">{search ? t.table.noMatchHint : t.table.emptyHint}</div>
   {/if}
 
   <!-- 头像预览气泡（共用组件）：缓存/钉住/延迟关闭/Esc 都在组件内；groupKey=当前组，切组自动失效。 -->

@@ -197,6 +197,8 @@ export const t = {
     newganYes: '是',
     newganNo: '否',
     emptyHint: '执行「替换头像」或「扫描RTF」后可在此预览名单（最近一次解析结果）。',
+    /** 缓存里没有匹配当前筛选条件的记录（与快照预览的 noMatchHint 同款语义）。 */
+    noMatchHint: '没有匹配的球员。',
   },
 
   /** 单人预览/微调（PlayerViewer） */

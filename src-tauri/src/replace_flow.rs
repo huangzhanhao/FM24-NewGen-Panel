@@ -9,7 +9,7 @@ use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack_scanner::PackLayout;
 use crate::logger::LogSink;
 use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
-use crate::rtf_scanner::{PlayerRecord, RtfScanner};
+use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +44,9 @@ pub struct RunResult {
     pub outcome: Outcome,
     pub rtf_data: Vec<PlayerRecord>,
     pub mapping: Vec<MappingEntry>,
+    /// 名单摘要（格式/语言/条数）：解析成功后带回，随 replace:finished 一并回传前端，
+    /// 让名单预览不必再点一次「扫描RTF」就知道名单格式；失败/取消为 None。
+    pub roster: Option<RosterSummary>,
 }
 
 /// 执行整条替换流水线。run 只做编排（进度与取消检查点），各阶段实现在下方 *_stage。
@@ -67,8 +70,8 @@ pub fn run(
     logger.info("replace", format!("头像包：{}", params.img_dir));
     logger.info("replace", format!("RTF 名单：{}", params.rtf_path));
 
-    // 阶段1+2：校验并解析 RTF（0 → 20%），得到结构化球员列表（内部会做中文国籍翻译）。
-    let rtf_data = match parse_stage(params, progress, cancel, logger) {
+    // 阶段1+2：校验并解析 RTF（0 → 20%），得到结构化球员列表与名单摘要（内部会做中文国籍翻译）。
+    let (rtf_data, roster) = match parse_stage(params, progress, cancel, logger) {
         Ok(d) => d,
         Err(r) => return r,
     };
@@ -89,17 +92,22 @@ pub fn run(
     logger.info("replace", format!(
         "替换完成：共 {} 条映射，总耗时 {:.1?}", mapping.len(), started.elapsed()));
     progress("完成！", 100);
-    RunResult { outcome: Outcome::Finished, rtf_data, mapping }
+    RunResult {
+        outcome: Outcome::Finished,
+        rtf_data,
+        mapping,
+        roster: Some(roster),
+    }
 }
 
-/// 阶段1+2：识别 RTF 格式并解析出结构化名单（0 → 20%）。
+/// 阶段1+2：识别 RTF 格式并解析出结构化名单（0 → 20%），连同名单摘要一并返回。
 /// 格式识别失败 → failed("RTF 格式不合法：…")（带首个不合法字段定位，前端弹窗展示）。
 fn parse_stage(
     params: &ReplaceParams,
     progress: &mut dyn FnMut(&str, u8),
     cancel: &AtomicBool,
     logger: &impl LogSink,
-) -> Result<Vec<PlayerRecord>, RunResult> {
+) -> Result<(Vec<PlayerRecord>, RosterSummary), RunResult> {
     progress("识别 RTF 格式…", 0);
     let mut scanner = RtfScanner::new();
     if let Err(e) = scanner.detect_format(Path::new(&params.rtf_path), logger) {
@@ -119,7 +127,9 @@ fn parse_stage(
     }
     logger.info("replace", format!(
         "解析名单完成：{} 名球员，耗时 {:.1?}", rtf_data.len(), t.elapsed()));
-    Ok(rtf_data)
+    // 摘要就地从扫描器状态 + 记录列表汇总（趁 rtf_data 交出去之前），随结果回传前端。
+    let summary = RosterSummary::from_records(&scanner, &rtf_data);
+    Ok((rtf_data, summary))
 }
 
 /// 阶段3：识别头像包布局 → 拦截未实现标准 → 逐球员抽图（40%）。
@@ -205,11 +215,21 @@ fn yes_no(v: bool) -> &'static str {
 }
 
 fn failed(msg: &str) -> RunResult {
-    RunResult { outcome: Outcome::Failed(msg.into()), rtf_data: Vec::new(), mapping: Vec::new() }
+    RunResult {
+        outcome: Outcome::Failed(msg.into()),
+        rtf_data: Vec::new(),
+        mapping: Vec::new(),
+        roster: None,
+    }
 }
 
 fn cancelled() -> RunResult {
-    RunResult { outcome: Outcome::Cancelled, rtf_data: Vec::new(), mapping: Vec::new() }
+    RunResult {
+        outcome: Outcome::Cancelled,
+        rtf_data: Vec::new(),
+        mapping: Vec::new(),
+        roster: None,
+    }
 }
 
 #[cfg(test)]

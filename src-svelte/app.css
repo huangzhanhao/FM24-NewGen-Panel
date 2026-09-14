@@ -551,7 +551,9 @@ input.uid-chip {
 .table-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 /* 总条数：数字与「条」必须同行，空间不足时由搜索框收缩让位 */
 .table-toolbar .record-count { white-space: nowrap; flex-shrink: 0; }
-.search { position: relative; flex: 0 1 320px; }
+/* 搜索框：基准 320px，空间不足时先收缩自己（min-width 兜底），给右侧分页器让位，
+   保证分页器始终单行显示（见 TablePager 的 .pager flex-wrap: nowrap）。 */
+.search { position: relative; flex: 0 1 320px; min-width: 120px; }
 .search > svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--text-3); }
 .search input { width: 100%; padding-left: 30px; }
 .pager { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12px; }

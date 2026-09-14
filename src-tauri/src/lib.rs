@@ -218,7 +218,7 @@ pub fn run() {
                 rtf_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次解析的 RTF 球员缓存
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)),     // 「扫描头像」的包索引缓存（初始为空）
-                snapshot_cache: Arc::new(Mutex::new(None)),  // 「读取快照」的解析缓存（初始为空）
+                snapshot_cache: Arc::new(Mutex::new(None)),  // 快照解析缓存（「读取快照」/替换收尾写入；初始为空）
                 data_dir,                                    // 便携数据目录（标准规则在其下 rules/）
             });
 

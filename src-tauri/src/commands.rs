@@ -9,7 +9,7 @@ use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::{LogPage, LogSink, Logger};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
-use crate::rtf_scanner::{PlayerRecord, RtfScanner, NEWGAN_UID_PREFIX};
+use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner, NEWGAN_UID_PREFIX};
 use crate::templates::{self, RuleConfig};
 use crate::xml_parser::{self, MappingEntry};
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub struct AppState {
     pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>, // 最近一次解析的球员缓存
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>, // 「扫描头像」的包索引缓存（替换可复用）
-    pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 「读取快照」的解析缓存（快照预览分页复用）
+    pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
     pub data_dir: PathBuf, // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
@@ -45,6 +45,7 @@ pub struct FaceIndex {
 
 /// 「读取快照」产出的解析缓存：快照文件路径 + 有序映射条目（快照预览分页查询复用）。
 /// 查询时按路径比对，路径不符即失效（切档/切组后由「读取快照」重新填充）。
+/// 两个写入点：「读取快照」命令；替换成功收尾的自动同步（sync_group_snapshot）。
 pub struct SnapshotCache {
     pub xml_path: String,
     pub entries: Vec<MappingEntry>,
@@ -121,6 +122,20 @@ pub struct RtfScanResult {
     pub detailed: bool,   // 是否含拓展信息（拓展名单为 true）
     pub format: String,   // 基础名单 / 拓展球员名单 / 拓展职员名单
     pub language: String, // "English" / "简体中文"
+}
+
+/// 解析摘要（rtf_scanner 侧）→ 命令层返回体：字段一一对应，只把 &'static str 的格式名收成 String。
+/// 这样「扫描RTF」与「替换」两条路径共用一份摘要口径，前端拿到的 JSON 结构完全一致。
+impl From<RosterSummary> for RtfScanResult {
+    fn from(s: RosterSummary) -> Self {
+        RtfScanResult {
+            total: s.total,
+            newgan: s.newgan,
+            detailed: s.detailed,
+            format: s.format.into(),
+            language: s.language,
+        }
+    }
 }
 
 /// 前端发起替换时传来的参数（Deserialize = 从前端 JSON 解析而来）。
@@ -482,17 +497,8 @@ fn scan_rtf_core(
     scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
     let data = scanner.parse_roster(Path::new(rtf_path), false, logger)?;
-    let summary = RtfScanResult {
-        total: data.len(),
-        newgan: data
-            .iter()
-            .filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX))
-            .count(),
-        detailed: data.iter().any(|p| p.detailed.is_some()),
-        format: scanner.format.label().into(),
-        language: scanner.language.clone(),
-    };
-    Ok((summary, data))
+    // 摘要口径统一收在 RosterSummary（随机人前缀判定、拓展信息判定都不在这里重复一遍）。
+    Ok((RosterSummary::from_records(&scanner, &data).into(), data))
 }
 
 /// 「扫描头像」：扫描当前组头像包、缓存索引（供替换复用），结果写日志。
@@ -588,9 +594,15 @@ pub fn start_replace(
     }
     state.cancel.store(false, Ordering::SeqCst); // 重置取消标志
                                                  // 先在锁内取出当前 RTF 和组目录，随即释锁（不能把 Mutex 带进新线程）。
-    let (rtf, img_dir) = {
+                                                 // 顺带取该档当前组的存档快照路径：替换成功后要把新 config.xml 同步到这份快照位置
+                                                 // （快照预览的数据源，与「读取快照」按钮读的是同一路径）。
+    let (rtf, img_dir, snapshot_path) = {
         let pm = state.pm.lock().unwrap();
-        (pm.get_cur_rtf(), pm.cur_group.clone())
+        let snap = pm
+            .cur_group
+            .as_ref()
+            .map(|g| crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, g));
+        (pm.get_cur_rtf(), pm.cur_group.clone(), snap)
     };
     // 以下每条校验失败路径都必须先把 running 复位，否则界面全局禁用到重启。
     let Some(img_dir) = img_dir else {
@@ -639,6 +651,7 @@ pub fn start_replace(
     // 后台线程需要的句柄先 clone 出来（Arc::clone 只涨引用计数，不拷贝真实数据）。
     let (cancel, running) = (state.cancel.clone(), state.running.clone());
     let (rtf_cache, mapping_cache) = (state.rtf_cache.clone(), state.mapping_cache.clone());
+    let snapshot_cache = state.snapshot_cache.clone(); // 替换成功时同步刷新（快照预览的数据源）
     let logger = state.logger.clone();
     std::thread::spawn(move || {
         let emit_app = app.clone();
@@ -661,10 +674,22 @@ pub fn start_replace(
         // 把解析结果与映射写入缓存（供后续预览/分页查询使用）。
         *rtf_cache.lock().unwrap() = result.rtf_data.clone();
         *mapping_cache.lock().unwrap() = result.mapping.clone();
+        // 快照预览的数据源也在收尾处刷新（与「读取快照」按钮写的是同一份缓存）：
+        // 替换成功 → 把刚写好的 config.xml 备份到该档快照位置并重解析入缓存，让快照预览
+        // 无需再点「读取快照」就能看到本次结果；失败/取消不改 config.xml，快照保持原样
+        //（已读过的那份仍然有效，所以这里只写不清）。
+        if matches!(result.outcome, Outcome::Finished) {
+            if let Some(snap_path) = snapshot_path.as_deref() {
+                sync_group_snapshot(snap_path, &params.img_dir, &snapshot_cache, &*logger);
+            }
+        }
         if matches!(result.outcome, Outcome::Finished) && result.mapping.is_empty() {
             // 跑完却一条映射也没有：config.xml 会被写成空表，必须留 WARNING
             logger.warn("replace", "映射结果为空：本次写入的 config.xml 不含任何映射（多为「仅随机人」过滤掉了全部名单，或头像包内无图片）");
         }
+        // 名单摘要（替换时后端已经解析过名单）：随事件回传前端，名单预览不必再点一次「扫描RTF」
+        // 就知道名单格式；失败/取消为 None（与 rtf_cache 被写回空表一致）。
+        let roster = result.roster.map(RtfScanResult::from);
         // 把结果映射为前端认的字符串；失败时额外记一条 ERROR 日志。
         let result_str = match result.outcome {
             Outcome::Finished => "finished",
@@ -677,7 +702,7 @@ pub fn start_replace(
         // 发「完成」事件（前端收到后刷新快照并弹提示）。
         let _ = app.emit(
             "replace:finished",
-            serde_json::json!({ "result": result_str }),
+            serde_json::json!({ "result": result_str, "roster": roster }),
         );
         running.store(false, Ordering::SeqCst); // 标记任务结束，解除全局禁用
     });
@@ -829,13 +854,72 @@ pub async fn read_snapshot(
     if !path.is_file() {
         return Err("存档 XML 快照尚未生成（请先执行一次替换）".into());
     }
-    let entries = xml_parser::parse_xml_entries(&path)?;
-    let total = entries.len();
-    *state.snapshot_cache.lock().unwrap() = Some(SnapshotCache { xml_path, entries });
+    let total = cache_snapshot(&state.snapshot_cache, &path)?;
     state
         .logger
         .info("scan", format!("读取快照完成：{total} 条映射"));
     Ok(SnapshotInfo { total })
+}
+
+/// 解析快照文件并写入快照缓存，返回条目数。两条路径共用：「读取快照」命令（用户显式读），
+/// 以及替换收尾的自动同步（sync_group_snapshot）。缓存里存的路径即传入路径的字符串形式——
+/// 前端两处拿到的都是同一套 `group_xml_path` 结果，快照预览查询时按此路径比对命中。
+fn cache_snapshot(cache: &Mutex<Option<SnapshotCache>>, xml_path: &Path) -> Result<usize, String> {
+    let entries = xml_parser::parse_xml_entries(xml_path)?;
+    let total = entries.len();
+    *cache.lock().unwrap() = Some(SnapshotCache {
+        xml_path: xml_path.to_string_lossy().to_string(),
+        entries,
+    });
+    Ok(total)
+}
+
+/// 替换收尾时同步该档的存档 XML 快照：把刚写入的 config.xml 备份到该档快照位置
+/// （等价于切档时 save_group_xml 做的备份，保证「存档资料」里那份也是最新的），
+/// 再按新文件重写快照缓存——快照预览因此无需再点「读取快照」就能看到本次结果。
+/// 任何失败都只记 WARNING 不返回 Err：快照新旧不影响本次替换的结论（config.xml 已写好）。
+/// 【只写不清】失败/取消时调用方根本不会调它（config.xml 未被改写，已读的那份仍有效）。
+fn sync_group_snapshot(
+    snapshot_path: &Path,
+    img_dir: &str,
+    cache: &Mutex<Option<SnapshotCache>>,
+    logger: &impl LogSink,
+) {
+    let src = Path::new(img_dir).join("config.xml");
+    if !src.is_file() {
+        return; // 没有 config.xml（替换成功时必有，这里只做防御）
+    }
+    if let Some(p) = snapshot_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(p) {
+            logger.write(
+                log::Level::Warn,
+                "replace",
+                format!("创建快照目录失败：{e}"),
+            );
+            return;
+        }
+    }
+    if let Err(e) = std::fs::copy(&src, snapshot_path) {
+        logger.write(
+            log::Level::Warn,
+            "replace",
+            format!("同步存档快照失败：{e}"),
+        );
+        return;
+    }
+    match cache_snapshot(cache, snapshot_path) {
+        Ok(total) => logger.info("replace", format!("同步存档快照完成：{total} 条映射")),
+        // 解析失败：宁缺勿旧——清空缓存而不是留着可能正是这份路径的旧数据（留着会让预览显示替换前的旧表）；
+        // 清空后快照预览查询会按磁盘上新文件重读一次。
+        Err(e) => {
+            *cache.lock().unwrap() = None;
+            logger.write(
+                log::Level::Warn,
+                "replace",
+                format!("同步存档快照后解析失败：{e}"),
+            );
+        }
+    }
 }
 
 /// 快照预览分页查询：UID 筛选 + 分页，数据留在缓存里，IPC 只传当前页。
@@ -1349,6 +1433,50 @@ mod tests {
         let page2 = query_snapshot_core(&entries, root, &q(1, 1, ""));
         assert_eq!(page2.items.len(), 1);
         assert_eq!(page2.items[0].uid, "2000472008");
+    }
+
+    #[test]
+    fn sync_group_snapshot_copies_config_and_fills_cache() {
+        // 替换收尾的自动同步：把阶段4写下的 config.xml 备份到该档快照位置，并立即刷新快照缓存。
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("pack");
+        std::fs::create_dir_all(&img).unwrap();
+        let entries = vec![MappingEntry {
+            uid: "r-1001".into(),
+            ethnicity: "SpanMed".into(),
+            image: "img1".into(),
+        }];
+        xml_parser::write_xml(&entries, &img, false).unwrap(); // 替换阶段4写下的那份
+        let snap_path = tmp.path().join("档1").join("graphics_pack_snapshot.xml");
+        let cache = Mutex::new(None);
+        let (logger, _rx) = ChannelLogger::channel();
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &cache, &logger);
+
+        assert!(snap_path.is_file()); // 快照文件已生成（父目录一并补建）
+        let got = cache.lock().unwrap();
+        let c = got.as_ref().expect("快照缓存应被填充");
+        assert_eq!(c.xml_path, snap_path.to_str().unwrap()); // 路径即快照预览查询的比对键
+        assert_eq!(c.entries.len(), 1);
+        assert_eq!(c.entries[0].uid, "r-1001");
+    }
+
+    #[test]
+    fn sync_group_snapshot_without_config_xml_keeps_cache_untouched() {
+        // 包内没有 config.xml（替换成功时不会发生）：不生成快照、也不动缓存里已有的数据。
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("pack");
+        std::fs::create_dir_all(&img).unwrap();
+        let snap_path = tmp.path().join("档1").join("graphics_pack_snapshot.xml");
+        let cache = Mutex::new(Some(SnapshotCache {
+            xml_path: "old_snapshot.xml".into(),
+            entries: Vec::new(),
+        }));
+        let (logger, _rx) = ChannelLogger::channel();
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &cache, &logger);
+
+        assert!(!snap_path.is_file());
+        let got = cache.lock().unwrap();
+        assert_eq!(got.as_ref().unwrap().xml_path, "old_snapshot.xml");
     }
 
     #[test]

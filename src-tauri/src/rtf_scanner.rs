@@ -147,6 +147,36 @@ impl RtfFormat {
     }
 }
 
+/// 一次名单解析的摘要（格式 / 语言 / 条数 / 随机人数）。
+/// 【为何单独成类型】「扫描RTF」命令与「替换」流水线都会解析名单，两处要给出同一份摘要：
+/// 替换成功时随 replace:finished 事件回传前端，名单预览因此不必再点一次「扫描RTF」就能
+/// 知道名单格式（拓展名单才有的「随机人」筛选与职员列表头都靠它）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterSummary {
+    pub total: usize,         // 名单总条数
+    pub newgan: usize,        // 随机人（r- 前缀）条数
+    pub detailed: bool,       // 是否含拓展信息（拓展名单为 true）
+    pub format: &'static str, // 格式中文名（RtfFormat::label）
+    pub language: String,     // "English" / "简体中文"
+}
+
+impl RosterSummary {
+    /// 由解析完的扫描器状态 + 记录列表汇总（「扫描RTF」与替换流水线共用同一套口径）。
+    pub fn from_records(scanner: &RtfScanner, data: &[PlayerRecord]) -> Self {
+        Self {
+            total: data.len(),
+            newgan: data
+                .iter()
+                .filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX))
+                .count(),
+            detailed: data.iter().any(|p| p.detailed.is_some()),
+            format: scanner.format.label(),
+            language: scanner.language.clone(),
+        }
+    }
+}
+
 /// 拓展名单第 8-18 列以及用户自定义列的原始文本；序列化时用 camelCase，与前端 types.ts 保持一致。
 /// `based` 和 `preferred_job` 不会同时有值——第 15 列按判断结果只有一种含义，另一种始终为空。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

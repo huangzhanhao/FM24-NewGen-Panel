@@ -116,6 +116,7 @@
     if (!snap?.currentRtf) return;
     try {
       appStore.lastRtfScan = await api.scanRtf();
+      appStore.rosterReady = true; // 名单缓存已填充：名单预览据此渲染工具条
       appStore.rosterVersion++;
     } catch (e) {
       await showError(e);

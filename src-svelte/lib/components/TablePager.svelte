@@ -82,25 +82,28 @@
 </div>
 
 <style>
-  /* 分页器：窄窗口下允许整体换行并靠右，避免挤压搜索框 */
+  /* 分页器：整组始终排在同一行（nowrap）并靠右；flex-shrink: 0 让它不被压缩，
+     窗口变窄时由左侧搜索框收缩让位（见 app.css 的 .search min-width），
+     避免分页器自己被挤成上下两行。 */
   .pager {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
     justify-content: flex-end;
-    row-gap: 6px;
+    gap: 6px;
   }
   /* 快速跳页组：与「第 X/Y 页」之间用细分隔线区隔，整组不换行 */
   .pager-jump {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     white-space: nowrap;
     margin-left: 2px;
-    padding-left: 10px;
+    padding-left: 8px;
     border-left: 1px solid var(--hairline);
   }
   /* 页码输入框：紧凑居中（覆盖全局 text 输入框的 7px 纵向内边距与默认宽度） */
   .pager-jump .jump-input {
-    width: 52px;
+    width: 44px;
     min-width: 0;
     padding: 3px 6px;
     text-align: center;

@@ -4,6 +4,7 @@
 <script lang="ts">
   import { api } from "../api";
   import { appStore } from "../stores/app.svelte";
+  import { loadImageBlobUrl } from "../images";
   import { t } from "../text"; // 全局文案常量
   import { icons } from "../icons";
   import TablePager from "./TablePager.svelte"; // 分页器（与快照预览共用）
@@ -107,13 +108,7 @@
   async function resolveAvatarEntry(name: string): Promise<AvatarEntry> {
     const path = await api.resolveAvatar(name);
     if (!path) return { url: null, err: t.table.avatarNotFound };
-    const bytes = await api.readImage(path);
-    const ext = path.split(".").pop()?.toLowerCase() ?? "png";
-    const mime = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
-    return {
-      url: URL.createObjectURL(new Blob([bytes], { type: mime })),
-      err: "",
-    };
+    return { url: await loadImageBlobUrl(path), err: "" };
   }
 
   // 头像气泡实例（bind:this）：行内触发按钮把鼠标/键盘事件接到它的 open/scheduleClose/close 上。

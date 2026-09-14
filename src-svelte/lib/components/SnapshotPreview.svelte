@@ -5,6 +5,7 @@
 <script lang="ts">
   import { api } from '../api';
   import { appStore } from '../stores/app.svelte';
+  import { bytesToBlobUrl, loadImageBlobUrl } from '../images';
   import { t } from '../text'; // 全局文案常量
   import { showError } from '../dialog';
   import { icons } from '../icons';
@@ -21,7 +22,7 @@
   let loadToken = 0;           // 图片加载令牌：翻页/重读/卸载后使仍在途的旧页响应作废
   let liveUrls: string[] = []; // 在用的 blob URL 清单（释放用；刻意不用 $state，避免被 effect 追踪）
 
-  const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
+  const snap = $derived(appStore.displaySnapshot); // 展示层：浏览态优先（统一取自 store getter）
   const xmlPath = $derived(snap?.configXml?.path ?? ''); // 当前展示档的快照文件
   const imgDir = $derived(snap?.currentGroup ?? '');     // 头像相对路径的根（当前展示组的头像包）
   // 可读态：当前展示的快照正是最近一次「读取快照」的那份。切档/切组后路径不一致，回到引导空态。
@@ -73,9 +74,7 @@
       if (!imagePath) continue; // 包内找不到图片文件 → 留在无图占位
       api.readImage(imagePath).then((bytes) => {
         if (token !== loadToken) return; // 期间已翻页/重读/卸载：过期响应直接丢弃，不创建 URL
-        const ext = imagePath.split('.').pop()?.toLowerCase() ?? 'png';
-        const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`; // jpg 的 MIME 是 image/jpeg
-        const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        const url = bytesToBlobUrl(imagePath, bytes);
         liveUrls.push(url);   // 先登记再显示，保证之后的 releaseBlobs 一定能释放到它
         blobUrls[it.uid] = url;
       }).catch(() => { /* 单张读取失败不阻塞整页，保持无图占位 */ });
@@ -94,10 +93,7 @@
 
   /** 气泡取头像：行内已解析出 imagePath，直接读字节包成 blob URL（缓存 key 即 imagePath）。 */
   async function resolveSnapshotAvatar(imagePath: string): Promise<AvatarEntry> {
-    const bytes = await api.readImage(imagePath);
-    const ext = imagePath.split('.').pop()?.toLowerCase() ?? 'png';
-    const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`; // jpg 的 MIME 是 image/jpeg
-    return { url: URL.createObjectURL(new Blob([bytes], { type: mime })), err: '' };
+    return { url: await loadImageBlobUrl(imagePath), err: '' };
   }
 </script>
 

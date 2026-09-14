@@ -5,13 +5,14 @@
 //! 也跑在单独线程，因此 AppState 的共享字段用 Mutex 保护、跨线程引用用 Arc、
 //! 运行/取消标志用 AtomicBool。返回 Result<T, String> 时，Err 的中文描述由前端直接弹窗展示。
 use crate::face_mapper::Mode;
-use crate::facepack_scanner::{self, PackLayout, PackScan};
+use crate::facepack_scanner::{self, IntegrityResult, PackScan};
 use crate::logger::{LogPage, LogSink, Logger};
+use crate::paging::PageResult;
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
-use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner, NEWGAN_UID_PREFIX};
+use crate::rtf_scanner::{self, PlayerQuery, PlayerRecord, RosterSummary, RtfScanner};
 use crate::templates::{self, RuleConfig};
-use crate::xml_parser::{self, MappingEntry};
+use crate::xml_parser::{self, MappingEntry, SnapshotEntry, SnapshotQuery};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,17 +94,7 @@ pub struct ProgressPayload {
     pub value: u8,
 }
 
-/// 「检查完整性」结果：头像包命中的标准 + 可修复的缺失目录（供 check_integrity 命令返回）。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct IntegrityResult {
-    pub standard: u8,   // 命中的标准号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别
-    pub status: String, // "complete" | "fixable" | "unknown"
-    pub missing: Vec<String>, // fixable 时可一键创建的缺失目录（按标准 FolderList 原顺序）
-    pub extra: Vec<String>, // 包内多出、未在标准 FolderList 配置的目录（不参与抽图）
-    pub found: usize,   // 已命中的子目录数
-    pub expected_total: usize, // 该标准 FolderList 的目录总数（标准一/无法识别为 0）
-}
+/// 「检查完整性」结果 IntegrityResult 已下沉到 facepack_scanner（属头像包分类判定的领域产物）。
 
 /// 「扫描头像」返回摘要：图片总数 + 命中的标准号（0=无法识别）。
 #[derive(Serialize, Clone)]
@@ -113,30 +104,8 @@ pub struct ImageScanResult {
     pub standard: u8,
 }
 
-/// 「扫描RTF」返回摘要。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RtfScanResult {
-    pub total: usize,     // 名单总条数
-    pub newgan: usize,    // 随机人（r- 前缀）条数
-    pub detailed: bool,   // 是否含拓展信息（拓展名单为 true）
-    pub format: String,   // 基础名单 / 拓展球员名单 / 拓展职员名单
-    pub language: String, // "English" / "简体中文"
-}
-
-/// 解析摘要（rtf_scanner 侧）→ 命令层返回体：字段一一对应，只把 &'static str 的格式名收成 String。
-/// 这样「扫描RTF」与「替换」两条路径共用一份摘要口径，前端拿到的 JSON 结构完全一致。
-impl From<RosterSummary> for RtfScanResult {
-    fn from(s: RosterSummary) -> Self {
-        RtfScanResult {
-            total: s.total,
-            newgan: s.newgan,
-            detailed: s.detailed,
-            format: s.format.into(),
-            language: s.language,
-        }
-    }
-}
+/// 「扫描RTF」返回摘要直接复用 rtf_scanner::RosterSummary（camelCase 序列化结构与前端一致），
+/// 不再在命令层维护一份字段一一对应的 RtfScanResult——「扫描RTF」与「替换」两条路径本就共用同一口径。
 
 /// 前端发起替换时传来的参数（Deserialize = 从前端 JSON 解析而来）。
 #[derive(Deserialize)]
@@ -148,25 +117,7 @@ pub struct ReplaceArgs {
     pub save_backup: bool,
 }
 
-/// 名单分页查询参数。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerQuery {
-    pub offset: usize,
-    pub limit: usize,
-    pub search: String,
-    pub sort_key: String,
-    pub sort_desc: bool,
-    pub newgan: Option<bool>, // 随机人筛选：None=任意 / Some(true)=仅随机人 / Some(false)=仅真实球员
-}
-
-/// 通用分页结果（<T> 是泛型，可装任何类型的条目）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PageResult<T> {
-    pub total: usize,
-    pub items: Vec<T>,
-}
+/// 名单分页查询参数 PlayerQuery 与筛选/排序/分页逻辑已下沉到 rtf_scanner::query_page（名单领域）。
 
 /// 单人预览的返回体：球员资料 + 映射 + 实际图片路径（三者都可能为 None/null）。
 #[derive(Serialize)]
@@ -184,24 +135,7 @@ pub struct SnapshotInfo {
     pub total: usize,
 }
 
-/// 快照预览的一行：UID + 头像相对路径（from 原文，平铺包无目录前缀）
-/// + 按当前展示组头像包解析出的实际图片路径（包内找不到为 None/null）。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotEntry {
-    pub uid: String,
-    pub rel_path: String,
-    pub image_path: Option<String>,
-}
-
-/// 快照预览分页查询参数（search 按 UID 子串筛选，空串=不筛选）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotQuery {
-    pub offset: usize,
-    pub limit: usize,
-    pub search: String,
-}
+/// 快照预览的 SnapshotEntry / SnapshotQuery 及筛选分页逻辑已下沉到 xml_parser（config.xml 映射领域）。
 
 // ---------------- 命令实现 ----------------
 
@@ -356,80 +290,15 @@ pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
 }
 
 /// 「检查完整性」：按 templates 的 FolderList（用户可配置）识别头像包归属哪个标准，
-/// 并给出可一键补全的缺失目录与未配置的多余目录。轻扫描：只列子目录名 + 探测根是否有图。
+/// 并给出可一键补全的缺失目录与未配置的多余目录。判定逻辑在 facepack_scanner::check_integrity，
+/// 命令层只负责加载规则配置并把结果回传前端（IPC）。
 #[tauri::command]
 pub fn check_integrity(
     state: State<'_, AppState>,
     img_dir: String,
 ) -> Result<IntegrityResult, String> {
     let config = RuleConfig::load(&state.data_dir)?;
-    Ok(check_integrity_core(&img_dir, &config))
-}
-
-/// 检查完整性核心（纯函数，便于单测）：轻扫描 + classify + 汇总缺失/多余目录。
-/// 判定与缺失/多余计算全部以标准 FolderList 为基准（用户改 json 即改变判定口径）。
-fn check_integrity_core(img_dir: &str, config: &RuleConfig) -> IntegrityResult {
-    let mut subdirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut has_images = false;
-    if let Ok(rd) = std::fs::read_dir(&img_dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let fname = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
-                if !facepack_scanner::is_junk_dir(&fname) {
-                    subdirs.insert(fname);
-                } // 跳过 __MACOSX 等
-            } else if !fname.starts_with('.')   // 跳过 ._x.png 等隐藏文件，与 scan_pack 口径一致
-                && p.extension().and_then(|x| x.to_str())
-                .map(|x| matches!(x.to_ascii_lowercase().as_str(), "png"|"jpg"|"jpeg")).unwrap_or(false)
-            {
-                has_images = true;
-            }
-        }
-    }
-
-    let layout = facepack_scanner::classify(&subdirs, has_images, &config.folder_lists());
-    let standard = layout.standard();
-    let status = match layout {
-        PackLayout::Flat => "complete",
-        PackLayout::Empty | PackLayout::Unknown => "unknown",
-        PackLayout::Standard { complete: true, .. } => "complete",
-        PackLayout::Standard { .. } => "fixable",
-    };
-    // missing / extra / expected_total 按归属标准的 FolderList 计算：
-    // missing = FolderList 中尚未出现的目录（可一键补全）；extra = 包内多出的未配置目录（不进抽图池）。
-    let (missing, extra, expected_total) = match &layout {
-        PackLayout::Standard { standard: n, .. } => {
-            let folders = config
-                .folder_lists()
-                .into_iter()
-                .find(|(t, _)| t == n)
-                .map(|(_, f)| f.clone())
-                .unwrap_or_default();
-            let missing = folders
-                .iter()
-                .filter(|d| !subdirs.contains(*d))
-                .cloned()
-                .collect();
-            let extra: Vec<String> = subdirs
-                .iter()
-                .filter(|d| !folders.contains(*d))
-                .cloned()
-                .collect();
-            (missing, extra, folders.len())
-        }
-        _ => (Vec::new(), Vec::new(), 0),
-    };
-    // 标准一/无法识别的 found 与现状一致：标准一记 0，其余记命中的子目录数。
-    let found = if standard == 1 { 0 } else { subdirs.len() };
-    IntegrityResult {
-        standard,
-        status: status.into(),
-        missing,
-        extra,
-        found,
-        expected_total,
-    }
+    Ok(facepack_scanner::check_integrity(&img_dir, &config.folder_lists()))
 }
 
 /// 批量创建缺失目录（前端确认后调用）。
@@ -462,43 +331,18 @@ fn layout_label(standard: u8, config: &RuleConfig) -> String {
     }
 }
 
-/// 「扫描头像」核心（纯函数，便于单测）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
-/// 标准号按 templates 的 FolderList 判定（用户可配置，不再硬编码）。
-fn scan_images_core(img_dir: &str, config: &RuleConfig) -> Result<(usize, u8, PackScan), String> {
-    let scan = facepack_scanner::scan_pack(img_dir)?;
-    // 布局判定与 FaceMapper::from_scan 同口径（垃圾目录不参与判定）。
-    let subdirs: std::collections::BTreeSet<String> = scan
-        .faces_map
-        .keys()
-        .filter(|n| !facepack_scanner::is_junk_dir(n))
-        .cloned()
-        .collect();
-    let layout = facepack_scanner::classify(
-        &subdirs,
-        !scan.root_images.is_empty(),
-        &config.folder_lists(),
-    );
-    // 平铺包图片数 = 根图数；其余（含 Unknown 的子/孙目录）= 递归全量池图片总数。
-    let total = if layout.is_flat() {
-        scan.root_images.len()
-    } else {
-        scan.recursive_pools.values().map(|s| s.len()).sum()
-    };
-    Ok((total, layout.standard(), scan))
-}
-
 /// 「扫描RTF」核心：格式识别 + 全量解析名单（全字段入库），返回 (摘要, 记录列表)。
 /// 识别失败 → Err("RTF 格式不合法：…")，文案带首个不合法字段定位，前端弹窗直接展示。
 fn scan_rtf_core(
     rtf_path: &str,
     logger: &impl LogSink,
-) -> Result<(RtfScanResult, Vec<PlayerRecord>), String> {
+) -> Result<(RosterSummary, Vec<PlayerRecord>), String> {
     let mut scanner = RtfScanner::new();
     scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：扫描展示全量名单（Replace 流程才按「仅随机人」过滤）。
     let data = scanner.parse_roster(Path::new(rtf_path), false, logger)?;
     // 摘要口径统一收在 RosterSummary（随机人前缀判定、拓展信息判定都不在这里重复一遍）。
-    Ok((RosterSummary::from_records(&scanner, &data).into(), data))
+    Ok((RosterSummary::from_records(&scanner, &data), data))
 }
 
 /// 「扫描头像」：扫描当前组头像包、缓存索引（供替换复用），结果写日志。
@@ -515,7 +359,7 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
             .ok_or("请先选择头像包目录")?
     };
     let config = RuleConfig::load(&state.data_dir)?; // 用户改坏规则 json → 报错提示
-    let (total, standard, scan) = scan_images_core(&img_dir, &config)?;
+    let (total, standard, scan) = facepack_scanner::scan_and_total(&img_dir, &config.folder_lists())?;
     // Arc 包一层入缓存：替换复用时只涨引用计数，不复制整份图片索引。
     *state.faces_cache.lock().unwrap() = Some(FaceIndex {
         img_dir,
@@ -534,7 +378,7 @@ pub async fn scan_images(state: State<'_, AppState>) -> Result<ImageScanResult, 
 /// 「扫描RTF」：解析当前组 RTF 并填充名单预览缓存（无需先 Replace），结果写日志。
 /// 【async】大名单解析跑在异步运行时线程，避免阻塞主线程导致界面卡住。
 #[tauri::command]
-pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RtfScanResult, String> {
+pub async fn scan_rtf(state: State<'_, AppState>) -> Result<RosterSummary, String> {
     let rtf = { state.pm.lock().unwrap().get_cur_rtf() };
     if rtf.is_empty() {
         return Err("请先选择 RTF 名单".into());
@@ -689,7 +533,7 @@ pub fn start_replace(
         }
         // 名单摘要（替换时后端已经解析过名单）：随事件回传前端，名单预览不必再点一次「扫描RTF」
         // 就知道名单格式；失败/取消为 None（与 rtf_cache 被写回空表一致）。
-        let roster = result.roster.map(RtfScanResult::from);
+        let roster = result.roster;
         // 把结果映射为前端认的字符串；失败时额外记一条 ERROR 日志。
         let result_str = match result.outcome {
             Outcome::Finished => "finished",
@@ -788,55 +632,12 @@ pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerP
 }
 
 /// RTF 名单分页查询（大名单预览；数据留 Rust，IPC 只传当前页）。
-/// 名单可能上万条，一次全传会卡顿，所以只传当前页（前端每页 200 条）。
+/// 名单可能上万条，一次全传会卡顿，所以只传当前页。筛选/排序/分页逻辑在 rtf_scanner::query_page，
+/// 命令层只负责取出缓存（整体 clone 避免长时间持锁）并转交。
 #[tauri::command]
 pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResult<PlayerRecord> {
-    // 先把缓存整体 clone 出来（避免长时间持锁），再交给纯逻辑做筛选/排序/分页。
     let rows = state.rtf_cache.lock().unwrap().clone();
-    query_players_core(rows, &query)
-}
-
-/// 搜索/随机人筛选/排序/分页的纯逻辑（不碰后端状态，便于单测）。
-fn query_players_core(
-    mut rows: Vec<PlayerRecord>,
-    query: &PlayerQuery,
-) -> PageResult<PlayerRecord> {
-    let search = query.search.to_lowercase();
-    if !search.is_empty() {
-        // UID/姓名/国籍任一包含搜索词即命中。
-        rows.retain(|r| {
-            r.uid.to_lowercase().contains(&search)
-                || r.name.to_lowercase().contains(&search)
-                || r.primary_nat.to_lowercase().contains(&search)
-        });
-    }
-    // 随机人筛选按 r- 前缀判定：与解析时的加前缀规则、扫描摘要的计数同一口径。
-    if let Some(want) = query.newgan {
-        rows.retain(|r| r.uid.starts_with(NEWGAN_UID_PREFIX) == want);
-    }
-    // 按前端指定的列排序；sort_desc 为 true 时反转。
-    rows.sort_by(|a, b| {
-        let ord = match query.sort_key.as_str() {
-            "name" => a.name.cmp(&b.name),
-            "primaryNat" => a.primary_nat.cmp(&b.primary_nat),
-            "ethnicityCode" => a.ethnicity_code.cmp(&b.ethnicity_code),
-            _ => a.uid.cmp(&b.uid),
-        };
-        if query.sort_desc {
-            ord.reverse()
-        } else {
-            ord
-        }
-    });
-    let total = rows.len();
-    PageResult {
-        total,
-        items: rows
-            .into_iter()
-            .skip(query.offset)
-            .take(query.limit)
-            .collect(),
-    }
+    rtf_scanner::query_page(rows, &query)
 }
 
 // ---------------- 快照预览（「读取快照」按钮 → 结果区「快照预览」Tab） ----------------
@@ -951,34 +752,7 @@ pub fn query_snapshot(
         });
     }
     let entries = &cache.as_ref().unwrap().entries;
-    Ok(query_snapshot_core(entries, &img_dir, &query))
-}
-
-/// 快照预览的筛选/分页/图片解析纯逻辑（不碰后端状态，便于单测）。
-/// 每条图片解析最多探测 png/jpg/jpeg 三种扩展名，仅对当前页的条目执行。
-fn query_snapshot_core(
-    entries: &[MappingEntry],
-    img_dir: &str,
-    query: &SnapshotQuery,
-) -> PageResult<SnapshotEntry> {
-    let search = query.search.trim().to_lowercase();
-    let matched: Vec<&MappingEntry> = entries
-        .iter()
-        .filter(|e| search.is_empty() || e.uid.to_lowercase().contains(&search))
-        .collect();
-    let total = matched.len();
-    let root = Path::new(img_dir);
-    let items = matched
-        .into_iter()
-        .skip(query.offset)
-        .take(query.limit)
-        .map(|e| SnapshotEntry {
-            uid: e.uid.clone(),
-            rel_path: xml_parser::record_from(&e.ethnicity, &e.image),
-            image_path: xml_parser::resolve_image_file(root, &e.ethnicity, &e.image),
-        })
-        .collect();
-    PageResult { total, items }
+    Ok(xml_parser::query_snapshot_page(entries, &img_dir, &query))
 }
 
 // ---------------- 存档浏览预览（下拉选择存档 = 浏览，不切档） ----------------
@@ -1093,21 +867,17 @@ pub fn resolve_avatar(
         return Ok(Some(p));
     }
     // 2) 裸词干（无分隔符、无扩展名）才允许递归兜底；带路径的输入已在上面按其指定位置探测过。
-    let bare =
-        !avatar.contains('/') && !avatar.contains('\\') && Path::new(avatar).extension().is_none();
-    if !bare {
+    if !xml_parser::is_bare_stem(avatar) {
         return Ok(None);
     }
     let cache = state.faces_cache.lock().unwrap();
     let Some(idx) = cache.as_ref().filter(|c| c.img_dir == img_dir) else {
         return Ok(None); // 没有同目录的扫描索引：提示用户可先「扫描头像」，不在悬停时现场扫大包
     };
-    // 递归池按相对目录有序遍历，多个目录取字典序最前者（确定性行为）。
-    for (dir, stems) in &idx.scan.recursive_pools {
-        if stems.contains(avatar) {
-            if let Some(p) = xml_parser::resolve_image_file(Path::new(&img_dir), dir, avatar) {
-                return Ok(Some(p));
-            }
+    // 递归兜底的目录选取策略在 PackScan::find_stem_dir（按字典序取最前命中目录）。
+    if let Some(dir) = idx.scan.find_stem_dir(avatar) {
+        if let Some(p) = xml_parser::resolve_image_file(Path::new(&img_dir), dir, avatar) {
+            return Ok(Some(p));
         }
     }
     Ok(None)
@@ -1146,198 +916,6 @@ mod tests {
     use super::*;
     use crate::logger::ChannelLogger;
 
-    /// 在临时目录下按 names 建子目录，返回根路径字符串。
-    fn mk_dirs(root: &Path, names: &[&str]) {
-        for n in names {
-            std::fs::create_dir_all(root.join(n)).unwrap();
-        }
-    }
-
-    #[test]
-    fn standard1_images_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
-    }
-
-    #[test]
-    fn empty_dir_is_unknown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str()), (1, "unknown"));
-    }
-
-    #[test]
-    fn standard2_exact_regardless_of_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut shuffled: Vec<&str> = FACEPACK_DIRS.to_vec();
-        shuffled.reverse(); // 顺序不同仍应命中
-        mk_dirs(tmp.path(), &shuffled);
-        std::fs::write(tmp.path().join(FACEPACK_DIRS[0]).join("a.jpg"), b"x").unwrap();
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!(
-            (
-                r.standard,
-                r.status.as_str(),
-                r.missing.len(),
-                r.expected_total
-            ),
-            (2, "complete", 0, 14)
-        );
-    }
-
-    #[test]
-    fn standard3_exact() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 按内置标准三 FolderList（62 目录）建包 → 恰好相等 → complete。
-        let cfg = RuleConfig::builtin();
-        mk_dirs(
-            tmp.path(),
-            &cfg.standard3
-                .folder_list
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        );
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &cfg);
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.expected_total),
-            (3, "complete", 62)
-        );
-        assert!(r.extra.is_empty());
-    }
-
-    #[test]
-    fn standard3_superset_still_matches_with_extra() {
-        // 62 目录全在 + 多出清单外的未使用目录 → 仍判标准三 complete；多余目录进 extra、不参与抽图。
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = RuleConfig::builtin();
-        let mut dirs: Vec<String> = cfg.standard3.folder_list.clone();
-        dirs.push("Scandinavian".into()); // 清单外
-        dirs.push("SomeUnusedDir".into()); // 清单外
-        mk_dirs(
-            tmp.path(),
-            &dirs.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &cfg);
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.expected_total),
-            (3, "complete", 62)
-        );
-        assert_eq!(
-            r.extra,
-            vec!["Scandinavian".to_string(), "SomeUnusedDir".to_string()]
-        );
-    }
-
-    #[test]
-    fn standard2_fixable_reports_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 标准二去掉最后一个（YugoGreek）→ 13 个，应判 fixable 且缺失正好是 YugoGreek。
-        let present: Vec<&str> = FACEPACK_DIRS[..13].to_vec();
-        mk_dirs(tmp.path(), &present);
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.found, r.expected_total),
-            (2, "fixable", 13, 14)
-        );
-        assert_eq!(r.missing, vec!["YugoGreek".to_string()]);
-    }
-
-    #[test]
-    fn standard3_fixable_subset() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 标准三 FolderList(62)
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.found, r.expected_total),
-            (3, "fixable", 3, 62)
-        );
-        assert_eq!(r.missing.len(), 59); // 62 - 3
-        assert!(!r.missing.contains(&"China".to_string()));
-    }
-
-    #[test]
-    fn unknown_when_unrecognized_name_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["African", "Asian", "NotARealRace"]);
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
-    }
-
-    #[test]
-    fn unknown_when_mixing_two_sets() {
-        let tmp = tempfile::tempdir().unwrap();
-        // African 属 14 组、China 属 65 组，跨两套混用 → 无法识别。
-        mk_dirs(tmp.path(), &["African", "China"]);
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
-    }
-
-    /// 在根目录放标准说明里点名的辅助文件（config.xml / .md / 备注.txt），验证其不参与判定。
-    fn drop_aux_files(root: &Path) {
-        std::fs::write(root.join("config.xml"), b"<config/>").unwrap();
-        std::fs::write(root.join("README.md"), b"# md").unwrap();
-        std::fs::write(root.join("备注.txt"), b"note").unwrap();
-    }
-
-    #[test]
-    fn standard2_ignores_aux_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &FACEPACK_DIRS);
-        drop_aux_files(tmp.path());
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.missing.len()),
-            (2, "complete", 0)
-        );
-    }
-
-    #[test]
-    fn standard3_fixable_ignores_aux_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]);
-        drop_aux_files(tmp.path());
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.expected_total),
-            (3, "fixable", 62)
-        );
-    }
-
-    #[test]
-    fn standard1_complete_with_aux_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
-        drop_aux_files(tmp.path());
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
-    }
-
-    #[test]
-    fn scan_images_core_flat_and_standard2() {
-        let cfg = RuleConfig::builtin();
-        // 平铺包：根 3 图 → (3, 1)
-        let tmp = tempfile::tempdir().unwrap();
-        for i in 0..3 {
-            std::fs::write(tmp.path().join(format!("f{i}.png")), b"png").unwrap();
-        }
-        let (total, standard, _) = scan_images_core(tmp.path().to_str().unwrap(), &cfg).unwrap();
-        assert_eq!((total, standard), (3, 1));
-        // 14 目录包：各目录图数之和 → (28, 2)
-        let tmp2 = tempfile::tempdir().unwrap();
-        for eth in FACEPACK_DIRS {
-            let d = tmp2.path().join(eth);
-            std::fs::create_dir_all(&d).unwrap();
-            for i in 0..2 {
-                std::fs::write(d.join(format!("e{i}.png")), b"png").unwrap();
-            }
-        }
-        let (total, standard, _) = scan_images_core(tmp2.path().to_str().unwrap(), &cfg).unwrap();
-        assert_eq!((total, standard), (28, 2));
-    }
-
     #[test]
     fn scan_rtf_core_parses_summary() {
         let dir = tempfile::tempdir().unwrap();
@@ -1362,77 +940,6 @@ mod tests {
         std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
         let err = scan_rtf_core(bad.to_str().unwrap(), &logger).err().unwrap();
         assert!(err.contains("RTF 格式不合法"), "{err}");
-    }
-
-    #[test]
-    fn query_players_core_filters_newgan() {
-        // 随机人筛选按 r- 前缀判定：None=全量，Some(true)=仅随机人，Some(false)=仅真实球员。
-        let mk = |uid: &str, name: &str| PlayerRecord {
-            uid: uid.into(),
-            name: name.into(),
-            ..Default::default()
-        };
-        let rows = vec![mk("r-100001", "随机人甲"), mk("2000472008", "真实球员乙")];
-        let q = |newgan: Option<bool>| PlayerQuery {
-            offset: 0,
-            limit: 200,
-            search: String::new(),
-            sort_key: "uid".into(),
-            sort_desc: false,
-            newgan,
-        };
-        assert_eq!(query_players_core(rows.clone(), &q(None)).total, 2);
-        let yes = query_players_core(rows.clone(), &q(Some(true)));
-        assert_eq!(yes.total, 1);
-        assert_eq!(yes.items[0].uid, "r-100001");
-        let no = query_players_core(rows, &q(Some(false)));
-        assert_eq!(no.total, 1);
-        assert_eq!(no.items[0].name, "真实球员乙");
-    }
-
-    #[test]
-    fn query_snapshot_core_filters_paginates_resolves() {
-        let tmp = tempfile::tempdir().unwrap();
-        let eth = tmp.path().join("SpanMed");
-        std::fs::create_dir_all(&eth).unwrap();
-        std::fs::write(eth.join("img1.png"), b"png").unwrap();
-        let entries = vec![
-            MappingEntry {
-                uid: "r-1001".into(),
-                ethnicity: "SpanMed".into(),
-                image: "img1".into(),
-            },
-            MappingEntry {
-                uid: "2000472008".into(),
-                ethnicity: String::new(),
-                image: "ghost".into(),
-            },
-        ];
-        let root = tmp.path().to_str().unwrap();
-        let q = |offset: usize, limit: usize, search: &str| SnapshotQuery {
-            offset,
-            limit,
-            search: search.into(),
-        };
-        // 全量：rel_path 复原 from 原文；能找到的图片解析出绝对路径，找不到的为 None。
-        let all = query_snapshot_core(&entries, root, &q(0, 10, ""));
-        assert_eq!(all.total, 2);
-        assert_eq!(all.items[0].rel_path, "SpanMed/img1");
-        assert!(all.items[0]
-            .image_path
-            .as_deref()
-            .unwrap()
-            .ends_with("img1.png"));
-        assert_eq!(all.items[1].rel_path, "ghost"); // 平铺条目无目录前缀
-        assert_eq!(all.items[1].image_path, None);
-        // UID 子串筛选。
-        let hit = query_snapshot_core(&entries, root, &q(0, 10, "1001"));
-        assert_eq!(hit.total, 1);
-        assert_eq!(hit.items[0].uid, "r-1001");
-        // 翻页：limit=1 时第 2 页恰好是第二条。
-        let page2 = query_snapshot_core(&entries, root, &q(1, 1, ""));
-        assert_eq!(page2.items.len(), 1);
-        assert_eq!(page2.items[0].uid, "2000472008");
     }
 
     #[test]
@@ -1477,16 +984,5 @@ mod tests {
         assert!(!snap_path.is_file());
         let got = cache.lock().unwrap();
         assert_eq!(got.as_ref().unwrap().xml_path, "old_snapshot.xml");
-    }
-
-    #[test]
-    fn check_integrity_ignores_junk_dirs() {
-        // __MACOSX / .git 等垃圾目录不参与判定：平铺包不因它们误判 Unknown。
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
-        std::fs::create_dir(tmp.path().join("__MACOSX")).unwrap();
-        std::fs::create_dir(tmp.path().join(".git")).unwrap();
-        let r = check_integrity_core(tmp.path().to_str().unwrap(), &RuleConfig::builtin());
-        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
     }
 }

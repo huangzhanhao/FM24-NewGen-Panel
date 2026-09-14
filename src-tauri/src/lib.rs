@@ -16,6 +16,7 @@ mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（F
 mod json_store;      // JSON 配置的原子读写
 mod logger;          // 日志系统（log 门面 + 官方插件管道；自研内存缓冲与批量事件见模块头）
 mod paths;           // 路径规范化工具
+mod paging;          // 通用分页契约（日志/名单/快照预览共用 total+items）
 mod profile_manager; // 存档（Profile）与头像包（组）管理
 mod replace_flow;    // 「Replace Faces」整条流水线
 mod rtf_scanner;     // RTF 扫描器：识别并解析 FM 导出的 RTF 名单（基础/拓展球员/拓展职员）

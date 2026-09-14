@@ -4,6 +4,7 @@
 //!   <record from="种族目录/图片名" to="graphics/pictures/person/<UID>/portrait"/>
 //! 即「把某张图片用于某个 UID 的球员头像」。本模块负责全量生成、整体解析、单行替换与滚动备份。
 use crate::assets::CONFIG_TEMPLATE;
+use crate::paging::PageResult;
 use crate::rtf_scanner::NEWGAN_UID_PREFIX;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -162,14 +163,14 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
 /// 包根图片 → 目录为空串；子/孙目录图片 → 相对包根的目录路径，多级用 "/" 分隔（如 "MENA/sub"）。
 /// 包外路径与不存在的文件一律返回 None——旧版对取不到相对路径的情况会退化成最后一级目录名，
 /// 把包外图片也写进 config.xml，FM 读不到那张图还污染映射表，故按「单人微调只认包内图片」收紧。
-/// 词干用 file_stem，与 facepack_scanner::scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
+/// 词干走 facepack_scanner::image_stem 唯一口径，与 scan_pack 的 root_images 同规则（"a.1.png" → "a.1"）。
 pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(String, String)> {
     let p = Path::new(image_path);
     let ext = p.extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
         return None;
     }
-    let image = p.file_stem()?.to_string_lossy().to_string();
+    let image = crate::facepack_scanner::image_stem(image_path)?;
     if image.starts_with('.') {
         return None;
     } // 拒收 ._x.png 等隐藏名，与池侧口径一致
@@ -207,6 +208,12 @@ pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Optio
         }
     }
     None // 三种扩展名都没找到
+}
+
+/// 「头像」列原文是否为裸词干（无路径分隔符、无扩展名）：只有裸词干才允许在头像包里递归兜底找同名图；
+/// 带路径/带扩展名的输入已按其指定位置探测过，不再递归（避免歧义命中）。
+pub fn is_bare_stem(avatar: &str) -> bool {
+    !avatar.contains('/') && !avatar.contains('\\') && Path::new(avatar).extension().is_none()
 }
 
 /// 解析名单「头像」列原文为头像包内的实际图片文件（名单预览悬停/点击预览用）。
@@ -257,6 +264,52 @@ pub fn resolve_avatar_path(img_dir: &Path, avatar: &str) -> Option<String> {
 pub fn with_newgan_prefix_variants(uid: &str) -> [String; 2] {
     let prefixed = format!("{NEWGAN_UID_PREFIX}{uid}");
     [uid.to_string(), prefixed]
+}
+
+/// 快照预览的一行（对应前端 SnapshotEntry）：UID + 头像相对路径（from 原文，平铺包无目录前缀）
+/// + 按当前展示组头像包解析出的实际图片路径（包内找不到为 None/null）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotEntry {
+    pub uid: String,
+    pub rel_path: String,
+    pub image_path: Option<String>,
+}
+
+/// 快照预览分页查询参数（search 按 UID 子串筛选，空串=不筛选）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotQuery {
+    pub offset: usize,
+    pub limit: usize,
+    pub search: String,
+}
+
+/// 快照预览的筛选/分页/图片解析（纯逻辑，不碰后端状态）：每条图片解析最多探测 png/jpg/jpeg
+/// 三种扩展名，且仅对当前页的条目执行——整表几万条逐一探测文件开销太大，按页解析才现实。
+pub fn query_snapshot_page(
+    entries: &[MappingEntry],
+    img_dir: &str,
+    query: &SnapshotQuery,
+) -> PageResult<SnapshotEntry> {
+    let search = query.search.trim().to_lowercase();
+    let matched: Vec<&MappingEntry> = entries
+        .iter()
+        .filter(|e| search.is_empty() || e.uid.to_lowercase().contains(&search))
+        .collect();
+    let total = matched.len();
+    let root = Path::new(img_dir);
+    let items = matched
+        .into_iter()
+        .skip(query.offset)
+        .take(query.limit)
+        .map(|e| SnapshotEntry {
+            uid: e.uid.clone(),
+            rel_path: record_from(&e.ethnicity, &e.image),
+            image_path: resolve_image_file(root, &e.ethnicity, &e.image),
+        })
+        .collect();
+    PageResult { total, items }
 }
 
 #[cfg(test)]
@@ -579,5 +632,50 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn query_snapshot_page_filters_paginates_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let eth = tmp.path().join("SpanMed");
+        std::fs::create_dir_all(&eth).unwrap();
+        std::fs::write(eth.join("img1.png"), b"png").unwrap();
+        let entries = vec![
+            MappingEntry {
+                uid: "r-1001".into(),
+                ethnicity: "SpanMed".into(),
+                image: "img1".into(),
+            },
+            MappingEntry {
+                uid: "2000472008".into(),
+                ethnicity: String::new(),
+                image: "ghost".into(),
+            },
+        ];
+        let root = tmp.path().to_str().unwrap();
+        let q = |offset: usize, limit: usize, search: &str| SnapshotQuery {
+            offset,
+            limit,
+            search: search.into(),
+        };
+        // 全量：rel_path 复原 from 原文；能找到的图片解析出绝对路径，找不到的为 None。
+        let all = query_snapshot_page(&entries, root, &q(0, 10, ""));
+        assert_eq!(all.total, 2);
+        assert_eq!(all.items[0].rel_path, "SpanMed/img1");
+        assert!(all.items[0]
+            .image_path
+            .as_deref()
+            .unwrap()
+            .ends_with("img1.png"));
+        assert_eq!(all.items[1].rel_path, "ghost"); // 平铺条目无目录前缀
+        assert_eq!(all.items[1].image_path, None);
+        // UID 子串筛选。
+        let hit = query_snapshot_page(&entries, root, &q(0, 10, "1001"));
+        assert_eq!(hit.total, 1);
+        assert_eq!(hit.items[0].uid, "r-1001");
+        // 翻页：limit=1 时第 2 页恰好是第二条。
+        let page2 = query_snapshot_page(&entries, root, &q(1, 1, ""));
+        assert_eq!(page2.items.len(), 1);
+        assert_eq!(page2.items[0].uid, "2000472008");
     }
 }

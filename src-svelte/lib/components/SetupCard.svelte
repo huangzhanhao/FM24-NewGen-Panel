@@ -13,14 +13,10 @@
   let integrity = $state<IntegrityResult | null>(null); // null = 未检查
   let ruleEditor = $state<{ openEditor: () => void } | null>(null); // 规则编辑对话框实例
 
-  const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
-  const busy = $derived(!!snap?.replacing); // 替换中时禁用按钮
-  // 浏览态：下拉选中的存档 ≠ 后端当前激活档——展示只读预览；
-  // 写「后端当前档」状态的操作（选择 RTF 等）禁用，读操作（检查完整性/扫描）自洽可用。
-  const browseMode = $derived(
-    !!snap &&
-      appStore.selectedProfile !== (appStore.snapshot?.currentProfile ?? ""),
-  );
+  // 展示态统一取自 store getter（核心规则单点维护）：snap 浏览态优先，busy/browseMode 全局一致。
+  const snap = $derived(appStore.displaySnapshot);
+  const busy = $derived(appStore.busy);
+  const browseMode = $derived(appStore.browseMode);
   // 完整时按命中的标准号给出中文标注（目录总数来自标准 FolderList，用户可配置）。
   const completeLabel = $derived(
     integrity?.standard === 1
@@ -111,13 +107,14 @@
     }
   }
 
-  /** 扫描RTF：解析当前 RTF 并填充名单预览缓存；摘要存入全局态（预览页据此显示随机人筛选），rosterVersion++ 触发名单预览刷新。 */
+  /** 扫描RTF：解析当前 RTF 并填充名单预览缓存；摘要存入全局态（预览页据此显示随机人筛选），rosterVersion++ 触发名单预览刷新。成功后切到名单预览 tab。 */
   async function scanRtf() {
     if (!snap?.currentRtf) return;
     try {
       appStore.lastRtfScan = await api.scanRtf();
       appStore.rosterReady = true; // 名单缓存已填充：名单预览据此渲染工具条
       appStore.rosterVersion++;
+      appStore.resultsView = 'table'; // 扫描成功：结果区切到「名单预览」，让用户直接看到扫描结果
     } catch (e) {
       await showError(e);
     }

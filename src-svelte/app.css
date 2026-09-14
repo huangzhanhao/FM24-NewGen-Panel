@@ -120,7 +120,7 @@ button { font: inherit; color: inherit; }
 .sidebar section { padding: 6px 12px; }
 .side-head {
   display: flex; justify-content: space-between; align-items: center;
-  margin: 10px 2px 7px; font-size: 11px; color: var(--text-3);
+  margin: 10px 0 7px; font-size: 11px; color: var(--text-3);
   letter-spacing: 1.2px; font-weight: 600;
 }
 .group-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -152,13 +152,17 @@ button { font: inherit; color: inherit; }
 }
 .g-rtf.ok { color: var(--ok); }
 .g-rtf.ok::before { background: var(--ok); }
-/* 组条目删除：默认中性，悬停转红（不再常驻红色） */
+/* 组条目删除「×」：与「＋」同尺寸（22×22 + 12px SVG），背景透明、常态无描边
+   （保留 1px 透明边框占位，悬停红描边出现时无布局跳动） */
 .group-list .icon-btn.danger {
-  align-self: center; display: grid; place-items: center;
-  width: 26px; padding: 0; font-size: 15px; color: var(--text-3);
-  border-radius: var(--radius-sm); background: none; border: none; cursor: pointer;
+  align-self: center;
+  border: 1px solid transparent; background: transparent; color: var(--text-2);
+  transition: color .14s, background-color .14s, border-color .14s;
 }
-.group-list .icon-btn.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.group-list .icon-btn.danger svg { width: 12px; height: 12px; }
+.group-list .icon-btn.danger:hover:not(:disabled) {
+  background: var(--danger-soft); border-color: var(--danger); color: var(--danger);
+}
 .side-foot {
   margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--hairline);
   display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
@@ -303,10 +307,19 @@ button.btn.big { padding: 10px 18px; font-size: 14px; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 .icon-btn {
   border: none; background: none; cursor: pointer; color: var(--text-3);
-  font-size: 14px; padding: 2px 6px; border-radius: var(--radius-sm);
+  font-size: 14px; padding: 0; border-radius: var(--radius-sm);
   width: 22px; height: 22px; display: grid; place-items: center;
 }
 .icon-btn:hover:not(:disabled) { background: var(--bg-raised); color: var(--text-1); }
+/* 区块标题右侧「＋」：幽灵小按钮（描边 + 浮起底），深/浅主题均清晰可辨；悬停转强调色 */
+.side-head .icon-btn {
+  border: 1px solid var(--hairline-2); background: var(--bg-raised); color: var(--text-2);
+  transition: color .14s, background-color .14s, border-color .14s;
+}
+.side-head .icon-btn svg { width: 12px; height: 12px; }
+.side-head .icon-btn:hover:not(:disabled) {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}
 .link {
   background: none; border: none; color: var(--text-2); cursor: pointer;
   padding: 0; font-size: 12px;
@@ -329,15 +342,22 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 [data-theme='light'] .seg3 button.active { box-shadow: 0 1px 3px rgba(23, 43, 77, .12), 0 0 0 1px var(--hairline); }
 .seg3 button:hover:not(.active) { color: var(--text-1); }
 
+/* 结果区 Tab 行：字号/位置/绿色标条对齐 .card-title；选中交互（强调色+下划线）保留 */
 .seg-tabs {
-  display: flex; gap: 2px; border-bottom: 1px solid var(--hairline);
-  margin: -2px 0 12px;
+  display: flex; align-items: center;
+  margin: 0 0 9px;
+}
+/* 与 .card-title::before 同款绿色标条 */
+.seg-tabs::before {
+  content: ''; width: 3px; height: 15px; border-radius: 2px; background: var(--accent);
+  margin-right: 9px;
 }
 .seg-tabs button {
-  border: none; background: none; padding: 9px 16px; cursor: pointer;
-  color: var(--text-3); border-bottom: 2px solid transparent; margin-bottom: -1px; font-size: 13px;
+  border: none; background: none; padding: 0 0 4px; margin-right: 18px; cursor: pointer;
+  color: var(--text-2); border-bottom: 2px solid transparent;
+  font-size: 14px; font-weight: 600;
 }
-.seg-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.seg-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
 .seg-tabs button:hover:not(.active) { color: var(--text-1); }
 
 /* B2 前的过渡样式：模式 chip 软底分段感 */

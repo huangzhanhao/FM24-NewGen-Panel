@@ -39,6 +39,28 @@ export const appStore = $state({
   /** 快照预览版本号：「读取快照」成功、或替换成功（后端同步快照）后 +1，
    *  触发 SnapshotPreview 重载（同路径重读也生效）。 */
   snapshotVersion: 0,
+
+  // ---- 展示态派生 getter（核心业务规则单点维护，各组件只消费，不再各自 $derived 一份）----
+  /** 展示用快照：浏览态优先（下拉预览未激活时用预览快照），否则用后端真实激活快照。
+   *  展示类组件（侧栏/当前任务卡/快照预览）用它取 currentGroup/currentRtf/configXml/groups。 */
+  get displaySnapshot(): AppSnapshot | null {
+    return this.profilePreview ?? this.snapshot;
+  },
+  /** 是否有替换正在进行：replacing 是后端全局运行标志（snapshot 与 preview 回传的都是同一个
+   *  state.running），故直接读激活快照即可，展示/操作类组件统一用它禁用按钮。 */
+  get busy(): boolean {
+    return !!this.snapshot?.replacing;
+  },
+  /** 浏览态：下拉选中的存档 ≠ 后端当前激活档（选中项尚未激活）。展示只读、写激活档的操作应禁用。 */
+  get browseMode(): boolean {
+    const active = this.snapshot;
+    return !!active && this.selectedProfile !== active.currentProfile;
+  },
+  /** 替换就绪：作用于后端激活档——「已选 Profile + 已选头像包 + 已设 RTF」三者齐备才允许开始替换。 */
+  get replaceReady(): boolean {
+    const s = this.snapshot;
+    return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && !!s.currentRtf;
+  },
 });
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */

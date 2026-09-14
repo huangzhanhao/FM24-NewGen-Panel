@@ -58,5 +58,5 @@ export const api = {
   // resolveAvatar：把名单「头像」列原文解析成当前头像包内的图片绝对路径（找不到为 null）。
   resolveAvatar: (avatar: string) => invoke<string | null>('resolve_avatar', { avatar }),
   queryLogs: (level: string, only: boolean, offset: number, limit: number) =>
-    invoke<{ total: number; items: LogLine[] }>('query_logs', { level, only, offset, limit }),
+    invoke<PageResult<LogLine>>('query_logs', { level, only, offset, limit }),
 };

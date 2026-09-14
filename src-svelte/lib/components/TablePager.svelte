@@ -28,7 +28,7 @@
 <div class="pager">
   <button
     class="btn"
-    onclick={() => (page = 0)}
+    onclick={() => (page = Math.max(0, page - 1))}
     disabled={page === 0}
     title={t.table.prevPage}
   >

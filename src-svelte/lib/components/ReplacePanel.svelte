@@ -19,19 +19,11 @@
   let filterNewgan = $state(true);
   let saveBackup = $state(true);
 
-  const snap = $derived(appStore.snapshot); // 替换只作用于后端当前激活档（浏览态禁用）
-  const busy = $derived(!!snap?.replacing);
-  // 浏览态：下拉选中的存档 ≠ 当前激活档——替换会作用于激活档，为避免误操作禁用替换。
-  const browseMode = $derived(
-    !!snap && appStore.selectedProfile !== snap.currentProfile,
-  );
-  // ready：只有“已选 Profile + 已选头像包 + 已设 RTF”都满足才允许开始替换。
-  const ready = $derived(
-    !!snap &&
-      snap.currentProfile !== "No Profile" &&
-      !!snap.currentGroup &&
-      !!snap.currentRtf,
-  );
+  // 替换只作用于后端当前激活档（浏览态禁用）；展示态统一取自 store getter。
+  const snap = $derived(appStore.snapshot);
+  const busy = $derived(appStore.busy);
+  const browseMode = $derived(appStore.browseMode);
+  const ready = $derived(appStore.replaceReady);
 
   /** 发起替换：先兜底校验目录完整性（识别三套标准），再调后端 start_replace。 */
   async function startReplace() {

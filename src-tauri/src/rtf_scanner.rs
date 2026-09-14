@@ -45,6 +45,7 @@
 //! parse 也严格：行级问题（国籍查不到、字段不合法）会丢弃该行并逐行记 Warn 日志，便于用户核对并
 //! 增删翻译表；整份文件是否合法已经在 detect 阶段检查过了。
 use crate::logger::LogSink;
+use crate::paging::PageResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -745,6 +746,54 @@ fn resolve_nat(value: &str) -> String {
     resolve_nationality(value)
         .map(|(_, code)| code)
         .unwrap_or_else(|| value.to_string())
+}
+
+/// 名单分页查询参数（前端传入；Deserialize，camelCase 与前端 types.ts 一致）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerQuery {
+    pub offset: usize,
+    pub limit: usize,
+    pub search: String,
+    pub sort_key: String,
+    pub sort_desc: bool,
+    pub newgan: Option<bool>, // 随机人筛选：None=任意 / Some(true)=仅随机人 / Some(false)=仅真实球员
+}
+
+/// 名单预览的搜索/随机人筛选/排序/分页（纯逻辑，不碰后端状态）。数据留在 Rust，IPC 只回当前页。
+/// 随机人筛选按 r- 前缀判定，与解析时加前缀、扫描摘要计数同一口径。
+pub fn query_page(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageResult<PlayerRecord> {
+    let search = query.search.to_lowercase();
+    if !search.is_empty() {
+        // UID/姓名/国籍任一包含搜索词即命中。
+        rows.retain(|r| {
+            r.uid.to_lowercase().contains(&search)
+                || r.name.to_lowercase().contains(&search)
+                || r.primary_nat.to_lowercase().contains(&search)
+        });
+    }
+    if let Some(want) = query.newgan {
+        rows.retain(|r| r.uid.starts_with(NEWGAN_UID_PREFIX) == want);
+    }
+    // 按前端指定的列排序；sort_desc 为 true 时反转。
+    rows.sort_by(|a, b| {
+        let ord = match query.sort_key.as_str() {
+            "name" => a.name.cmp(&b.name),
+            "primaryNat" => a.primary_nat.cmp(&b.primary_nat),
+            "ethnicityCode" => a.ethnicity_code.cmp(&b.ethnicity_code),
+            _ => a.uid.cmp(&b.uid),
+        };
+        if query.sort_desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+    let total = rows.len();
+    PageResult {
+        total,
+        items: rows.into_iter().skip(query.offset).take(query.limit).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -1491,5 +1540,31 @@ mod tests {
                 assert!(err.contains("RTF 格式不合法"), "{name}: {err}");
             }
         }
+    }
+
+    #[test]
+    fn query_page_filters_newgan() {
+        // 随机人筛选按 r- 前缀判定：None=全量，Some(true)=仅随机人，Some(false)=仅真实球员。
+        let mk = |uid: &str, name: &str| PlayerRecord {
+            uid: uid.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        let rows = vec![mk("r-100001", "随机人甲"), mk("2000472008", "真实球员乙")];
+        let q = |newgan: Option<bool>| PlayerQuery {
+            offset: 0,
+            limit: 200,
+            search: String::new(),
+            sort_key: "uid".into(),
+            sort_desc: false,
+            newgan,
+        };
+        assert_eq!(query_page(rows.clone(), &q(None)).total, 2);
+        let yes = query_page(rows.clone(), &q(Some(true)));
+        assert_eq!(yes.total, 1);
+        assert_eq!(yes.items[0].uid, "r-100001");
+        let no = query_page(rows, &q(Some(false)));
+        assert_eq!(no.total, 1);
+        assert_eq!(no.items[0].name, "真实球员乙");
     }
 }

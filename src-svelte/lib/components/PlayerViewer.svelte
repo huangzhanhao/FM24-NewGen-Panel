@@ -5,6 +5,7 @@
 <script lang="ts">
   import { open, message } from "@tauri-apps/plugin-dialog";
   import { api } from "../api";
+  import { loadImageBlobUrl } from "../images";
   import { t } from "../text"; // 全局文案常量
   import { appStore } from "../stores/app.svelte";
   import { icons } from "../icons";
@@ -34,10 +35,7 @@
       blobUrl = "";
     } // 先释放上一次的 blob，避免内存泄漏
     if (preview?.imagePath) {
-      const bytes = await api.readImage(preview.imagePath); // 拿到 ArrayBuffer
-      const ext = preview.imagePath.split(".").pop()?.toLowerCase() ?? "png"; // 推断扩展名
-      const mime = ext === "jpg" ? "image/jpeg" : `image/${ext}`; // jpg 的 MIME 是 image/jpeg
-      blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      blobUrl = await loadImageBlobUrl(preview.imagePath);
     }
   }
 

@@ -7,6 +7,7 @@
 //!      超集（含全部目录、可多出）或子集（有缺失）都算归属该标准，交叉/未知名 → Unknown。
 //!
 //! FolderList 来自 templates（用户可配置），本模块不硬编码任何目录清单。
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -82,10 +83,45 @@ pub struct PackScan {
     pub recursive_pools: BTreeMap<String, BTreeSet<String>>,
 }
 
+impl PackScan {
+    /// 图片总数口径（「扫描头像」用）：平铺包数根图，其余（含 Unknown 的子/孙目录）数递归全量池。
+    pub fn total_for(&self, layout: &PackLayout) -> usize {
+        if layout.is_flat() {
+            self.root_images.len()
+        } else {
+            self.recursive_pools.values().map(|s| s.len()).sum()
+        }
+    }
+
+    /// 裸词干递归兜底：在递归全量池里按目录字典序找第一个含该词干的目录，返回其相对路径。
+    /// 供「头像」列预览在包根未命中时到子/孙目录里找同名图（确定性行为）。
+    pub fn find_stem_dir(&self, stem: &str) -> Option<&String> {
+        self.recursive_pools
+            .iter()
+            .find(|(_, stems)| stems.contains(stem))
+            .map(|(dir, _)| dir)
+    }
+}
+
 /// 按扩展名判断是否图片文件（png/jpg/jpeg，大小写不敏感）。
-fn is_image_ext(name: &str) -> bool {
+pub fn is_image_ext(name: &str) -> bool {
     matches!(name.rsplit('.').next().map(|s| s.to_ascii_lowercase()).as_deref(),
              Some("png") | Some("jpg") | Some("jpeg"))
+}
+
+/// 图片词干的**唯一口径**：取 file_stem（"a.1.png" → "a.1"），扫描池与 xml_parser 解析/回填一致，
+/// 保证同一张图在各层只有一个身份。空词干返回 None（调用方另用 `!starts_with('.')` 排除隐藏文件）。
+pub fn image_stem(name: &str) -> Option<String> {
+    let stem = Path::new(name).file_stem()?.to_string_lossy().to_string();
+    if stem.is_empty() { None } else { Some(stem) }
+}
+
+/// 【旧口径，标准二 faces_map 专用，勿用于其他扫描路径】取首个 "." 之前的部分（"a.1.png" → "a"）。
+/// 与 image_stem 的 file_stem 规则不同：标准二 generic 路径历史上按此建立子目录图片索引，
+/// 改动会让既有标准二包的 faces_map 键漂移，故隔离保留于此并显式命名。
+fn legacy_face_stem(name: &str) -> Option<String> {
+    let stem = name.split('.').next().unwrap_or("").to_string();
+    if stem.is_empty() { None } else { Some(stem) }
 }
 
 /// 打包/系统垃圾目录：macOS 压缩包解出的 `__MACOSX`、各类 `.` 开头目录（.git 等）。
@@ -105,9 +141,7 @@ fn walk_recursive(dir: &Path, rel: String, pools: &mut BTreeMap<String, BTreeSet
                 let child = if rel.is_empty() { fname } else { format!("{rel}/{fname}") };
                 walk_recursive(&p, child, pools);
             } else if is_image_ext(&fname) && !fname.starts_with('.') {
-                let stem = Path::new(&fname).file_stem()
-                    .map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                if !stem.is_empty() { imgs.insert(stem); }
+                if let Some(stem) = image_stem(&fname) { imgs.insert(stem); }
             }
         }
     }
@@ -131,8 +165,7 @@ pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
                 for f in files.flatten() {
                     if f.path().is_file() {
                         let n = f.file_name().to_string_lossy().to_string();
-                        let stem = n.split('.').next().unwrap_or("").to_string();
-                        if !stem.is_empty() { imgs.insert(stem); }
+                        if let Some(stem) = legacy_face_stem(&n) { imgs.insert(stem); }
                     }
                 }
             }
@@ -142,16 +175,112 @@ pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
                 walk_recursive(&path, fname, &mut recursive_pools);
             }
         } else if is_image_ext(&fname) && !fname.starts_with('.') {
-            // 根图词干用 file_stem（与 parse_image_path_in_pack 同规则，"a.1.png"→"a.1"）；
+            // 根图词干走 image_stem 唯一口径（与 parse_image_path_in_pack 同规则，"a.1.png"→"a.1"）；
             // 跳过 . 开头文件（macOS AppleDouble 的 ._x.png 会以 "._x" 入池、污染 resolve）。
-            let stem = Path::new(&fname).file_stem()
-                .map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            if !stem.is_empty() { root_images.insert(stem); }
+            if let Some(stem) = image_stem(&fname) { root_images.insert(stem); }
         }
     }
     // 根目录图片也归入递归池（键 = 空串），全随机规则据此连根图一起抽。
     recursive_pools.entry(String::new()).or_default().extend(root_images.iter().cloned());
     Ok(PackScan { faces_map, root_images, recursive_pools })
+}
+
+/// 扫描结果的布局判定：垃圾目录（__MACOSX 等）不参与，与 FaceMapper::from_scan 同口径。
+/// 「扫描头像」与「建立映射索引」两处共用此前导，避免各自重列一遍 faces_map 过滤。
+pub fn classify_scan(scan: &PackScan, folder_lists: &[(u8, &Vec<String>)]) -> PackLayout {
+    let subdirs: BTreeSet<String> = scan
+        .faces_map
+        .keys()
+        .filter(|n| !is_junk_dir(n))
+        .cloned()
+        .collect();
+    classify(&subdirs, !scan.root_images.is_empty(), folder_lists)
+}
+
+/// 「扫描头像」核心（纯函数）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
+/// 标准号按 templates 的 FolderList 判定（用户可配置，不硬编码）；总数口径见 PackScan::total_for。
+pub fn scan_and_total(
+    img_dir: &str,
+    folder_lists: &[(u8, &Vec<String>)],
+) -> Result<(usize, u8, PackScan), String> {
+    let scan = scan_pack(img_dir)?;
+    let layout = classify_scan(&scan, folder_lists);
+    let total = scan.total_for(&layout);
+    Ok((total, layout.standard(), scan))
+}
+
+/// 「检查完整性」结果（对应前端 IntegrityResult）：命中的标准、可补全的缺失目录、多余目录等。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrityResult {
+    pub standard: u8,          // 命中的标准号（2=14 种族 / 3=细分…）；1=图片直铺；0=无法识别
+    pub status: String,        // "complete" | "fixable" | "unknown"
+    pub missing: Vec<String>,  // fixable 时可一键创建的缺失目录（按标准 FolderList 原顺序）
+    pub extra: Vec<String>,    // 包内多出、未在标准 FolderList 配置的目录（不参与抽图）
+    pub found: usize,          // 已命中的子目录数
+    pub expected_total: usize, // 该标准 FolderList 的目录总数（标准一/无法识别为 0）
+}
+
+/// 检查完整性（纯函数，读盘但无副作用）：轻扫描子目录名 + 探测根是否有图 → classify →
+/// 汇总缺失/多余目录。判定与缺失/多余计算全部以标准 FolderList 为基准（用户改 json 即改判定口径）。
+pub fn check_integrity(img_dir: &str, folder_lists: &[(u8, &Vec<String>)]) -> IntegrityResult {
+    let mut subdirs: BTreeSet<String> = BTreeSet::new();
+    let mut has_images = false;
+    if let Ok(rd) = std::fs::read_dir(img_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let fname = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !is_junk_dir(&fname) {
+                    subdirs.insert(fname);
+                } // 跳过 __MACOSX 等
+            } else if !fname.starts_with('.') && is_image_ext(&fname) {
+                has_images = true; // 跳过 ._x.png 等隐藏文件，与 scan_pack 口径一致
+            }
+        }
+    }
+
+    let layout = classify(&subdirs, has_images, folder_lists);
+    let standard = layout.standard();
+    let status = match layout {
+        PackLayout::Flat => "complete",
+        PackLayout::Empty | PackLayout::Unknown => "unknown",
+        PackLayout::Standard { complete: true, .. } => "complete",
+        PackLayout::Standard { .. } => "fixable",
+    };
+    // missing / extra / expected_total 按归属标准的 FolderList 计算：
+    // missing = FolderList 中尚未出现的目录（可一键补全）；extra = 包内多出的未配置目录（不进抽图池）。
+    let (missing, extra, expected_total) = match &layout {
+        PackLayout::Standard { standard: n, .. } => {
+            let folders = folder_lists
+                .iter()
+                .find(|(t, _)| t == n)
+                .map(|(_, f)| (*f).clone())
+                .unwrap_or_default();
+            let missing = folders
+                .iter()
+                .filter(|d| !subdirs.contains(*d))
+                .cloned()
+                .collect();
+            let extra: Vec<String> = subdirs
+                .iter()
+                .filter(|d| !folders.contains(*d))
+                .cloned()
+                .collect();
+            (missing, extra, folders.len())
+        }
+        _ => (Vec::new(), Vec::new(), 0),
+    };
+    // 标准一/无法识别的 found 与现状一致：标准一记 0，其余记命中的子目录数。
+    let found = if standard == 1 { 0 } else { subdirs.len() };
+    IntegrityResult {
+        standard,
+        status: status.into(),
+        missing,
+        extra,
+        found,
+        expected_total,
+    }
 }
 
 #[cfg(test)]
@@ -287,5 +416,209 @@ mod tests {
         assert_eq!(pools.get("weirdA/sub").map(|s| s.iter().cloned().collect::<Vec<_>>()),
                    Some(vec!["j.1".to_string()]));
         assert!(!pools.contains_key("weirdA/__MACOSX")); // 垃圾目录整棵跳过
+    }
+
+    // ---------------- 完整性检查 / 扫描总数（原 commands.rs，随 check_integrity/scan_and_total 下沉） ----------------
+
+    /// 在临时目录下按 names 建子目录。
+    fn mk_dirs(root: &Path, names: &[&str]) {
+        for n in names {
+            std::fs::create_dir_all(root.join(n)).unwrap();
+        }
+    }
+
+    /// 在根目录放标准说明里点名的辅助文件（config.xml / .md / 备注.txt），验证其不参与判定。
+    fn drop_aux_files(root: &Path) {
+        std::fs::write(root.join("config.xml"), b"<config/>").unwrap();
+        std::fs::write(root.join("README.md"), b"# md").unwrap();
+        std::fs::write(root.join("备注.txt"), b"note").unwrap();
+    }
+
+    /// 以内置 FolderList 判定完整性（cfg 只活在函数内，folder_lists 借用它）。
+    fn integrity(dir: &Path) -> IntegrityResult {
+        let cfg = crate::templates::RuleConfig::builtin();
+        check_integrity(dir.to_str().unwrap(), &cfg.folder_lists())
+    }
+
+    /// 以内置 FolderList 扫描并计数。
+    fn scan_total(dir: &Path) -> Result<(usize, u8, PackScan), String> {
+        let cfg = crate::templates::RuleConfig::builtin();
+        scan_and_total(dir.to_str().unwrap(), &cfg.folder_lists())
+    }
+
+    #[test]
+    fn standard1_images_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
+        let r = integrity(tmp.path());
+        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
+    }
+
+    #[test]
+    fn empty_dir_is_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = integrity(tmp.path());
+        assert_eq!((r.standard, r.status.as_str()), (1, "unknown"));
+    }
+
+    #[test]
+    fn standard2_exact_regardless_of_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut shuffled: Vec<&str> = FACEPACK_DIRS.to_vec();
+        shuffled.reverse(); // 顺序不同仍应命中
+        mk_dirs(tmp.path(), &shuffled);
+        std::fs::write(tmp.path().join(FACEPACK_DIRS[0]).join("a.jpg"), b"x").unwrap();
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.missing.len(), r.expected_total),
+            (2, "complete", 0, 14)
+        );
+    }
+
+    #[test]
+    fn standard3_exact() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 按内置标准三 FolderList（62 目录）建包 → 恰好相等 → complete。
+        let cfg = crate::templates::RuleConfig::builtin();
+        mk_dirs(
+            tmp.path(),
+            &cfg.standard3.folder_list.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.expected_total),
+            (3, "complete", 62)
+        );
+        assert!(r.extra.is_empty());
+    }
+
+    #[test]
+    fn standard3_superset_still_matches_with_extra() {
+        // 62 目录全在 + 多出清单外的未使用目录 → 仍判标准三 complete；多余目录进 extra、不参与抽图。
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::templates::RuleConfig::builtin();
+        let mut dirs: Vec<String> = cfg.standard3.folder_list.clone();
+        dirs.push("Scandinavian".into()); // 清单外
+        dirs.push("SomeUnusedDir".into()); // 清单外
+        mk_dirs(tmp.path(), &dirs.iter().map(String::as_str).collect::<Vec<_>>());
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.expected_total),
+            (3, "complete", 62)
+        );
+        assert_eq!(
+            r.extra,
+            vec!["Scandinavian".to_string(), "SomeUnusedDir".to_string()]
+        );
+    }
+
+    #[test]
+    fn standard2_fixable_reports_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 标准二去掉最后一个（YugoGreek）→ 13 个，应判 fixable 且缺失正好是 YugoGreek。
+        let present: Vec<&str> = FACEPACK_DIRS[..13].to_vec();
+        mk_dirs(tmp.path(), &present);
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.found, r.expected_total),
+            (2, "fixable", 13, 14)
+        );
+        assert_eq!(r.missing, vec!["YugoGreek".to_string()]);
+    }
+
+    #[test]
+    fn standard3_fixable_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 标准三 FolderList(62)
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.found, r.expected_total),
+            (3, "fixable", 3, 62)
+        );
+        assert_eq!(r.missing.len(), 59); // 62 - 3
+        assert!(!r.missing.contains(&"China".to_string()));
+    }
+
+    #[test]
+    fn unknown_when_unrecognized_name_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &["African", "Asian", "NotARealRace"]);
+        let r = integrity(tmp.path());
+        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
+    }
+
+    #[test]
+    fn unknown_when_mixing_two_sets() {
+        let tmp = tempfile::tempdir().unwrap();
+        // African 属 14 组、China 属 65 组，跨两套混用 → 无法识别。
+        mk_dirs(tmp.path(), &["African", "China"]);
+        let r = integrity(tmp.path());
+        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
+    }
+
+    #[test]
+    fn standard2_ignores_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &FACEPACK_DIRS);
+        drop_aux_files(tmp.path());
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.missing.len()),
+            (2, "complete", 0)
+        );
+    }
+
+    #[test]
+    fn standard3_fixable_ignores_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]);
+        drop_aux_files(tmp.path());
+        let r = integrity(tmp.path());
+        assert_eq!(
+            (r.standard, r.status.as_str(), r.expected_total),
+            (3, "fixable", 62)
+        );
+    }
+
+    #[test]
+    fn standard1_complete_with_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
+        drop_aux_files(tmp.path());
+        let r = integrity(tmp.path());
+        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
+    }
+
+    #[test]
+    fn check_integrity_ignores_junk_dirs() {
+        // __MACOSX / .git 等垃圾目录不参与判定：平铺包不因它们误判 Unknown。
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
+        std::fs::create_dir(tmp.path().join("__MACOSX")).unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let r = integrity(tmp.path());
+        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
+    }
+
+    #[test]
+    fn scan_and_total_flat_and_standard2() {
+        // 平铺包：根 3 图 → (3, 1)
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            std::fs::write(tmp.path().join(format!("f{i}.png")), b"png").unwrap();
+        }
+        let (total, standard, _) = scan_total(tmp.path()).unwrap();
+        assert_eq!((total, standard), (3, 1));
+        // 14 目录包：各目录图数之和 → (28, 2)
+        let tmp2 = tempfile::tempdir().unwrap();
+        for eth in FACEPACK_DIRS {
+            let d = tmp2.path().join(eth);
+            std::fs::create_dir_all(&d).unwrap();
+            for i in 0..2 {
+                std::fs::write(d.join(format!("e{i}.png")), b"png").unwrap();
+            }
+        }
+        let (total, standard, _) = scan_total(tmp2.path()).unwrap();
+        assert_eq!((total, standard), (28, 2));
     }
 }

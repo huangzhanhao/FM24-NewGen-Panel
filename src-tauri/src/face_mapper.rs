@@ -52,12 +52,8 @@ impl FaceMapper {
     /// 【借用而非所有权】内部只读 scan（classify 与 for_layout 都吃 &PackScan），
     /// 大包索引（数万图片名）一份克隆就是几十 MB 白复制，不强制调用方克隆。
     pub fn from_scan(img_dir: &str, scan: &PackScan, config: &RuleConfig) -> Result<Self, String> {
-        // classify 输入剔除垃圾目录（__MACOSX 等不参与判定）。
-        let subdirs: BTreeSet<String> = scan.faces_map.keys()
-            .filter(|n| !facepack_scanner::is_junk_dir(n))
-            .cloned()
-            .collect();
-        let layout = facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &config.folder_lists());
+        // classify 输入剔除垃圾目录（__MACOSX 等不参与判定）——与「扫描头像」共用同一前导。
+        let layout = facepack_scanner::classify_scan(scan, &config.folder_lists());
         Ok(Self {
             img_dir: img_dir.to_string(),
             layout,

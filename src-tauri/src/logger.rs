@@ -58,13 +58,8 @@ pub struct LogLine {
     pub message: String, // 日志正文
 }
 
-/// 分页查询的返回体：总条数 + 当前页的条目（前端日志面板按需拉取）。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct LogPage {
-    pub total: usize,        // 过滤后总条数（用于前端分页）
-    pub items: Vec<LogLine>, // 当前页实际返回的条目
-}
+/// 分页查询的返回体：复用通用分页契约 `PageResult<LogLine>`（前端日志面板按需拉取）。
+pub type LogPage = crate::paging::PageResult<LogLine>;
 
 /// 内存环形缓冲 + 事件通道（官方生态没有的部分，自研补齐）。
 /// 字段线程安全：Mutex 保护缓冲，Sender 可跨线程克隆发送。

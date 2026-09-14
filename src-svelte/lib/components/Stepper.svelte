@@ -32,19 +32,10 @@
     return "";
   }
 
-  // 以下三个派生状态原属「替换执行」卡片；提示内容上移到步骤引导下方后随之迁移，判定逻辑保持不变。
+  // 以下三个展示态原属「替换执行」卡片；提示内容上移到步骤引导下方后随之迁移，统一取自 store getter。
   const snap = $derived(appStore.snapshot);
-  // 浏览态：下拉选中的存档 ≠ 当前激活档——提示替换只作用于激活档。
-  const browseMode = $derived(
-    !!snap && appStore.selectedProfile !== snap.currentProfile,
-  );
-  // ready：只有“已选 Profile + 已选头像包 + 已设 RTF”都满足才算就绪。
-  const ready = $derived(
-    !!snap &&
-      snap.currentProfile !== "No Profile" &&
-      !!snap.currentGroup &&
-      !!snap.currentRtf,
-  );
+  const browseMode = $derived(appStore.browseMode);
+  const ready = $derived(appStore.replaceReady);
   // 未就绪原因（引导用户补全）：列出三个可能缺失的项。
   const missing = $derived(
     [

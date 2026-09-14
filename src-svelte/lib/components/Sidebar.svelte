@@ -16,13 +16,10 @@
   // bind:this 把 <select> 的真实 DOM 元素引用存进这个变量，方便失败时手动回退选中项。
   let profileSelect = $state<HTMLSelectElement | null>(null);
 
-  const snap = $derived(appStore.profilePreview ?? appStore.snapshot); // 展示层：浏览态优先
-  const busy = $derived(!!snap?.replacing); // 替换中时禁用大部分操作
-  // 浏览态：下拉选中的存档 ≠ 后端当前激活档（选中项未被激活）。
-  const browseMode = $derived(
-    !!snap &&
-      appStore.selectedProfile !== (appStore.snapshot?.currentProfile ?? ""),
-  );
+  // 展示态统一取自 store getter（核心规则单点维护）。
+  const snap = $derived(appStore.displaySnapshot);
+  const busy = $derived(appStore.busy);
+  const browseMode = $derived(appStore.browseMode);
   // selectedIsActive：下拉选中的存档是否就是当前激活档（激活按钮灰/蓝态的依据）。
   const selectedIsActive = $derived(
     !!appStore.snapshot &&
@@ -175,8 +172,18 @@
       <button
         class="icon-btn"
         title={t.sidebar.newProfileBtn}
-        onclick={() => (creating = !creating)}>＋</button
+        onclick={() => (creating = !creating)}
       >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true">{@html icons.plus.body}</svg
+        >
+      </button>
     </div>
     <!-- 新建行：仅当 creating 为真时显示（输入框 + 创建按钮）。 -->
     {#if creating}
@@ -292,8 +299,18 @@
                 ? t.sidebar.deleteGroupBrowseHint
                 : t.sidebar.deleteGroupBtn}
               onclick={() => deleteGroup(g.imgDir)}
-              disabled={busy || browseMode}>×</button
+              disabled={busy || browseMode}
             >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true">{@html icons.x.body}</svg
+              >
+            </button>
           </li>
         {/each}
       </ul>

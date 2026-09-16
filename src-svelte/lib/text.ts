@@ -47,7 +47,7 @@ export const t = {
     activated: '已激活',
     deleteCurrentProfile: '删除当前 Profile',
     noProfileNoActivate: 'No Profile 为启动缺省档，未激活',
-    noProfileNoDelete: 'No Profile 为缺省档，无法删除',
+    noProfileNoDelete: '缺省档不可删',
     activeAlreadyHint: '当前已激活该存档',
     activateBtn: '激活',
     activateHint: (name: string) => `激活存档「${name}」并切换其组配置与映射`,
@@ -205,6 +205,11 @@ export const t = {
   viewer: {
     title: '球员预览',
     hint: '输入 UID 回车预览',
+    /** UID 输入框 placeholder（示例教格式，全称说明在右侧 uidTip） */
+    uidPlaceholder: '如 r-2000472008',
+    searchBtn: '搜索',
+    /** UID 输入框右侧的文本提示：回车等价点搜索 + r- 前缀可省略 */
+    uidTip: '回车快速搜索 · 随机人 UID 可省略 r- 前缀',
     colMapping: '当前映射',
     /** 拓展名单第 19 列起的用户自定义列（后端只保留原文，无表头名，按序号命名）。 */
     extraField: (n: number) => `自定义${n}`,

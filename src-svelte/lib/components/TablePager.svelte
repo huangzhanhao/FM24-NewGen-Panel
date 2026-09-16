@@ -101,10 +101,11 @@
     padding-left: 8px;
     border-left: 1px solid var(--hairline);
   }
-  /* 页码输入框：紧凑居中（覆盖全局 text 输入框的 7px 纵向内边距与默认宽度） */
+  /* 页码输入框：紧凑居中（覆盖全局 text 输入框的 7px 纵向内边距、默认宽度与 30px 控件高度） */
   .pager-jump .jump-input {
     width: 44px;
     min-width: 0;
+    min-height: 0;
     padding: 3px 6px;
     text-align: center;
     font-size: 12px;

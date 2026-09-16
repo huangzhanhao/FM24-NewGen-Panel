@@ -34,10 +34,13 @@
   }
 </script>
 
+<!-- 窗口级 Esc 监听（svelte:window 不能放在 {#if} 内）；抽屉未开时短路 -->
+<svelte:window onkeydown={(e) => e.key === 'Escape' && ui.logOpen && (ui.logOpen = false)} />
+
 <!-- {#if ui.logOpen}：只有抽屉打开时才渲染以下所有内容。 -->
 {#if ui.logOpen}
-  <!-- 半透明遮罩：点它或按 Esc 关闭抽屉。role/tabindex/aria-label 是为了无障碍与键盘可聚焦。 -->
-  <div class="drawer-backdrop" role="button" tabindex={0} aria-label={t.log.closeAria} onclick={() => (ui.logOpen = false)} onkeydown={(e) => e.key === 'Escape' && (ui.logOpen = false)}></div>
+  <!-- 半透明遮罩：点击关闭；键盘关闭由上面的窗口级 Esc 承担，故遮罩本身仅作展示层。 -->
+  <div class="drawer-backdrop" role="presentation" onclick={() => (ui.logOpen = false)}></div>
   <aside class="drawer">
     <!-- 顶部工具条：标题 + “仅该级别”开关 + 级别下拉 + 打开文件/清空/关闭按钮。 -->
     <div class="drawer-tools">

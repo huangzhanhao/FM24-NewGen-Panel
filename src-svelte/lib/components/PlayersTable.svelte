@@ -53,6 +53,19 @@
       newgan: newganQuery === "any" ? null : newganQuery === "yes",
     });
   }
+  // 名单版本变化（「扫描RTF」成功 / 替换结束）：回到第 1 页并清空搜索、排序、随机人筛选。
+  // 与 SnapshotPreview 同款口径——新名单从头看，旧页码/旧筛选不残留；下方加载 effect
+  // 已追踪 rosterVersion，会自动按重置后的参数重新请求。
+  $effect(() => {
+    void appStore.rosterVersion;
+    result = null;
+    page = 0;
+    search = "";
+    sortKey = "uid";
+    sortDesc = false;
+    newganFilter = "any";
+  });
+
   // 参数变化自动刷新：显式读取依赖以建立追踪，请求做 300ms 防抖。
   // rosterVersion：名单缓存被填充/清空时 +1（「扫描RTF」成功、替换结束），据此重载当前页。
   $effect(() => {
@@ -76,9 +89,14 @@
       sortDesc = false;
     }
   }
-  // 表头箭头指示：当前排序列显示 ↑/↓，其余列为空。
-  const arrow = (key: string) =>
-    sortKey === key ? (sortDesc ? " ↓" : " ↑") : "";
+  /** 可排序表头的键盘操作：Enter/Space 等价点击（th 本身不是按钮，
+   *  靠 role=button + tabindex=0 + 本处理函数保证键盘可达）。 */
+  function onSortKey(e: KeyboardEvent, key: string) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      sortBy(key);
+    }
+  }
 
   // 是否含详细信息：当前页任一条有 detailed 就额外渲染那几列（适配基础/详细两种名单）。
   const hasDetailed = $derived(!!result?.items.some((r) => r.detailed));
@@ -114,6 +132,23 @@
   // 头像气泡实例（bind:this）：行内触发按钮把鼠标/键盘事件接到它的 open/scheduleClose/close 上。
   let avatarPop = $state<AvatarPopoverApi | null>(null);
 </script>
+
+{#snippet sortIcon(key: string)}
+  <!-- 当前排序列的方向指示：统一线性 chevron 图标（替代旧 ↑/↓ 字符） -->
+  {#if sortKey === key}
+    <svg
+      class="sort-ic"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      >{@html (sortDesc ? icons.chevronDown : icons.chevronUp).body}</svg
+    >
+  {/if}
+{/snippet}
 
 <!-- 工具条：搜索框（放大镜图标）+ 随机人筛选 + 总条数 + 右侧分页；缓存未填上时不渲染
      （与快照预览的 {#if readable} 同款）。组件根是纵向 flex，撑满卡片正文高度。 -->
@@ -163,7 +198,18 @@
 
   <!-- 缓存未填上 → 引导空态；有数据 → 表格；已填上但当前筛选无结果 → 提示文案（与快照预览同款三层结构）。 -->
   {#if !readable}
-    <div class="empty">{t.table.emptyHint}</div>
+    <div class="empty">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true">{@html icons.folder.body}</svg
+      >
+      <p>{t.table.emptyHint}</p>
+    </div>
   {:else if result && result.items.length > 0}
     <div class="table-scroll">
       <table class="grid">
@@ -192,22 +238,45 @@
         </colgroup>
         <thead>
           <tr>
-            <!-- 可排序的表头绑 onclick=sortBy；arrow() 拼接升降序箭头。
+            <!-- 可排序的表头绑 onclick=sortBy，sortIcon snippet 渲染升降序 chevron；
+                 role=button + tabindex=0 + onkeydown 让键盘用户也能排序。
                  排序键（'uid'/'primaryNat'/'name'/'ethnicityCode'）是发往后端的协议值，勿改。
-                 static 类=不可排序列，去掉手型指针；c 类=紧凑列居中。 -->
-            <th onclick={() => sortBy("uid")}>{t.table.colUid}{arrow("uid")}</th
+                 static 类=不可排序列，默认光标；c 类=紧凑列居中。 -->
+            <th
+              role="button"
+              tabindex="0"
+              onclick={() => sortBy("uid")}
+              onkeydown={(e) => onSortKey(e, "uid")}
+              title={t.table.colUid}
+              >{t.table.colUid}{@render sortIcon("uid")}</th
             >
-            <th onclick={() => sortBy("primaryNat")}
-              >{t.table.colNat}{arrow("primaryNat")}</th
+            <th
+              role="button"
+              tabindex="0"
+              onclick={() => sortBy("primaryNat")}
+              onkeydown={(e) => onSortKey(e, "primaryNat")}
+              title={t.table.colNat}
+              >{t.table.colNat}{@render sortIcon("primaryNat")}</th
             >
             <th class="static">{t.table.col2ndNat}</th>
-            <th onclick={() => sortBy("name")}
-              >{t.table.colName}{arrow("name")}</th
+            <th
+              role="button"
+              tabindex="0"
+              onclick={() => sortBy("name")}
+              onkeydown={(e) => onSortKey(e, "name")}
+              title={t.table.colName}
+              >{t.table.colName}{@render sortIcon("name")}</th
             >
             <th class="static c">{t.table.colHair}</th>
             <th class="static c">{t.table.colColor}</th>
-            <th onclick={() => sortBy("ethnicityCode")} class="c"
-              >{t.table.colEth}{arrow("ethnicityCode")}</th
+            <th
+              role="button"
+              tabindex="0"
+              class="c"
+              onclick={() => sortBy("ethnicityCode")}
+              onkeydown={(e) => onSortKey(e, "ethnicityCode")}
+              title={t.table.colEth}
+              >{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
             >
             <!-- 仅拓展名单渲染第 8 列起；顺序：肤色/头像/随机人/性别/年龄/身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A。 -->
             {#if hasDetailed}
@@ -279,7 +348,17 @@
       </table>
     </div>
   {:else if result}
-    <div class="empty">{search ? t.table.noMatchHint : t.table.emptyHint}</div>
+    <div class="empty">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        aria-hidden="true">{@html icons.search.body}</svg
+      >
+      <p>{search ? t.table.noMatchHint : t.table.emptyHint}</p>
+    </div>
   {/if}
 
   <!-- 头像预览气泡（共用组件）：缓存/钉住/延迟关闭/Esc 都在组件内；groupKey=当前组，切组自动失效。 -->
@@ -325,7 +404,7 @@
     width: 140px;
   }
   .w-code {
-    width: 46px;
+    width: 36px;
   }
   .w-avatar {
     width: 62px;

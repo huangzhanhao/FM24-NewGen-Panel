@@ -115,7 +115,11 @@
   {/if}
 
   {#if !readable}
-    <div class="empty">{t.snapshot.readHint}</div>
+    <div class="empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.file.body}</svg>
+      <p>{t.snapshot.readHint}</p>
+    </div>
   {:else if result && result.items.length > 0}
     <div class="table-scroll">
       <table class="grid">
@@ -153,7 +157,13 @@
       </table>
     </div>
   {:else if result}
-    <div class="empty">{search ? t.snapshot.noMatchHint : t.snapshot.emptyHint}</div>
+    <div class="empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" aria-hidden="true">
+        {@html (search ? icons.search : icons.file).body}
+      </svg>
+      <p>{search ? t.snapshot.noMatchHint : t.snapshot.emptyHint}</p>
+    </div>
   {/if}
 
   <!-- 头像大气泡（共用组件）：缓存按 imagePath，切组（imgDir 变化）自动失效并释放。 -->

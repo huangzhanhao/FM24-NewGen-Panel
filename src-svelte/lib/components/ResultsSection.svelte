@@ -18,13 +18,16 @@
     <button class:active={view === 'snapshot'} onclick={() => (appStore.resultsView = 'snapshot')}>{t.results.tabSnapshot}</button>
   </div>
   <div class="card-body">
-    <!-- 根据 view 只渲染其中一个子组件。 -->
+    <!-- 名单预览 / 快照预览保持条件渲染：切走即卸载，本地搜索/页码/排序随之重置。 -->
     {#if view === 'table'}
       <PlayersTable />
-    {:else if view === 'viewer'}
-      <PlayerViewer />
-    {:else}
+    {:else if view === 'snapshot'}
       <SnapshotPreview />
     {/if}
+    <!-- 单人替换常驻挂载（保活）：切 tab 只显隐不销毁，UID/预览资料/图片/替换路径
+         全部保留，直至用户重新搜索；隐藏层 display:none 不占布局、不进 Tab 焦点序。 -->
+    <div class="tab-pane" class:active={view === 'viewer'}>
+      <PlayerViewer />
+    </div>
   </div>
 </div>

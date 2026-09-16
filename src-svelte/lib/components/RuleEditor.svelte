@@ -20,13 +20,19 @@
   let text = $state('');      // 编辑区内容
   let baseline = $state('');  // 载入时的内容（用于判断有无未保存修改）
   let status = $state('');    // 行内提示（保存成功等）
+  let editorEl = $state<HTMLTextAreaElement | null>(null); // 打开即聚焦的编辑区
 
   const dirty = $derived(text !== baseline);
 
   /** 由父组件调用（bind:this 后 openEditor()）打开对话框并载入当前标准内容。 */
   export function openEditor() {
     open = true;
-    void load(active);
+    void load(active).then(() => editorEl?.focus()); // 载入后焦点直接进编辑区
+  }
+
+  /** Esc = 点关闭（有未保存修改时 close() 内部会先弹确认）。 */
+  function onWindowKey(e: KeyboardEvent) {
+    if (e.key === 'Escape' && open) void close();
   }
 
   /** 载入指定标准的规则文件内容，并把当前内容记为 baseline（用于判断有无未保存修改）。 */
@@ -63,10 +69,18 @@
   }
 </script>
 
+<!-- Esc 监听（组件常驻；处理器内部只在 open 时响应），故 svelte:window 必须在 {#if} 之外 -->
+<svelte:window onkeydown={onWindowKey} />
+
 {#if open}
   <!-- 遮罩：点击空白处关闭（经确认）。 -->
   <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
-    <div class="modal">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t.ruleEditor.editorAria}
+    >
       <div class="modal-title">
         <div class="seg3">
           {#each NAMES as name}
@@ -82,7 +96,7 @@
         </div>
       </div>
         <div class="modal-body">
-          <textarea class="editor" bind:value={text} oninput={() => (status = '')}
+          <textarea class="editor" bind:this={editorEl} bind:value={text} oninput={() => (status = '')}
                     spellcheck="false" wrap="off"
                     aria-label={t.ruleEditor.editorAria}></textarea>
       </div>

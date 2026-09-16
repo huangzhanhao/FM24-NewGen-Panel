@@ -1,7 +1,6 @@
 # NG Regens Manager 抽图模型（反推）
 
-> 来源：项目记忆 `project-ng-regens-v4-rebuild.md`；依据 v4 配置编辑器截图（`v4_temp/国家映射|图像池|高级规则`）与重建的 `base_config.json`（Version 4）反推。
-> 旧版参照：`C:\Program Files (x86)\NG_Regens Manager 25\data\flutter_assets\assets\base_config.json`（Version 3）。
+> 来源参照：`NG_Regens Manager 25\data\flutter_assets\assets\base_config.json`（Version 3）反推。
 
 ## 1. 配置结构（ schema 与命名语义）
 

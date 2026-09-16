@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NewGAN Manager v2 界面重设计 · 预览稿与实施方案</title>
+<title>NewGAN Manager · 设计系统 NGM DS 1.0 · 界面预览与质量保障</title>
 <style>
 /* ============================================================
    设计令牌：深色（默认，「教练席海军蓝」）
@@ -18,7 +18,7 @@
   --warn:#FBBF24; --warn-soft:rgba(251,191,36,.13);
   --danger:#F87171; --danger-soft:rgba(248,113,113,.12);
   --overlay:rgba(4,8,16,.60); --shadow-pop:0 18px 48px rgba(0,0,0,.45);
-  --zebra:rgba(233,238,247,.025); --focus:rgba(45,212,167,.45);
+  --zebra:rgba(233,238,247,.025); --focus-ring:rgba(45,212,167,.45);
   --r-sm:6px; --r-md:8px; --r-lg:10px;
   --mono:"Cascadia Code","Cascadia Mono",Consolas,monospace;
   --sans:"Segoe UI Variable","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
@@ -36,7 +36,7 @@
   --warn:#B45309; --warn-soft:rgba(180,83,9,.10);
   --danger:#DC2626; --danger-soft:rgba(220,38,38,.09);
   --overlay:rgba(17,28,48,.34); --shadow-pop:0 16px 40px rgba(27,42,70,.16);
-  --zebra:rgba(23,43,77,.022); --focus:rgba(13,168,128,.35);
+  --zebra:rgba(23,43,77,.022); --focus-ring:rgba(13,168,128,.35);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden}
@@ -88,7 +88,7 @@ button{font:inherit;color:inherit}
 .icon-btn:hover{background:var(--bg-raised);color:var(--text-1)}
 .field{width:100%;background:var(--bg-inset);border:1px solid transparent;border-radius:var(--r-md);
   padding:7px 10px;color:var(--text-1);font-size:13px;outline:none}
-.field:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+.field:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring)}
 select.field{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--text-3) 50%),linear-gradient(135deg,var(--text-3) 50%,transparent 50%);
   background-position:calc(100% - 14px) 55%,calc(100% - 9px) 55%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:26px}
 .prf-row{display:flex;gap:8px;margin-top:8px}
@@ -186,7 +186,7 @@ select.field{appearance:none;background-image:linear-gradient(45deg,transparent 
   background:var(--text-3);transition:all .16s}
 .switch input:checked+.track{background:var(--accent);border-color:var(--accent)}
 .switch input:checked+.track::after{transform:translateX(15px);background:var(--accent-contrast)}
-.switch input:focus-visible+.track{box-shadow:0 0 0 3px var(--focus)}
+.switch input:focus-visible+.track{box-shadow:0 0 0 3px var(--focus-ring)}
 
 /* ============ 进度 ============ */
 .progress-track{flex:1;height:8px;border-radius:99px;background:var(--bg-inset);overflow:hidden}
@@ -199,7 +199,7 @@ select.field{appearance:none;background-image:linear-gradient(45deg,transparent 
 .search svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--text-3)}
 .search input{width:100%;background:var(--bg-inset);border:1px solid transparent;border-radius:var(--r-md);
   padding:7px 10px 7px 30px;color:var(--text-1);outline:none;font-size:13px}
-.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring)}
 .pager{display:flex;align-items:center;gap:8px;color:var(--text-3);font-size:12px}
 .table-scroll{flex:1;overflow:auto;border:1px solid var(--hairline);border-radius:var(--r-md)}
 table.grid{width:100%;border-collapse:collapse;font-size:12.5px}
@@ -282,10 +282,10 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
 .editor{flex:1;width:100%;resize:none;background:var(--bg-inset);border:1px solid var(--hairline);
   border-radius:var(--r-md);padding:10px 12px;font-family:var(--mono);font-size:12px;line-height:1.65;
   color:var(--text-2);outline:none;white-space:pre;overflow:auto}
-.editor:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
+.editor:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring)}
 
 /* ============================================================
-   文档视图（设计理念 / 设计方案 / 实施路径）
+   文档视图（设计系统 / 质量保障 / 实施路径）
    ============================================================ */
 .doc{position:fixed;inset:0;overflow-y:auto;background:var(--bg-base);padding:64px 24px 60px}
 .doc-inner{max-width:980px;margin:0 auto}
@@ -312,17 +312,6 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
 .principle .p-no{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:1px}
 .principle h4{font-size:14px;margin:5px 0 7px}
 .principle p{font-size:12.5px;margin:0}
-.decision{display:flex;align-items:flex-start;gap:12px;background:var(--bg-surface);
-  border:1px solid var(--hairline);border-left:3px solid var(--accent);border-radius:var(--r-md);padding:12px 15px;margin:8px 0}
-.decision .q{color:var(--text-3);font-size:12px;min-width:104px;padding-top:1px}
-.decision .a{color:var(--text-1);font-size:13px;font-weight:600}
-.decision .a small{display:block;font-weight:400;color:var(--text-2);margin-top:2px}
-.skin-card{background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-md);padding:11px 13px}
-.skin-card .nm{font-weight:600;font-size:13px}
-.skin-card .tags{margin-top:5px;display:flex;gap:5px;flex-wrap:wrap}
-.skin-tag{font-size:10.5px;border-radius:99px;padding:1px 8px;background:var(--bg-raised);color:var(--text-2)}
-.skin-tag.hot{background:var(--accent-soft);color:var(--accent)}
-.skin-card p{font-size:12px;margin:6px 0 0}
 .doc table{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0;
   background:var(--bg-surface);border:1px solid var(--hairline);border-radius:var(--r-md);overflow:hidden}
 .doc th{background:var(--bg-inset);color:var(--text-2);font-weight:600;text-align:left;padding:8px 11px;white-space:nowrap}
@@ -369,6 +358,18 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
   display:grid;place-items:center}
 .doc-footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--hairline);
   color:var(--text-3);font-size:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+/* NGM DS 1.0：ASCII 骨架 / 未勾选项 / 分隔线 */
+.doc pre{background:var(--bg-inset);border:1px solid var(--hairline);border-radius:var(--r-md);
+  padding:12px 14px;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.7;
+  color:var(--text-2);margin:10px 0;white-space:pre}
+.doc hr{border:none;border-top:1px solid var(--hairline);margin:24px 0}
+.doc h4{font-size:13px;font-weight:600;margin:14px 0 6px;color:var(--text-1)}
+.todolist{list-style:none;margin-left:0!important}
+.todolist li{padding-left:24px;position:relative;color:var(--text-2);margin:5px 0}
+.todolist li::before{content:"";position:absolute;left:1px;top:2px;width:12px;height:12px;
+  border:1.5px solid var(--text-3);border-radius:3px;background:var(--bg-inset)}
+/* QA 矩阵表首列不换行、宽度受限 */
+.doc td.nowrap{white-space:normal;min-width:220px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -378,8 +379,8 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
 <div class="preview-bar">
   <span class="tag">NewGAN v2 设计稿</span>
   <button data-view="app" class="on" onclick="switchView('app',this)">界面预览</button>
-  <button data-view="philosophy" onclick="switchView('philosophy',this)">设计理念</button>
-  <button data-view="design" onclick="switchView('design',this)">设计方案</button>
+  <button data-view="design" onclick="switchView('design',this)">设计系统</button>
+  <button data-view="qa" onclick="switchView('qa',this)">质量保障</button>
   <button data-view="roadmap" onclick="switchView('roadmap',this)">实施路径</button>
   <button onclick="toggleTheme()" id="theme-btn">切换浅色</button>
 </div>
@@ -698,256 +699,338 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
 </div>
 
 <!-- ════════════════════════════════════════════════════════════
-     视图 B：设计理念
-     ════════════════════════════════════════════════════════════ -->
-<div class="doc hidden" id="view-philosophy">
- <div class="doc-inner">
-  <h1>设计理念：教练席控制台（The Dugout）</h1>
-  <p class="lead">让 NewGAN Manager 看起来像 FM 的延伸，而不是一个通用蓝白 SaaS：玩家刚从深色皮肤的 FM 里切出来，视觉上无缝衔接。本页先把调研皮肤的特征收敛成「设计风格可选项」，再给出最终定稿的风格取向；<strong>设计方案</strong>页给出令牌与组件规范，<strong>实施路径</strong>页给出分批落地计划。</p>
-  <div class="toc"><a href="#p-traits">皮肤特征归纳</a><a href="#p-styles">风格最终确认</a><a href="#p-principles">四条原则</a><a href="#p-decisions">已确认决策</a></div>
-
-  <h2 id="p-traits"><span class="no">1</span>调研皮肤的特征归纳</h2>
-  <p><strong>调研口径（2026-09-13 重新联网核验）</strong>：FMScout FM26 皮肤榜（12 款，带浏览量 / 下载量）、sortitoutsi FM26 皮肤区、FM Skin Builder 图库（15 款，支持一键应用与自动备份）、以及爆棚 / 贴吧等中文社区口碑。量级前三为 Material Skin 26（509,253 浏览 / 111,436 下载，v2.2.6）、AlexMorak FM26 Theme（419,324 / 81,167，已停更）、CTRL 26（323,954 / 99,369，v1.8）；其后依次为 ASF Skin、TinyHips' Dark Mode（OLED 友好）、SAS26、Diablo 26、Kojuro Theme、MNB（AnSeOs，低分辨率支持）、skogr（热图 / 西甲风直播图形）、TSO（DaveHouto）等。下面把这些皮肤的特征收敛成 14 条归纳，再在第 2 章逐维度选出本工具的风格取值。</p>
-  <div class="doc-card">
-    <h3 style="margin-top:0">提炼依据：调研皮肤的 14 条特征</h3>
-    <ol>
-      <li><strong>深色 / 深海军蓝是绝对主流</strong>：Darkside Base Skin、MNB、Diablo 26、TinyHips' Dark Mode、CTRL（官方自标 <code>dark</code>）、TSO 全部深色；Darkside 明确以「长时段游玩不刺眼」为目标。</li>
-      <li><strong>OLED 纯黑是深色的极端分支</strong>：TinyHips' Dark Mode 主打 OLED 友好与界面精简，受众窄但需求真实存在（其已停更，方向被后续皮肤部分继承）。</li>
-      <li><strong>集体「去紫去蓝」</strong>：AlexMorak 的卖点就是「去掉 FM26 大部分烦人的紫蓝色调」；CTRL 1.5 移除对话建议的紫色渐变、1.1 移除消息的蓝色底。</li>
-      <li><strong>状态色与评分色阶收敛到同一色相</strong>：CTRL 1.6 修正平均评分色阶不再跳色，并为球员状态新增主题化指示色，保证语义红绿不被杂色干扰。</li>
-      <li><strong>降噪优先：先删元素，再加装饰</strong>：MrTini23 以「重排布局、去掉杂乱」为核心目标；CTRL 1.6 刻意弱化单选组，1.3 清理消息卡片与按钮。</li>
-      <li><strong>导航靠分区高亮，不靠图标堆砌</strong>：CTRL 1.6 直接移除导航图标、恢复「当前分区高亮」，用高亮而非分割线区分区块。</li>
-      <li><strong>卡片重排以减少滚动与重叠</strong>：CTRL 1.5 重排 My History 与球员表现卡片避免元素重叠，1.8 放大租借卡片以显示更多信息。</li>
-      <li><strong>表格用弱交替行底色，而不是重网格线</strong>：CTRL 1.5 为表格交替行加低调背景色（zebra），靠行底而非描边维持可读性。</li>
-      <li><strong>次级按钮用细边框做界定</strong>：CTRL 1.5 给次级按钮重新加回边框，同时压低星标的金色饱和度、把属性变化图标改为更实心的样式，避免高强度装饰色。</li>
-      <li><strong>背景图与赛事主题承担氛围，但只在观赏型界面可行</strong>：CTRL 1.8 为球员报告 / 战术 / 阵容 / 俱乐部页统一铺主背景图，并为授权赛事铺低调的赛事主题背景；这类做法放到信息密集的工具界面会直接损伤可读性。</li>
-      <li><strong>字号偏小偏紧，以高分屏为前提，同时给低分屏兜底</strong>：CTRL 建议 1920×1080 以上并配合 Small 字体缩放；Material 更换字体并重设字号；MNB 与 Material 都单独提供低分辨率布局选项。</li>
-      <li><strong>数据前置：属性数值化 + 可视化</strong>：skogr 把体能 / 疲劳 / 属性直接数值化，并在传球图上叠加个人热图与西甲风格持球图形；CTRL 新增疲劳等级图标与传球图。</li>
-      <li><strong>球员档案页与头像母题是视觉重心</strong>：Material 的卖点之一是大头像档案页 + 双模板，并移除头像周围的圆形背景与渐变；Lotsgon 的 Player Polygon – Info View 把多边形属性图搬上档案页。</li>
-      <li><strong>主题「换色包化」，并按队伍出主题皮肤</strong>：Darkside Base Skin 直接提供 blue / red / green / original 多套 bundle，AnSeOs MNB 额外发布 Emerald Green 主题包，Darkside 还做俱乐部主题皮肤（Die roten Teufel、Mia san mia），Material 则提供「保留渐变」的可选版本。</li>
-    </ol>
-  </div>
-  <div class="callout info"><span class="ic">★</span><p>本工具恰好是一个「头像工具」——FM 皮肤里最标志性的人像母题（圆角 / 多边形切角）与「给随机人长脸」的业务高度呼应。2026 年 Lotsgon 的 Player Polygon 视图仍在 Skin Builder 图库上榜，说明该母题依然活跃，应作为品牌符号反复出现（对应下方「造型语言」维度）。</p></div>
-
-  <h2 id="p-styles"><span class="no">2</span>设计风格最终确认</h2>
-  <p>第 1 章的 14 条特征按 6 个维度归类后逐项定稿：每张卡标出候选方向、本次采用的取值与取舍依据（未采用的候选登记为二期储备，见本节末尾）。</p>
-
-  <h3>六个风格维度 · 候选与取舍（✓ = 本次采用）</h3>
-  <div class="grid3">
-    <div class="skin-card"><div class="nm">① 主题基调</div><div class="tags"><span class="skin-tag hot">深海军蓝 ✓</span><span class="skin-tag">中性炭灰</span><span class="skin-tag">OLED 纯黑</span><span class="skin-tag">浅色明亮</span></div><p>采用：深海军蓝为默认，浅色同期交付。依据：头部皮肤清一色深色；TinyHips 证明 OLED 纯黑可行但受众窄；FM 生态几乎没有主流浅色方案，而本工具是白天也会用的桌面工具，故双主题并做。</p></div>
-    <div class="skin-card"><div class="nm">② 强调色</div><div class="tags"><span class="skin-tag hot">青绿 Teal ✓</span><span class="skin-tag">翡翠绿</span><span class="skin-tag">俱乐部色换色包</span><span class="skin-tag">FM 紫蓝</span></div><p>采用：青绿 #2DD4A7 / #0DA880。依据：Material Skin 多年沿用 misty teal 且下载量第一；AnSeOs 的 Emerald Green 与 Darkside 的 blue / red / green bundle 说明「换色」确有需求，但首版不做多色包，列为二期储备；紫蓝被社区一致抛弃。</p></div>
-    <div class="skin-card"><div class="nm">③ 表面与深度</div><div class="tags"><span class="skin-tag hot">背景分层 ✓</span><span class="skin-tag">背景图 + 赛事主题</span><span class="skin-tag">粗边框卡片</span></div><p>采用：base / surface / raised 三层 + 发丝描边，仅弹层用柔和投影。依据：CTRL 1.8 用背景图与赛事主题承载氛围，对观赏型游戏界面合适，但对工具界面会伤可读性；粗边框卡片已被全行业淘汰。</p></div>
-    <div class="skin-card"><div class="nm">④ 造型语言</div><div class="tags"><span class="skin-tag hot">中圆角 6–12px ✓</span><span class="skin-tag">全直角</span><span class="skin-tag">大圆角胶囊</span></div><p>采用：圆角按控件分档（面板 10px / 控件 6–8px），人像为 12px 圆角矩形，多边形图作为辅助图形语言。依据：档案页与头像母题在 2026 仍是视觉重心，且需与面板圆角语言统一。</p></div>
-    <div class="skin-card"><div class="nm">⑤ 信息密度与字体</div><div class="tags"><span class="skin-tag hot">13px 高密度 ✓</span><span class="skin-tag">14px 舒适</span><span class="skin-tag">12px 极密</span></div><p>采用：13px 基准 + 等宽数字 + 紧凑表格，零新增字体依赖。依据：皮肤普遍小字紧缩，但 CTRL 的前提是 1920×1080 + Small 缩放；本工具最低要支持 1366×768，故取 13px 折中，靠斑马纹与等宽对齐控制长列表（30 万行级）噪声。</p></div>
-    <div class="skin-card"><div class="nm">⑥ 动效与装饰</div><div class="tags"><span class="skin-tag hot">轻量 ≤200ms ✓</span><span class="skin-tag">无动效</span><span class="skin-tag">丰富 / 发光玻璃</span></div><p>采用：轻量动效，禁用渐变文字、玻璃拟态与发光。依据：皮肤社区普遍克制（去渐变、去发光、去圆底头像）；本工具只保留进度与抽屉 / 模态的 ≤200ms 过渡，其余不动。</p></div>
-  </div>
-
-  <h3>定稿组合：教练席海军蓝（The Dugout）</h3>
-  <p>六张卡里的确认项合起来就是定稿风格：<strong>深海军蓝底 + 单一青绿强调 + 三层背景深度 + 中圆角与圆角人像 + 13px 高密度 + 200ms 内轻动效</strong>。这一组合与 2026 年社区实际选择一致——下载量第一的 Material Skin 走的就是同一路子（青绿 + 深色），「去紫去蓝 + 降噪」是头部皮肤的共识动作。深色与浅色只是同一组设计令牌的不同取值，切换主题不改变任何结构、密度与信息层级。</p>
-  <div class="grid3">
-    <div class="principle"><div class="p-no">定稿 · 色调</div><h4>深海军蓝 + 青绿</h4><p>三层背景 #0D1320 / #151D2E / #1D2942，全界面单一强调色青绿，红琥珀绿只承担语义状态。</p></div>
-    <div class="principle"><div class="p-no">定稿 · 形态</div><h4>三层深度 + 中圆角</h4><p>靠背景深浅与间距分组而非方框；面板 10px、控件 6–8px、人像 12px 圆角矩形。</p></div>
-    <div class="principle"><div class="p-no">定稿 · 节奏</div><h4>13px 高密度 + 轻动效</h4><p>13px 基准字与等宽数字；动画 ≤200ms、位移 ≤8px，并适配 reduced-motion。</p></div>
-  </div>
-  <div class="tok-dim">定稿色板 · 深色（默认）「教练席海军蓝」</div>
-  <div class="mini-ui">
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#2DD4A7"></span>--accent #2DD4A7</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#0D1320"></span>--bg-base #0D1320</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#151D2E"></span>--bg-surface #151D2E</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#1D2942"></span>--bg-raised #1D2942</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#34D399"></span>--ok #34D399</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#FBBF24"></span>--warn #FBBF24</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#F87171"></span>--danger #F87171</span>
-  </div>
-  <div class="tok-dim">定稿色板 · 浅色「日间球场」</div>
-  <div class="mini-ui">
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#0DA880"></span>--accent #0DA880</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#ECF0F6"></span>--bg-base #ECF0F6</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#FFFFFF"></span>--bg-surface #FFFFFF</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#F2F5FA"></span>--bg-raised #F2F5FA</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#12965A"></span>--ok #12965A</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#B45309"></span>--warn #B45309</span>
-    <span style="font-size:12px;color:var(--text-2)"><span class="swatch" style="background:#DC2626"></span>--danger #DC2626</span>
-  </div>
-  <div class="tok-dim">定稿风格实样（随深浅主题实时切换）</div>
-  <div class="mini-ui">
-    <button class="btn primary">主要操作</button>
-    <button class="btn">次级</button>
-    <div class="seg3" style="width:230px"><button class="active">保留</button><button>覆写</button><button>生成</button></div>
-    <label class="switch"><input type="checkbox" checked /><span class="track"></span>轻动效</label>
-    <span class="pill ok"><span class="dot"></span>就绪</span>
-    <span class="pill warn"><span class="dot"></span>进行中</span>
-    <span class="pill gray"><span class="dot"></span>未设置</span>
-  </div>
-  <div class="mini-ui">
-    <div class="progress-track" style="flex:1;min-width:200px"><div class="progress-fill" style="width:62%"></div></div>
-    <span style="font-size:12px;color:var(--text-2)">进度 8px · 过渡 150ms · 百分比等宽</span>
-  </div>
-  <p>完整令牌取值、字号阶与组件规范见「设计方案」页；本节只确定风格方向，不涉及实现细节。</p>
-  <div class="callout info"><span class="ic">i</span><p><strong>落选候选的去向</strong>：调研中被验证有真实需求但本次不做的三项，登记为二期储备 —— ①强调色换色包（Darkside blue / red / green bundle、AnSeOs Emerald Green 的做法，令牌化后成本很低）；②OLED 纯黑主题（TinyHips 路线，只需再补一档 <code>--bg-*</code> 取值）；③低分辨率 / 更小字号档（MNB 与 Material 的低分屏布局、CTRL 的 Small 缩放前提，本工具暂以 13px + 1366×768 兜底）。</p></div>
-
-  <h2 id="p-principles"><span class="no">3</span>四条设计原则</h2>
-  <div class="grid2">
-    <div class="principle"><div class="p-no">原则 01</div><h4>面孔是主角</h4><p>圆角人像用于品牌区、单人微调、空状态；处处强化「批量匹配头像」的产品心智，而不是文件处理器。</p></div>
-    <div class="principle"><div class="p-no">原则 02</div><h4>降噪如 CTRL</h4><p>去掉满屏 1px 方框，改用背景深浅分层 + 间距分组；全界面只有三层深度：base / surface / raised。</p></div>
-    <div class="principle"><div class="p-no">原则 03</div><h4>状态一眼可读</h4><p>就绪 / 进行中 / 警告 / 错误用统一色阶，且图标 + 文字双通道表达，不单纯依赖颜色（照顾色觉障碍）。</p></div>
-    <div class="principle"><div class="p-no">原则 04</div><h4>密集但有节奏</h4><p>13px 基准字、等宽数字、表格高信息密度；区块之间保留呼吸留白，长列表（30 万行级）不产生视觉噪声。</p></div>
-  </div>
-
-  <h2 id="p-decisions"><span class="no">4</span>已确认的关键决策（2026-09-10）</h2>
-  <div class="decision"><div class="q">主题方向</div><div class="a">双主题都做<small>深色「教练席海军蓝」为默认；浅色「日间球场」由同一套令牌映射，侧栏底部一键切换并记忆。</small></div></div>
-  <div class="decision"><div class="q">强调色</div><div class="a">青绿 Teal #2DD4A7（深色）/ #0DA880（浅色）<small>取自应用图标柴犬的项圈色；在海军蓝上对比强烈，且不与语义红绿混淆。</small></div></div>
-  <div class="decision"><div class="q">旅程引导</div><div class="a">顶部五步 Stepper<small>选档与头像包 → 校验与名单 → 选模式 → 执行替换 → 查看与微调；随状态自动点亮，纯引导、不可点，不改业务流程。</small></div></div>
-  <div class="decision"><div class="q">头像造型</div><div class="a">圆角矩形（12px）<small>品牌图、单人微调大头像、空状态占位统一；与面板圆角语言一致。</small></div></div>
-
-  <div class="doc-footer"><span>NewGAN Manager v2.0 · 前端界面重设计稿</span><span>下一步：阅读「设计方案」与「实施路径」</span></div>
- </div>
-</div>
-
-<!-- ════════════════════════════════════════════════════════════
-     视图 C：设计方案
+     视图 B：设计系统（NGM DS 1.0，来源 docs/design-system.md；§1.3 六维风格取舍取自原「设计理念」）
      ════════════════════════════════════════════════════════════ -->
 <div class="doc hidden" id="view-design">
  <div class="doc-inner">
-  <h1>具体设计方案</h1>
-  <p class="lead">令牌（Design Tokens）是唯一样式入口：所有颜色、圆角、字体、动效都通过 CSS 变量消费，深色/浅色只差一组令牌取值，未来主题演进只改 <code>:root</code> 与 <code>[data-theme]</code> 两段。</p>
-  <div class="toc"><a href="#d-color">色板令牌</a><a href="#d-type">字体排版</a><a href="#d-motif">视觉母题</a><a href="#d-components">组件规范</a><a href="#d-screens">界面注解</a><a href="#d-a11y">无障碍与动效</a></div>
+  <h1>设计系统 · NGM DS 1.0</h1>
+  <p class="lead">适用范围：Tauri 2 + Svelte 5 桌面端（Windows / WebView2，构建目标 Chrome 105+）。唯一样式入口 <code>src-svelte/app.css</code>，图标集中管理于 <code>src-svelte/lib/icons.ts</code>。1.0 精炼版保留 v2 既定品牌（海军蓝 + 草坪青），补齐令牌尺度、层级、控件状态与交互规范。本页与 <code>docs/design-system.md</code> 同源，冲突以该 Markdown 为准。</p>
+  <div class="toc"><a href="#d-language">设计语言</a><a href="#d-tokens">设计令牌</a><a href="#d-layout">布局骨架</a><a href="#d-type-rules">排版规范</a><a href="#d-components">组件库</a><a href="#d-theme">主题切换</a><a href="#d-interaction">交互模式</a><a href="#d-engineering">工程约定</a></div>
 
-  <h2 id="d-color"><span class="no">1</span>色板令牌（双主题）</h2>
-  <div class="tok-dim">表面层级 · 文字</div>
-  <table>
-    <tr><th>令牌</th><th>深色（默认）</th><th>浅色「日间球场」</th><th>用途</th></tr>
-    <tr><td><code>--bg-base</code></td><td><span class="swatch" style="background:#0D1320"></span>#0D1320</td><td><span class="swatch" style="background:#ECF0F6"></span>#ECF0F6</td><td>窗口最底层</td></tr>
-    <tr><td><code>--bg-surface</code></td><td><span class="swatch" style="background:#151D2E"></span>#151D2E</td><td><span class="swatch" style="background:#FFFFFF"></span>#FFFFFF</td><td>侧栏 / 面板 / 状态栏</td></tr>
-    <tr><td><code>--bg-raised</code></td><td><span class="swatch" style="background:#1D2942"></span>#1D2942</td><td><span class="swatch" style="background:#F2F5FA"></span>#F2F5FA</td><td>悬停 / 按钮 / 激活控件</td></tr>
-    <tr><td><code>--bg-inset</code></td><td><span class="swatch" style="background:#0A0F1A"></span>#0A0F1A</td><td><span class="swatch" style="background:#E8EDF4"></span>#E8EDF4</td><td>凹槽：只读框 / 表头 / 日志 / 搜索</td></tr>
-    <tr><td><code>--hairline / -2</code></td><td>rgba(148,173,219,.10 / .22)</td><td>rgba(23,43,77,.10 / .18)</td><td>发丝描边（分隔线/弹层）</td></tr>
-    <tr><td><code>--text-1 / -2 / -3</code></td><td>#E9EEF7 / #A8B5CC / #68788F</td><td>#1B2433 / #54617A / #8B95A8</td><td>主文字 / 标签 / 占位弱化</td></tr>
-  </table>
-  <div class="tok-dim">品牌与语义</div>
-  <table>
-    <tr><th>令牌</th><th>深色</th><th>浅色</th><th>用途</th></tr>
-    <tr><td><code>--accent</code></td><td><span class="swatch" style="background:#2DD4A7"></span>#2DD4A7</td><td><span class="swatch" style="background:#0DA880"></span>#0DA880</td><td>主按钮 / 进度 / 激活态 / 链接</td></tr>
-    <tr><td><code>--accent-contrast</code></td><td>#052820（按钮文字）</td><td>#FFFFFF</td><td>青绿底上的文字，保证对比度</td></tr>
-    <tr><td><code>--accent-soft</code></td><td>rgba(45,212,167,.12)</td><td>rgba(13,168,128,.10)</td><td>激活区块软底 / 标签胶囊</td></tr>
-    <tr><td><code>--ok / -soft</code></td><td>#34D399</td><td>#12965A</td><td>就绪、完整、RTF 已设置</td></tr>
-    <tr><td><code>--warn / -soft</code></td><td>#FBBF24</td><td>#B45309</td><td>缺失目录、进行中、WARN 日志</td></tr>
-    <tr><td><code>--danger / -soft</code></td><td>#F87171</td><td>#DC2626</td><td>删除、错误、CRITICAL；配软底使用</td></tr>
-  </table>
-  <div class="callout warn"><span class="ic">!</span><p>语义修正：旧版组条目「未设置 RTF」显示<strong>红色</strong>，但它只是未配置而非错误。新版：已设置 = 青绿圆点，未设置 = 中性灰圆点；真正的错误才使用红色。</p></div>
+  <h2 id="d-language"><span class="no">1</span>设计语言</h2>
+  <p>NewGAN Manager 是供 FM 玩家长时驻留的单机桌面工具，整体语言追求<strong>专业、冷静、可信、低打扰</strong>——像教练席的战术终端，而非炫技仪表盘或通用蓝白 SaaS。视觉上以「教练席海军蓝」深色为默认、「日间球场」浅色同期交付，两主题只是同一套令牌的不同取值；全界面只保留<strong>草坪青一个强调色</strong>，红绿琥珀仅承担语义状态。层级靠底色深浅（base / surface / raised 三层）、发丝描边与间距表达，圆角人像贯穿品牌区、单人替换与空态，呼应「批量给随机人长脸」的产品心智；装饰保持克制，反馈必须明确。本节给出四条设计原则、明确的不做清单，以及六个风格维度的取舍结论。</p>
+  <h3>1.1 四条设计原则</h3>
+  <div class="grid2">
+    <div class="principle"><div class="p-no">原则 01</div><h4>层级先于装饰</h4><p>信息优先级靠间距、字重、底色层级、强调色表达；禁止渐变文字、泛光、玻璃拟态等纯装饰手段制造“高级感”。</p></div>
+    <div class="principle"><div class="p-no">原则 02</div><h4>每个可交互元素都有完整状态</h4><p>常态 / 悬停 / 按下 / 聚焦 / 禁用 / 忙碌，缺一不可（见 §7 状态矩阵）。</p></div>
+    <div class="principle"><div class="p-no">原则 03</div><h4>单一事实源</h4><p>颜色、字号、间距、圆角、阴影、动效只能引用令牌；scoped 样式只允许布局值，不得硬编码颜色与新圆角。</p></div>
+    <div class="principle"><div class="p-no">原则 04</div><h4>安静但明确</h4><p>默认低饱和、低对比装饰；操作反馈必须明确（颜色变化 ≥ WCAG AA、焦点环 3px、危险操作红色软底）。</p></div>
+  </div>
+  <h3>1.2 不做什么</h3>
+  <div class="doc-card">
+    <ul class="crosslist">
+      <li>不引入 Tailwind / Radix / 图标库等任何新依赖（纯 CSS + Svelte scoped）。</li>
+      <li>不做毛玻璃、彩色渐变文本、装饰性 glow、无意义卡片网格。</li>
+      <li>动效时长 ≤ 200ms、位移 ≤ 8px；遵守 <code>prefers-reduced-motion</code>。</li>
+      <li>不重排既有业务流程；系统对话框（确认/报错）继续用 Tauri 原生 dialog。</li>
+    </ul>
+  </div>
 
-  <h2 id="d-type"><span class="no">2</span>字体与排版</h2>
+  <h3>1.3 六维风格取舍</h3>
+  <p>FM 皮肤调研得出的风格候选按 6 个维度归类后逐项定稿；未采用的候选登记为二期储备（见本节末尾）。</p>
+  <table>
+    <tr><th style="width:120px">维度</th><th>候选方向</th><th>本次采用</th><th>取舍依据</th></tr>
+    <tr><td>① 主题基调</td><td>深海军蓝 ✓ / 中性炭灰 / OLED 纯黑 / 浅色明亮</td><td>深海军蓝默认，浅色同期交付</td><td>头部皮肤清一色深色；TinyHips 证明 OLED 纯黑可行但受众窄；FM 生态几乎没有主流浅色方案，而本工具白天也会用</td></tr>
+    <tr><td>② 强调色</td><td>青绿 Teal ✓ / 翡翠绿 / 俱乐部色换色包 / FM 紫蓝</td><td><code>#2DD4A7</code>（深）/ <code>#0DA880</code>（浅）</td><td>Material Skin 多年沿用 misty teal 且下载量第一；紫蓝被社区一致抛弃；换色包成本低，列二期储备</td></tr>
+    <tr><td>③ 表面与深度</td><td>背景分层 ✓ / 背景图+赛事主题 / 粗边框卡片</td><td>base / surface / raised 三层 + 发丝描边，仅弹层用柔和投影</td><td>背景图承载氛围对观赏型游戏界面合适，对工具界面会伤可读性；粗边框卡片已被全行业淘汰</td></tr>
+    <tr><td>④ 造型语言</td><td>中圆角 6–12px ✓ / 全直角 / 大圆角胶囊</td><td>面板 10px、控件 6–8px、人像 12px 圆角矩形</td><td>档案页与头像母题在 2026 仍是视觉重心，且需与面板圆角语言统一；多边形图作为辅助图形语言</td></tr>
+    <tr><td>⑤ 信息密度与字体</td><td>13px 高密度 ✓ / 14px 舒适 / 12px 极密</td><td>13px 基准 + 等宽数字 + 紧凑表格，零新增字体依赖</td><td>皮肤普遍小字紧缩，但 CTRL 的前提是 1080p + Small 缩放；本工具窗口基准 1280×800、硬下限 860，取 13px 折中，靠斑马纹与等宽对齐控制长列表（30 万行级）噪声</td></tr>
+    <tr><td>⑥ 动效与装饰</td><td>轻量 ≤200ms ✓ / 无动效 / 丰富/发光玻璃</td><td>仅进度与抽屉/模态的 ≤200ms 过渡，禁用渐变文字、玻璃拟态与发光</td><td>皮肤社区普遍克制（去渐变、去发光、去圆底头像）；其余界面不动</td></tr>
+  </table>
+  <p>六项采用值合起来即定稿组合：<strong>深海军蓝底 + 单一青绿强调 + 三层背景深度 + 中圆角与圆角人像 + 13px 高密度 + 200ms 内轻动效</strong>，与 2026 年社区实际选择一致。深色与浅色只是同一组设计令牌的不同取值，切换主题不改变任何结构、密度与信息层级。</p>
+  <div class="callout info"><span class="ic">i</span><p><strong>落选候选的去向（二期储备）</strong>：①强调色换色包（Darkside blue/red/green bundle、AnSeOs Emerald Green 的做法，令牌化后成本很低）；②OLED 纯黑主题（TinyHips 路线，只需再补一档 <code>--bg-*</code> 取值）；③低分辨率/更小字号档（MNB 与 Material 的低分屏布局、CTRL 的 Small 缩放前提，暂以 13px + 860 宽度硬下限断点兜底）。</p></div>
+
+  <h2 id="d-tokens"><span class="no">2</span>设计令牌</h2>
+  <p>令牌分三层：<strong>原始值 → 语义别名 → 组件消费</strong>。组件只允许消费语义层。</p>
+  <h3>2.1 颜色 · 深色主题（默认，教练席海军蓝）</h3>
+  <table>
+    <tr><th>令牌</th><th>值</th><th>用途</th></tr>
+    <tr><td><code>--bg-base</code></td><td><span class="swatch" style="background:#0D1320"></span>#0D1320</td><td>应用画布（主内容区底色）</td></tr>
+    <tr><td><code>--bg-surface</code></td><td><span class="swatch" style="background:#151D2E"></span>#151D2E</td><td>面板与卡片：侧栏、卡片、弹层</td></tr>
+    <tr><td><code>--bg-raised</code></td><td><span class="swatch" style="background:#1D2942"></span>#1D2942</td><td>抬升元素：默认按钮、悬停行、胶囊底</td></tr>
+    <tr><td><code>--bg-inset</code></td><td><span class="swatch" style="background:#0A0F1A"></span>#0A0F1A</td><td>下沉元素：输入框、表格表头、代码编辑区、空态底</td></tr>
+    <tr><td><code>--hairline</code> / <code>--hairline-2</code></td><td>rgba(148,173,219,.10) / .22</td><td>一级分隔线（卡片边、分区线）/ 二级（控件常态边、弹层边）</td></tr>
+    <tr><td><code>--text-1 / -2 / -3</code></td><td><span class="swatch" style="background:#E9EEF7"></span>#E9EEF7 · <span class="swatch" style="background:#A8B5CC"></span>#A8B5CC · <span class="swatch" style="background:#68788F"></span>#68788F</td><td>正文/标题 · 次级文字/标签/图标按钮 · 弱化/占位/说明</td></tr>
+    <tr><td><code>--accent</code></td><td><span class="swatch" style="background:#2DD4A7"></span>#2DD4A7</td><td>草坪青：主操作、选中、进度、焦点</td></tr>
+    <tr><td><code>--accent-hover / -press</code></td><td>#3FE8BA / #24B68E</td><td>主色悬停 / 按下</td></tr>
+    <tr><td><code>--accent-contrast</code></td><td>#052820</td><td>主色底上的文字</td></tr>
+    <tr><td><code>--accent-soft</code></td><td>rgba(45,212,167,.12)</td><td>选中行 / 标签 / chip 软底</td></tr>
+    <tr><td><code>--focus-ring</code></td><td>rgba(45,212,167,.45)</td><td>3px 焦点环</td></tr>
+    <tr><td><code>--ok / -soft</code></td><td><span class="swatch" style="background:#34D399"></span>#34D399 / rgba(52,211,153,.12)</td><td>成功 / 完整</td></tr>
+    <tr><td><code>--warn / -soft</code></td><td><span class="swatch" style="background:#FBBF24"></span>#FBBF24 / rgba(251,191,36,.13)</td><td>警告 / 忙碌</td></tr>
+    <tr><td><code>--danger / -hover / -soft</code></td><td><span class="swatch" style="background:#F87171"></span>#F87171 / #FCA5A5 / rgba(248,113,113,.12)</td><td>危险 / 删除</td></tr>
+    <tr><td><code>--overlay</code></td><td>rgba(4,8,16,.60)</td><td>模态 / 抽屉遮罩</td></tr>
+    <tr><td><code>--zebra</code></td><td>rgba(233,238,247,.025)</td><td>表格隔行</td></tr>
+  </table>
+  <h3>颜色 · 浅色主题（日间球场）</h3>
+  <table>
+    <tr><th>令牌</th><th>值</th><th>用途</th></tr>
+    <tr><td><code>--bg-base / surface / raised / inset</code></td><td><span class="swatch" style="background:#ECF0F6"></span>#ECF0F6 · <span class="swatch" style="background:#FFFFFF"></span>#FFFFFF · <span class="swatch" style="background:#F2F5FA"></span>#F2F5FA · <span class="swatch" style="background:#E8EDF4"></span>#E8EDF4</td><td>画布 / 卡片 / 按钮·悬停·胶囊 / 输入·表头</td></tr>
+    <tr><td><code>--hairline / -2</code></td><td>rgba(23,43,77,.10) / .18</td><td>分隔线两级</td></tr>
+    <tr><td><code>--text-1 / -2 / -3</code></td><td>#1B2433 / #54617A / #8B95A8</td><td>文字三级</td></tr>
+    <tr><td><code>--accent / hover / press</code></td><td><span class="swatch" style="background:#0DA880"></span>#0DA880 / #0B9773 / #098464</td><td>深模式草坪青加深，保证 AA 对比</td></tr>
+    <tr><td><code>--accent-soft / --focus-ring</code></td><td>rgba(13,168,128,.10) / rgba(13,168,128,.35)</td><td>软底 / 焦点环</td></tr>
+    <tr><td><code>--ok / --warn / --danger</code></td><td>#12965A / #B45309 / #DC2626</td><td>语义色全部加深到 AA</td></tr>
+    <tr><td><code>--overlay / --zebra</code></td><td>rgba(17,28,48,.34) / rgba(23,43,77,.022)</td><td>遮罩 / 隔行</td></tr>
+  </table>
+  <div class="callout info"><span class="ic">i</span><p>换主题 = 换一组令牌，组件代码零改动。<code>:root{color-scheme:dark}</code>、<code>[data-theme=light]{color-scheme:light}</code>，让原生滚动条、<code>&lt;option&gt;</code> 跟随主题。旧别名（<code>--bg/--panel/--border/--text/--muted/--hover-bg/--input-bg</code>）仅为兼容存量类名保留，新代码禁止使用。</p></div>
+
+  <h3>2.2 字体与字号</h3>
   <div class="grid2">
     <div class="doc-card">
-      <h3>字体族（零新增依赖）</h3>
+      <h4 style="margin-top:0">字体族（零新增依赖）</h4>
       <ul>
-        <li>界面：<code>"Segoe UI Variable","Segoe UI","Microsoft YaHei UI",system-ui</code>——Win10/11 自带，不打包字体，安装包不增大。</li>
-        <li>等宽：<code>"Cascadia Code",Consolas</code>——路径 / UID / 日志 / JSON 编辑器。</li>
-        <li>全局 <code>font-variant-numeric: tabular-nums</code>：进度、百分比、行数、UID 等宽对齐不跳动。</li>
+        <li><code>--font-sans</code>："Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif</li>
+        <li><code>--mono</code>："Cascadia Code", "Cascadia Mono", Consolas, monospace（UID、路径、日志、页码）</li>
+        <li>全局 <code>font-variant-numeric: tabular-nums</code>：数字等宽，进度/计数不跳动。</li>
       </ul>
     </div>
     <div class="doc-card">
-      <h3>字号阶</h3>
+      <h4 style="margin-top:0">字号阶（令牌 / 行高 / 用途）</h4>
       <table>
-        <tr><th>px</th><th>用途</th></tr>
-        <tr><td><code>12</code></td><td>辅助说明、状态栏、区块小标签（大写 + 字距）</td></tr>
-        <tr><td><code>13</code></td><td>正文基准、表格、按钮、输入框</td></tr>
-        <tr><td><code>14</code></td><td>面板标题、主 CTA</td></tr>
-        <tr><td><code>16 / 20</code></td><td>弹层标题 / 球员姓名</td></tr>
-        <tr><td><code>11–11.5</code></td><td>日志、JSON、角标</td></tr>
+        <tr><th>令牌</th><th>px / 行高</th><th>用途</th></tr>
+        <tr><td><code>--fs-xs</code></td><td>11 / 1.5</td><td>徽章、chip、辅助标注</td></tr>
+        <tr><td><code>--fs-sm</code></td><td>12 / 1.55</td><td>表格、状态栏、说明</td></tr>
+        <tr><td><code>--fs-md</code></td><td>13 / 1.5</td><td>正文、按钮、输入框（基准）</td></tr>
+        <tr><td><code>--fs-lg</code></td><td>15 / 1.45</td><td>卡片标题、品牌名</td></tr>
+        <tr><td><code>--fs-xl</code></td><td>18 / 1.4</td><td>球员姓名</td></tr>
+        <tr><td><code>--fs-2xl</code></td><td>21 / 1.35</td><td>球员卡 UID 输入</td></tr>
       </table>
+      <p style="margin-bottom:0">字重：常规 400 / 中号 500 / 强调 600 / 品牌与大数字 700。</p>
     </div>
   </div>
 
-  <h2 id="d-motif"><span class="no">3</span>视觉母题</h2>
-  <div class="grid3">
-    <div class="principle"><div class="p-no">母题 A</div><h4>面板竖条标题</h4><p>3px 青绿竖条 + 标题，替代旧版光秃秃的加粗文字；深/浅主题下层级都清晰。</p></div>
-    <div class="principle"><div class="p-no">母题 B</div><h4>状态胶囊 Pill</h4><p>圆角 99px、语义软底 + 同色文字 + 圆点；图标与文字双通道，不只靠颜色。</p></div>
-    <div class="principle"><div class="p-no">母题 C</div><h4>圆角人像</h4><p>12px 圆角矩形：品牌 38px、微调大头像 168px、空状态同尺寸虚线占位。</p></div>
-    <div class="principle"><div class="p-no">母题 D</div><h4>激活条</h4><p>侧栏当前组 / 当前导航：3px 左侧青绿条 + 软底，源自 FM 皮肤的 active-section。</p></div>
-    <div class="principle"><div class="p-no">母题 E</div><h4>凹槽输入</div><p>只读路径框使用 inset 深色底 + 等宽字 + 类型图标，长路径尾部对齐。</p></div>
-    <div class="principle"><div class="p-no">母题 F</div><h4>无渐变装饰</h4><p>不使用渐变文字、玻璃拟态、发光；仅进度条允许青绿单向渐变。</p></div>
-  </div>
-
-  <h2 id="d-components"><span class="no">4</span>组件规范</h2>
-  <h3>按钮层级（三级）</h3>
-  <div class="mini-ui">
-    <button class="btn primary">主要操作（青绿实底）</button>
-    <button class="btn">次级（描边幽灵）</button>
-    <button class="btn danger">危险（红字，悬停红软底）</button>
-    <button class="btn primary" disabled>禁用（中性灰，无彩色残影）</button>
-  </div>
-  <h3>选择与开关</h3>
-  <div class="mini-ui">
-    <div class="seg3" style="width:260px"><button class="active">保留</button><button>覆写</button><button>生成</button></div>
-    <label class="switch"><input type="checkbox" checked /><span class="track"></span>开关（仍是 checkbox，键盘/读屏可用）</label>
-    <span class="pill ok"><span class="dot"></span>完整胶囊</span>
-    <span class="pill warn"><span class="dot"></span>警告胶囊</span>
-    <span class="pill gray"><span class="dot"></span>中性胶囊</span>
-  </div>
-  <h3>进度与表格</h3>
-  <div class="mini-ui" style="flex-direction:column;align-items:stretch;gap:10px">
-    <div style="display:flex;gap:12px;align-items:center"><div class="progress-track" style="flex:1"><div class="progress-fill" style="width:62%"></div></div><span style="font-size:12px;color:var(--text-2)">8px 高 · 150ms 过渡 · 百分比等宽</span></div>
-    <div style="font-size:12px;color:var(--text-2)">表格：凹槽粘顶表头 · 斑马纹 <code>--zebra</code> · 悬停整行 <code>--bg-raised</code> · 「随机人」用是/否胶囊替代裸文字</div>
-  </div>
-  <h3>弹层与滚动条</h3>
+  <h3>2.3 间距尺度（4px 基准）</h3>
+  <p><code>--sp-1</code> 4 · <code>--sp-2</code> 6 · <code>--sp-3</code> 8 · <code>--sp-4</code> 10 · <code>--sp-5</code> 12 · <code>--sp-6</code> 16 · <code>--sp-7</code> 20 · <code>--sp-8</code> 24 · <code>--sp-9</code> 32</p>
   <ul>
-    <li>模态 / 抽屉是唯一使用柔和投影 <code>--shadow-pop</code> 的层级；背景遮罩 <code>--overlay</code>。</li>
-    <li>滚动条全局自绘：10px 宽、描边透明留白形成细条，悬停加深。</li>
+    <li>卡片内边距：<code>var(--sp-6) var(--sp-7)</code>；卡片纵向间距 14px（12–16 区间，现状保留）。</li>
+    <li>表单行间距 <code>var(--sp-3)</code>；同组控件 gap：<code>var(--sp-3)</code> / <code>var(--sp-4)</code>。</li>
   </ul>
 
-  <h2 id="d-screens"><span class="no">5</span>界面注解（对照「界面预览」页）</h2>
-  <div class="grid2">
-    <div class="doc-card">
-      <h3>主工作台（12 个落点）</h3>
-      <ol class="anno-list">
-        <li><strong>品牌区</strong>：圆角柴犬 + 字标 + <code>v2.0</code> 描边胶囊。</li>
-        <li><strong>五步 Stepper</strong>：完成✓ / 当前双环 / 待办灰，随状态点亮，不可点。</li>
-        <li><strong>面板标题</strong>：竖条 + 标题 + 当前档/组小字。</li>
-        <li><strong>路径行</strong>：凹槽等宽框 + 文件夹/文件/齿轮图标 + 等宽幽灵按钮列。</li>
-        <li><strong>完整性状态条</strong>：齐全绿 / 缺失琥珀+一键创建 / 未知灰，语义胶囊。</li>
-        <li><strong>模式</strong>：三段连体控件，选中段软底，说明常驻右侧。</li>
-        <li><strong>选项</strong>：纯 CSS 自绘 toggle（底层仍是 input checkbox）。</li>
-        <li><strong>主 CTA</strong>：青绿全宽 + 播放图标；禁用中性灰。</li>
-        <li><strong>进度</strong>：8px 条 + 等宽百分比 + 后端状态原文。</li>
-        <li><strong>侧栏当前组</strong>：左激活条 + 软底；RTF 圆点；× 悬停显红。</li>
-        <li><strong>名单表格</strong>：斑马纹、粘顶表头、排序箭头、分页胶囊。</li>
-        <li><strong>状态栏</strong>：状态胶囊（就绪绿点 / 忙碌琥珀呼吸点）+ 日志红色错误角标。</li>
-      </ol>
-    </div>
-    <div class="doc-card">
-      <h3>其余三个界面</h3>
-      <p><strong>单人微调 → 球员卡</strong>：168px 圆角头像为视觉中心；姓名大字 + UID 等宽胶囊；国籍/种族等元信息胶囊；资料字段从「只读输入框表单」改为 4 列「标签—值」信息格；替换行沉底。字段再多也不像表单。</p>
-      <p><strong>日志抽屉</strong>：560px 右抽屉、180ms 滑入；级别 chip + 「仅该级别」；WARN 琥珀 / ERROR 红 / CRITICAL 反白红条；虚拟列表（virtua）与字段结构不变。</p>
-      <p><strong>规则模态</strong>：标准二/三分段切换；raised 表面 + 投影；等宽 JSON 凹槽编辑器，焦点环青绿；保存校验逻辑不动。</p>
-      <div class="callout info"><span class="ic">i</span><p>原生 <code>ask()</code> / <code>message()</code> 系统弹窗保持不动（无法皮肤化）；如二期需要统一，可做应用内确认弹窗组件。</p></div>
-    </div>
+  <h3>2.4 圆角</h3>
+  <table>
+    <tr><th>令牌</th><th>值</th><th>用途</th></tr>
+    <tr><td><code>--radius-sm</code></td><td>6px</td><td>小按钮、标签、输入框内部元素</td></tr>
+    <tr><td><code>--radius-md</code></td><td>8px</td><td>按钮、输入框、下拉、气泡、表格容器</td></tr>
+    <tr><td><code>--radius-lg</code></td><td>10px</td><td>卡片、模态、抽屉内卡片</td></tr>
+    <tr><td><code>--radius-xl</code></td><td>12px</td><td>头像图、品牌 Logo</td></tr>
+    <tr><td>胶囊</td><td>99px</td><td>开关、pill、tag、头像预览按钮</td></tr>
+  </table>
+
+  <h3>2.5 控件高度</h3>
+  <ul>
+    <li>常规控件高 30px（<code>--control-h</code>）；紧凑控件 26px（<code>--control-h-sm</code>，分页器 / 抽屉工具条）。</li>
+    <li>主 CTA 高 38px（<code>.cta-row .btn.primary</code> 保留视觉重量）；同排控件必须等高。</li>
+  </ul>
+
+  <h3>2.6 阴影与层级（elevation）</h3>
+  <table>
+    <tr><th>令牌</th><th>深色</th><th>浅色</th><th>用途</th></tr>
+    <tr><td><code>--shadow-1</code></td><td>0 1px 2px rgba(0,0,0,.30)</td><td>0 1px 2px rgba(23,43,77,.06)</td><td>卡片（与 1px hairline 边叠加）</td></tr>
+    <tr><td><code>--shadow-2</code></td><td>0 6px 16px -6px rgba(0,0,0,.45)</td><td>0 6px 18px -8px rgba(23,43,77,.18)</td><td>悬停抬升、头像气泡</td></tr>
+    <tr><td><code>--shadow-pop</code></td><td>0 18px 48px rgba(0,0,0,.45)</td><td>0 16px 40px rgba(27,42,70,.16)</td><td>模态、抽屉</td></tr>
+    <tr><td><code>--shadow-accent</code></td><td>0 2px 10px -2px rgba(45,212,167,.45)</td><td>0 2px 10px -2px rgba(13,168,128,.35)</td><td>主 CTA（仅启用态）</td></tr>
+  </table>
+  <p>层级关系：<code>画布 0 → 卡片 surface+shadow-1 → 气泡/菜单 shadow-2 → 抽屉/模态 40/50 + shadow-pop</code>。</p>
+
+  <h3>2.7 动效</h3>
+  <table>
+    <tr><th>令牌</th><th>值</th><th>用途</th></tr>
+    <tr><td><code>--dur-fast</code></td><td>120ms</td><td>颜色、边框、背景反馈</td></tr>
+    <tr><td><code>--dur</code></td><td>160ms</td><td>弹层、气泡、开关</td></tr>
+    <tr><td><code>--dur-slow</code></td><td>180ms</td><td>模态 / 抽屉入场（上限）</td></tr>
+    <tr><td><code>--ease-out</code></td><td>cubic-bezier(.22,1,.36,1)</td><td>入场</td></tr>
+    <tr><td><code>--ease-inout</code></td><td>cubic-bezier(.4,0,.2,1)</td><td>开关 / 双向</td></tr>
+  </table>
+  <ul>
+    <li>位移上限 8px（气泡 4px、抽屉/模态 8px；按压 0.5px）。</li>
+    <li>进度条宽度过渡 150ms linear；忙碌呼吸点 1.3s 循环（状态指示，不属于装饰动效）。</li>
+    <li>动画属性白名单：transform / opacity / background-color / border-color / color / box-shadow。</li>
+  </ul>
+
+  <h3>2.8 层级 z-index</h3>
+  <p>抽屉遮罩 <code>40</code> / 抽屉与模态 <code>50</code> / 气泡捕获层 <code>1000</code> / 气泡 <code>1001</code>。新浮层必须在 <code>--z-*</code> 尺度内取值，禁止随手写魔法数。</p>
+
+  <h3>2.9 响应式断点（桌面窗口）</h3>
+  <table>
+    <tr><th>断点</th><th>行为</th></tr>
+    <tr><td>≥1280px（基准）</td><td>侧栏 248px，内容 padding 14/20，路径行三列</td></tr>
+    <tr><td>≤1180px</td><td>侧栏 224px；模式说明允许折行；侧栏脚注收成 2×2</td></tr>
+    <tr><td>≤1024px</td><td>侧栏 212px；步骤条连接线收窄到 20px，允许优雅换行</td></tr>
+    <tr><td>≤900px</td><td>侧栏 200px；内容 padding 12/14；模式分段控件占满整行、说明移到下一行</td></tr>
+    <tr><td>硬下限</td><td>窗口 minWidth 860；低于此宽度仅保证无横向滚动、不重叠；<strong>不做移动端适配</strong></td></tr>
+  </table>
+  <p>宽内容（拓展名单 18 列）始终由 <code>.table-scroll</code> 内部横向滚动吸收，页面级永不出现横向滚动条。</p>
+  <div class="callout danger"><span class="ic">!</span><p>窗口尺寸约束落在 <code>src-tauri/src/lib.rs</code> 的编程式建窗（<code>inner_size(1280,800)</code>、<code>min_inner_size(860,600)</code>）。该窗口必须代码创建（<code>.data_directory()</code> 把 WebView2 数据便携化），<strong>禁止</strong>在 tauri.conf.json 声明 windows，否则会建出两个 label 为 "main" 的 webview 导致 panic。</p></div>
+
+  <h2 id="d-layout"><span class="no">3</span>布局骨架</h2>
+<pre>┌──────────┬──────────────────────────────────────┐
+│ Sidebar  │  Content (padding 14 20 18, gap 14)  │
+│ 248px    │   StepperCard                        │
+│ surface  │   Card: 当前任务                      │
+│          │   Card: 替换执行                      │
+│          │   Card.grow: 结果区（flex:1,min 300） │
+├──────────┴──────────────────────────────────────┤
+│ StatusBar 32px（grid-column 2）                  │
+└──────────────────────────────────────────────────┘
+LogDrawer / Modal / Popover 浮于布局之外</pre>
+  <ul>
+    <li>根布局：<code>display:grid; grid-template-columns:248px 1fr; grid-template-rows:1fr auto; height:100vh</code>。</li>
+    <li>只有 <code>.content</code> 与卡片 <code>.card-body</code> / <code>.table-scroll</code> 可滚动；<code>body{overflow:hidden}</code>。</li>
+    <li>滚动容器必须 <code>min-height:0</code>，否则 flex 子项撑破布局。</li>
+  </ul>
+
+  <h2 id="d-type-rules"><span class="no">4</span>排版规范</h2>
+  <div class="doc-card">
+    <ul>
+      <li>中文文案后接西文/数字时留半角空格（如「扫描 RTF」「共 12 条」），由 <code>text.ts</code> 统一保证。</li>
+      <li>标题不加粗到 700（卡片标题 600）；品牌名 / 大 UID 才用 700。</li>
+      <li>一段说明只用一个弱化层级（<code>text-3</code>），不叠加「小字 + 浅色 + italic」。</li>
+      <li>路径、UID、文件名、日志一律等宽体；长路径在只读输入框中钉住尾部。</li>
+      <li>省略号只用于：侧栏组名（单行）、状态栏日志预览、气泡标题；<strong>按钮文字不允许截断</strong>（见 §5.1）。</li>
+    </ul>
   </div>
 
-  <h2 id="d-a11y"><span class="no">6</span>无障碍、对比度与动效</h2>
-  <div class="grid2">
-    <div class="doc-card">
-      <h3>无障碍</h3>
-      <ul class="checklist">
-        <li>正文 / 控件文字对比度 ≥ 4.5:1（双主题逐一核验）。</li>
-        <li>所有可交互元素有可见焦点环：3px <code>--focus</code> 半透明环。</li>
-        <li>开关、分段控件底层保持原生 input/button，键盘 Tab 与读屏语义不变。</li>
-        <li>状态一律「图标/形状 + 文字」双通道，不单独依赖色相。</li>
-        <li>抽屉遮罩支持 Esc / 点击关闭并带 aria-label。</li>
-      </ul>
-    </div>
-    <div class="doc-card">
-      <h3>动效预算（硬约束）</h3>
-      <ul class="checklist">
-        <li>所有动画时长 ≤ 200ms（抽屉/模态 180ms，悬停 140–160ms）。</li>
-        <li>位移 ≤ 8px（抽屉 8px、模态 8px 上浮）。</li>
-        <li>进度条宽度过渡 150ms；忙碌呼吸点 1.3s 透明度循环。</li>
-        <li>全局适配 <code>prefers-reduced-motion: reduce</code>：关闭动画与过渡。</li>
-      </ul>
-    </div>
+  <h2 id="d-components"><span class="no">5</span>组件库规范</h2>
+  <p>全局类位于 <code>app.css</code>，组件一文件一个（<code>src-svelte/lib/components/</code>）。状态命名：默认 / <code>:hover</code> / <code>:active</code> / <code>:focus-visible</code> / <code>:disabled</code> / <code>.active</code>（选中）/ <code>.busy</code>。</p>
+  <h3>5.1 Button（<code>button.btn</code>）</h3>
+  <table>
+    <tr><th>变体</th><th>类</th><th>外观</th><th>用途</th></tr>
+    <tr><td>次级（默认）</td><td><code>.btn</code></td><td>raised 底 + hairline-2 边；悬停 accent-soft 底 + accent 文字/边</td><td>扫描、选择、取消等大多数操作</td></tr>
+    <tr><td>主操作</td><td><code>.btn.primary</code></td><td>accent 实底 + contrast 文字 + shadow-accent；悬停 hover 色；按 0.5px</td><td>每屏最多一个主 CTA（替换头像、激活、保存）</td></tr>
+    <tr><td>危险</td><td><code>.btn.danger</code></td><td>幽灵红字；悬停 danger-soft 底 + danger 边</td><td>删除类（侧栏固定宽按钮保留 <code>.danger-solid</code> 别名）</td></tr>
+    <tr><td>大按钮</td><td><code>.btn.big</code></td><td>高 38px</td><td>少量强调按钮</td></tr>
+    <tr><td>图标按钮</td><td><code>.icon-btn</code></td><td>22×22 透明；悬停 raised 底；危险变体悬停红色</td><td>＋/×/翻页/关闭</td></tr>
+  </table>
+  <div class="mini-ui">
+    <button class="btn primary">主要操作</button>
+    <button class="btn">次级按钮</button>
+    <button class="btn danger">危险操作</button>
+    <button class="btn" disabled>禁用（中性灰，无彩色残影）</button>
+  </div>
+  <ul>
+    <li>高 30px / padding <code>7px 14px</code>；圆角 md；字号 13；图标与文字 gap 6，图标 14–15px。</li>
+    <li>禁用：幽灵按钮 <code>opacity:.5</code> + not-allowed；实底按钮切换为 raised 底 + hairline 边 + text-3 字，不留彩色残影（主 CTA 禁用时 box-shadow:none）。</li>
+    <li><strong>按钮内文字不得省略号截断</strong>：空间不够优先缩短 <code>text.ts</code> 文案，全称保留在 <code>title</code>。</li>
+    <li>仅图标按钮必须带 <code>title</code> 与 <code>aria-label</code>。</li>
+  </ul>
+  <h3>5.2 表单控件</h3>
+  <ul>
+    <li><strong>文本/搜索输入</strong>：inset 底、常态 hairline-2 描边、高 30、聚焦 accent 边 + 3px focus-ring；悬停（未聚焦）边色调到 <code>--text-3</code>。</li>
+    <li><strong>下拉 select</strong>：与输入框同高同边；自绘 CSS 三角；<code>option{background:var(--bg-surface);color:var(--text-1)}</code>。</li>
+    <li><strong>只读输入</strong>：保持 inset 底 + 等宽字（路径语义），不允许出现“看起来可编辑”的白底。</li>
+    <li><strong>checkbox</strong>：原生控件 + <code>accent-color:var(--accent)</code>，14px。</li>
+    <li><strong>Switch（<code>.switch</code>）</strong>：视觉隐藏的原生 checkbox（保留键盘/读屏语义）+ 19×34 轨道；选中 accent 实底，圆点 13px 滑动 15px，160ms；焦点环落在轨道上。</li>
+    <li>标签：表单行 label 右对齐、宽 78px、text-2；复选/开关行 label 左对齐、text-1、可点击区域包含控件。</li>
+  </ul>
+  <h3>5.3 分段控件、标签页与 Chip</h3>
+  <div class="mini-ui">
+    <div class="seg3" style="width:260px"><button class="active">保留</button><button>覆写</button><button>生成</button></div>
+    <span class="chip active">随机人：是</span>
+    <span class="chip">任意</span>
+    <span class="chip">否</span>
+  </div>
+  <ul>
+    <li><strong>SegControl（<code>.seg3</code>）</strong>：inset 轨道 + 8px 圆角；选中段 accent-soft 底 + accent 文字 600 + 1px accent 30% 描边，不用投影；未选段 text-2，悬停 text-1；切换 120ms。</li>
+    <li><strong>Tabs（<code>.seg-tabs</code>）</strong>：与卡片标题同款 3px 绿色竖条前缀；14px/600；选中 accent 文字 + 2px 下划线；未选 text-2。</li>
+    <li><strong>Chip（<code>.chip</code>）</strong>：99px 胶囊、raised 底、11.5px；选中 accent-soft + accent 边/字。</li>
+    <li><code>.mode-chip</code> 为过渡样式，新代码不再使用，以 SegControl 替代。</li>
+  </ul>
+  <h3>5.4 Card（<code>.card</code>）</h3>
+  <ul>
+    <li>surface 底 + hairline 边 + radius-lg + shadow-1；padding <code>14px 18px 16px</code>（等价 <code>--sp-6 --sp-7</code>）。</li>
+    <li>标题 <code>.card-title</code>：14–15px / 600，前置 3×15px 圆角 2 的 accent 竖条；弱化补充信息用 <code>.muted.small</code> 常规字重。</li>
+    <li><code>.card.grow</code>：吃满剩余纵向空间（<code>flex:1; min-height:300px</code>），内部 <code>.card-body{flex:1;min-height:0;overflow:auto}</code>。</li>
+  </ul>
+  <h3>5.5 数据展示</h3>
+  <table>
+    <tr><th>组件 / 类</th><th>规范</th></tr>
+    <tr><td><code>table.grid</code></td><td>12.5px；单元格 padding 7px 12px；行 1px hairline 底边；隔行 zebra；悬停 raised 底（120ms）；表头 inset 底、text-2、12px/600、粘顶</td></tr>
+    <tr><td>可排序表头</td><td>手型 + 悬停 text-1；排序列用上下 chevron SVG（不用 ↑↓ 字符）；不排序列 <code>.static</code>；支持键盘 Enter/Space（<code>role=button tabindex=0</code>）</td></tr>
+    <tr><td><code>.pill</code></td><td>状态胶囊：99px、12px/500、前置 6px 圆点；<code>.ok/.warn/.gray</code> 三种软底</td></tr>
+    <tr><td><code>.badge</code></td><td>数字徽章：danger 实底白字、高 16、最小宽 16、10.5px/600</td></tr>
+    <tr><td><code>.tag-yes/.tag-no</code></td><td>表格内「是/否」：胶囊软底，是 = accent，否 = text-3</td></tr>
+    <tr><td><code>.meta</code></td><td>球员信息胶囊：raised 底、sm 圆角、12px；标签 text-2 + 值 600；accent / mono 变体</td></tr>
+    <tr><td><code>.progress-track</code></td><td>高 8px（mini 5px），inset 底，填充 accent-press→accent 渐变，宽度过渡 150ms</td></tr>
+    <tr><td><code>.empty</code></td><td>空态：虚线 hairline-2 边、lg 圆角、inset 底、居中；12.5px text-3；可带 28px 图标（search/file/folder）；禁止用空表格或空白代替</td></tr>
+  </table>
+  <h3>5.6 浮层</h3>
+  <table>
+    <tr><th>组件</th><th>规范</th></tr>
+    <tr><td>Modal <code>.modal-backdrop/.modal</code></td><td>overlay 遮罩；surface + hairline-2 + radius-lg + shadow-pop，900×600 上限（92vw/86vh）；fade 180ms + pop 180ms（位移 8px）；<code>role=dialog aria-modal</code>；Esc = 点关闭（脏数据走确认）；打开即聚焦编辑区</td></tr>
+    <tr><td>Drawer <code>.drawer</code></td><td>左侧 560px（82vw 上限）、全高；同套遮罩/阴影；slide 180ms 位移 8px；Esc 关闭（窗口级监听，不依赖焦点位置）</td></tr>
+    <tr><td>Popover <code>.avatar-pop</code></td><td>204px、shadow-2、140ms/4px；悬停延迟 160ms 关闭、点击钉住、Esc/点外部关；钉住态关闭钮用 icons.x</td></tr>
+    <tr><td>Tooltip</td><td>不做自定义组件：短说明一律用原生 <code>title</code>；新代码无 title 的纯图标按钮视为缺陷</td></tr>
+  </table>
+  <h3>5.7 应用框架组件</h3>
+  <ul>
+    <li><strong>Sidebar</strong>：surface 底；品牌区 logo 38px / rounded-xl + hairline 环；分区标题 12px/600/text-2；当前组 accent-soft 底 + 3px 左竖条；组条目需有悬停底；底部链接为安静脚注，悬停出现软底胶囊。</li>
+    <li><strong>Stepper</strong>：22px 序号圆；未达 text-3 描边、当前 accent 边 + accent-soft 底 + 4px 软光晕、完成 accent 实底对勾；连接线 2px，完成段 accent；窄屏连接线收 20px 允许换行。</li>
+    <li><strong>StatusBar</strong>：32px、surface 底 + 顶 hairline；状态点 7px（忙碌琥珀呼吸）；日志预览单行省略；右侧「日志」为描边胶囊按钮，错误徽章挂在其上。</li>
+    <li><strong>LogDrawer</strong>：工具条 13.5px/600 标题；virtua 虚拟列表只渲染视口内行；日志行等宽 11.5px / 行高 1.75，长行折行；error/warn 用语义色。</li>
+  </ul>
+  <h3>5.8 图标</h3>
+  <ul>
+    <li>全部为 24×24 线性 SVG：<code>fill:none;stroke:currentColor;stroke-width:2;stroke-linecap/linejoin:round</code>；唯播放键实心。</li>
+    <li>统一从 <code>icons.ts</code> 引用，外层 <code>&lt;svg aria-hidden="true"&gt;</code>，不引第三方图标库。</li>
+    <li>现有集：plus、x、folder、file、gear、search、play、check、chevronLeft/Right、chevronUp/Down、moon、sun。</li>
+    <li>尺寸档位：行内 12px（icon-btn）/ 14–15px（按钮、输入前缀）/ 28px（空态）。</li>
+  </ul>
+
+  <h2 id="d-theme"><span class="no">6</span>主题切换</h2>
+  <div class="doc-card">
+    <ul>
+      <li>开关位于侧栏品牌区：99px 小胶囊，深色显月亮、浅色显太阳，文字为当前主题名。</li>
+      <li>启动即写 <code>document.documentElement.dataset.theme</code>（首帧正确，无闪烁），选择持久化 localStorage 键 <code>ngm-theme</code>。</li>
+      <li>任何新增视觉资产必须双主题验收；只在一个主题下成立的颜色（含透明度叠加）视为缺陷。</li>
+    </ul>
   </div>
 
-  <div class="doc-footer"><span>NewGAN Manager v2.0 · 具体设计方案</span><span>所有消费样式必须走令牌，禁止硬编码色值</span></div>
+  <h2 id="d-interaction"><span class="no">7</span>交互模式</h2>
+  <h3>7.1 状态完备性矩阵</h3>
+  <table>
+    <tr><th>元素</th><th>hover</th><th>active/press</th><th>focus-visible</th><th>disabled</th><th>busy</th></tr>
+    <tr><td>按钮</td><td>软底/边变色</td><td>translateY .5px</td><td>3px focus-ring</td><td>降透明/中性化</td><td>全局 busy 禁用写操作</td></tr>
+    <tr><td>输入框</td><td>边框加强</td><td>—</td><td>accent 边 + ring</td><td>—</td><td>任务期间禁用</td></tr>
+    <tr><td>列表行</td><td>raised 底</td><td>—</td><td>—</td><td>—</td><td>浏览态禁写并给 title 解释</td></tr>
+    <tr><td>浮层</td><td>—</td><td>—</td><td>打开即聚焦、Esc 可关</td><td>—</td><td>—</td></tr>
+  </table>
+  <h3>7.2 反馈模式</h3>
+  <ul>
+    <li><strong>全局忙碌</strong>：后端任务期间 <code>appStore.busy</code> 锁定一切写操作按钮；底部状态点琥珀呼吸 + 迷你进度条（n/total · %）+ 阶段文案；任务结束 100% 停留 20s 再清，避免闪烁。</li>
+    <li><strong>进度</strong>：可数阶段显示「当前/总数」，纯阶段锚点只显示百分比；进度数字 tabular-nums。</li>
+    <li><strong>破坏性操作</strong>：一律 Tauri 原生 <code>ask</code> 确认（删 Profile、删组、补目录、覆写/未知结构继续），文案含对象名/路径；无例外。</li>
+    <li><strong>错误</strong>：命令失败走统一 <code>showError()</code> 原生 message 框；日志抽屉可查；错误数以红色徽章挂在「日志」按钮上。</li>
+    <li><strong>浏览态 / 空态</strong>：未激活 Profile 时写控件禁用并在 title 与 Stepper 提示；每个数据区都有引导式空态，说明「做什么动作才能看到数据」。</li>
+  </ul>
+  <h3>7.3 键盘与可达性</h3>
+  <ul>
+    <li>Tab 顺序 = 视觉顺序；所有自定义可点击元素（switch、排序列表头等）必须键盘可达且 Enter/Space 可触发。</li>
+    <li>焦点环唯一形态：3px <code>--focus-ring</code>；禁止 <code>outline:none</code> 后不补环。</li>
+    <li>图标按钮必须有可读名称（title + 必要时 aria-label）；装饰 SVG aria-hidden。</li>
+    <li>弹层：Esc 关闭、点遮罩关闭（脏数据先确认）、模态 aria-modal。</li>
+    <li>对比底线：正文 ≥ 4.5:1，大字/控件边界 ≥ 3:1；两主题均须满足。</li>
+    <li><code>prefers-reduced-motion: reduce</code> 时全站 animation/transition 归零（全局媒体查询已内置）。</li>
+  </ul>
+  <h3>7.4 性能约束</h3>
+  <ul>
+    <li>大 RTF 解析、表格数据均在 Rust 侧；前端表格分页（每页 8 条），图片按页加载并回收 blob URL；日志用虚拟列表。</li>
+    <li>动效只动 transform/opacity（白名单见 §2.7），不得在动画中触发布局。</li>
+    <li>列表悬停过渡只允许 background/color/border；大 RTF 不打逐行 DEBUG 日志。</li>
+  </ul>
+
+  <h2 id="d-engineering"><span class="no">8</span>实现约定（工程）</h2>
+  <div class="doc-card">
+    <ol>
+      <li>颜色/圆角/字体/阴影/动效只能用令牌；新增视觉值先加令牌。</li>
+      <li>全局可复用类写进 app.css 对应分区；组件特有的才用 <code>&lt;style&gt;</code>，scoped 中禁止硬编码颜色。</li>
+      <li>用户可见文案全部在 <code>text.ts</code>；协议值（'No Profile'、'Preserve'、排序键等）禁止放入文案表。</li>
+      <li>不新增 npm 依赖；不改动 <code>.user/</code> 数据结构与 config.xml 输出。</li>
+      <li>改动视觉后按「质量保障」页的 G1–G7 门槛与双主题 × 断点 × 状态矩阵验收（配套文档 <code>docs/ui-quality-assurance.md</code>）。</li>
+    </ol>
+  </div>
+
+  <div class="doc-footer"><span>NewGAN Manager · NGM DS 1.0 设计系统</span><span>所有消费样式必须走令牌，禁止硬编码色值</span></div>
  </div>
 </div>
 
@@ -1012,7 +1095,7 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
     <div class="b-id">B3</div><div class="b-title">结果区与弹层：表格 / 球员卡 / 抽屉 / 模态 / 空状态</div>
     <div class="b-body">
       <p>PlayersTable 深色斑马表 + 搜索图标 + 分页胶囊（分页/排序/防抖逻辑不动）；ResultsSection tabs 改下划线样式；PlayerViewer 重构为球员卡布局（头像 blob 逻辑、UID 回车、Browse/Replace it 流程不动，只把只读 input 换成定义列表）；LogDrawer 级别 chip 与配色（VList 不动）；RuleEditor 模态与编辑器皮肤化；补齐各空状态（无组 / 无名单 / 无头像虚线占位）。</p>
-      <ul><li><strong>验收</strong>：12 字段在 1366×768 下换行无横向滚动；万条日志滚动流畅；模态未保存确认链路不变。</li></ul>
+      <ul><li><strong>验收</strong>：双主题 × 1440/1280/1180/1024/900 五宽度走查无横向滚动（矩阵见「质量保障」§4）；表格每页 8 条 + 万条日志虚拟滚动流畅；模态未保存确认链路不变。</li></ul>
     </div>
   </div>
 
@@ -1020,12 +1103,12 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
     <div class="b-id">B4</div><div class="b-title">质量门：自动化 / 视觉 / 无障碍 / 兼容</div>
     <div class="b-body">
       <ul class="checklist">
-        <li><code>pnpm check</code> 与 <code>pnpm test</code>（vitest）全绿；<code>cargo test</code> 不受影响。</li>
+        <li>G1–G3 自动化门槛：<code>pnpm check</code> 0 error、<code>pnpm test</code>（vitest）全绿、<code>pnpm build</code> 成功无新增警告；<code>cargo test</code> 不受影响。</li>
         <li>对比度复核：双主题正文 ≥4.5:1，关键文字 ≥4.5:1。</li>
         <li>键盘全流程走查：Tab 焦点环、开关空格切换、抽屉 Esc、模态未保存拦截。</li>
-        <li>分辨率：1366×768（最低）与 1920×1080 分别截图；缩放 125% / 150% 不破版。</li>
+        <li>宽度矩阵：1440/1280/1180/1024/900 逐宽度双主题截图，另抽检硬下限 860；Windows 缩放 125% / 150% 不破版。</li>
         <li>状态矩阵截图：空态 / 浏览态 / 替换中（进度+取消）/ 失败角标 / 抽屉 / 模态 / 球员卡有人像与无头像。</li>
-        <li><code>prefers-reduced-motion</code> 下无动画；大名单（200 行/页）滚动与翻页性能不回退。</li>
+        <li><code>prefers-reduced-motion</code> 下无动画；大名单（每页 8 条翻页、拓展名单 18 列容器内横滚）性能不回退。</li>
       </ul>
     </div>
   </div>
@@ -1041,16 +1124,16 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
     <tr><td><code>Sidebar.svelte</code> / <code>StatusBar.svelte</code></td><td>B1</td><td>class/标记调整、主题开关</td><td>无（事件处理原样保留）</td></tr>
     <tr><td><code>SetupCard.svelte</code> / <code>ReplacePanel.svelte</code></td><td>B2</td><td>路径行/胶囊/seg3/switch/CTA/进度</td><td>无（bind 与 API 调用不动）</td></tr>
     <tr><td><code>PlayersTable.svelte</code></td><td>B3</td><td>表格皮肤、工具栏</td><td>无（分页/防抖/排序不动）</td></tr>
-    <tr><td><code>PlayerViewer.svelte</code></td><td>B3</td><td>表单 → 球员卡定义列表</td><td>blob/替换 API 不动，仅展示标记</td></tr>
+    <tr><td><code>PlayerViewer.svelte</code></td><td>B3</td><td>球员卡布局 + UID 搜索组（placeholder/搜索按钮/提示）</td><td>blob/替换 API 不动，仅展示标记</td></tr>
     <tr><td><code>ResultsSection / LogDrawer / RuleEditor</code></td><td>B3</td><td>tabs、抽屉、模态皮肤化</td><td>无（VList、校验、确认链路不动）</td></tr>
     <tr><td><code>src-svelte/lib/text.ts</code></td><td>B1</td><td>仅新增 Stepper / 主题切换文案</td><td>现有 key 不改值</td></tr>
   </table>
 
   <h2 id="r-gate"><span class="no">3</span>每批合并门槛</h2>
   <div class="grid3">
-    <div class="principle"><div class="p-no">门槛 A</div><h4>自动化</h4><p>pnpm check 零错误；vitest 全绿；无新增 TS / a11y 警告。</p></div>
-    <div class="principle"><div class="p-no">门槛 B</div><h4>视觉走查</h4><p>双主题各截状态矩阵图；令牌覆盖率 100%（grep 无裸色值）。</p></div>
-    <div class="principle"><div class="p-no">门槛 C</div><h4>回归走查</h4><p>新建/切换/删除档、关联/删组、三模式替换、取消、单人微调、规则保存、日志筛选。</p></div>
+    <div class="principle"><div class="p-no">门槛 A</div><h4>自动化（G1–G3）</h4><p>pnpm check 0 error、vitest 全绿、pnpm build 成功；无新增 TS / CSS 警告。</p></div>
+    <div class="principle"><div class="p-no">门槛 B</div><h4>视觉走查（G4–G6）</h4><p>双主题 × 5 宽度状态矩阵截图；令牌覆盖率 100%（grep 无裸色值）；键盘与动效合规，清单见「质量保障」页。</p></div>
+    <div class="principle"><div class="p-no">门槛 C</div><h4>回归走查（G7）</h4><p>新建/切换/删除档、关联/删组、三模式替换、取消、单人微调、规则保存、日志筛选，真实 Tauri 窗口跑通。</p></div>
   </div>
 
   <h2 id="r-scope"><span class="no">4</span>明确不在本次范围</h2>
@@ -1068,16 +1151,200 @@ table.grid tbody tr:hover{background:var(--bg-raised)}
  </div>
 </div>
 
+<!-- ════════════════════════════════════════════════════════════
+     视图 C：质量保障（来源 docs/ui-quality-assurance.md，冲突以该 md 为准）
+     ════════════════════════════════════════════════════════════ -->
+<div class="doc hidden" id="view-qa">
+ <div class="doc-inner">
+  <h1>UI 质量保障方案（v2）</h1>
+  <p class="lead">目标：在不依赖专职 QA 的条件下，让每次界面改动都可重复、可判定地通过质量门槛。平台：Windows 10/11 · Tauri WebView2（Chrome 105+）· 中文界面。配套规范见「设计系统」页。</p>
+  <div class="toc"><a href="#q-gates">质量门槛</a><a href="#q-env">走查环境</a><a href="#q-visual">视觉清单</a><a href="#q-responsive">响应式</a><a href="#q-interaction">交互体验</a><a href="#q-motion">动效</a><a href="#q-a11y">可访问性</a><a href="#q-regression">业务回归</a><a href="#q-workflow">截图工作流</a><a href="#q-records">验收记录</a></div>
+
+  <h2 id="q-gates"><span class="no">1</span>质量门槛（合并/发布前必须全绿）</h2>
+  <table>
+    <tr><th>#</th><th>门槛</th><th>命令/方式</th><th>通过标准</th></tr>
+    <tr><td><code>G1</code></td><td>类型与模板检查</td><td><code>pnpm check</code></td><td>0 error</td></tr>
+    <tr><td><code>G2</code></td><td>单元测试</td><td><code>pnpm test</code></td><td>全部通过（stores/api/log）</td></tr>
+    <tr><td><code>G3</code></td><td>生产构建</td><td><code>pnpm build</code></td><td>构建成功，无新增 CSS/TS 警告</td></tr>
+    <tr><td><code>G4</code></td><td>视觉走查矩阵</td><td>§3 清单</td><td>双主题 × 5 宽度全项通过</td></tr>
+    <tr><td><code>G5</code></td><td>键盘与焦点</td><td>§5 清单</td><td>Tab 全可达，焦点环无缺失</td></tr>
+    <tr><td><code>G6</code></td><td>动效合规</td><td>§6</td><td>时长 ≤200ms、位移 ≤8px，reduced-motion 全静默化</td></tr>
+    <tr><td><code>G7</code></td><td>业务回归</td><td>§8</td><td>三条主流程在真实 Tauri 窗口跑通</td></tr>
+  </table>
+  <p>G1–G3 自动化；G4–G7 按清单人工走查（改动面小时允许只走受影响行）。</p>
+
+  <h2 id="q-env"><span class="no">2</span>标准走查环境</h2>
+  <div class="doc-card">
+    <ul>
+      <li>基准窗口：<strong>1280×800</strong>（FM 玩家常见窗口）与 <strong>1440×900</strong>（设计基准）。</li>
+      <li>断点矩阵宽度：<strong>1440 / 1280 / 1180 / 1024 / 900</strong>；硬下限抽检 860。</li>
+      <li>主题：深色（默认）、浅色，每个宽度都要切一次。</li>
+      <li>数据：分别用「空状态（No Profile、无组）」「完整状态（激活档+组+RTF+扫描后名单 ≥3 页）」两份数据走查；拓展名单（18 列）单独检查表格横滚。</li>
+      <li>纯浏览器（vite dev，无 Tauri）只能验证静态外观与布局；<strong>凡涉及对话框/文件选择/IPC 的交互必须在 <code>tauri dev</code> 真窗口复验</strong>。</li>
+    </ul>
+  </div>
+
+  <h2 id="q-visual"><span class="no">3</span>视觉一致性检查清单</h2>
+  <h3>3.1 令牌与样式卫生</h3>
+  <ul class="todolist">
+    <li>新增颜色/圆角/阴影/字号/动效全部以令牌表达，app.css 外无硬编码颜色（scoped <code>&lt;style&gt;</code> 同此要求）。</li>
+    <li>没有引入新依赖；没有出现 Tailwind/内联 style 承载视觉值（动态 <code>width:%</code> 等运行值除外）。</li>
+    <li>同一语义在各处只用同一个类：主操作 = <code>.btn.primary</code>，危险 = <code>.btn.danger</code>，开关 = <code>.switch</code>，分段 = <code>.seg3</code>，页签 = <code>.seg-tabs</code>。</li>
+    <li>字级只出现在 <code>--fs-*</code> 档位内；路径/UID/日志为等宽体。</li>
+    <li>控件高度符合 30/26/38 三档；同排控件等高。</li>
+    <li>图标全部取自 icons.ts，线性 24×24/stroke 2，尺寸只用 12/14-15/28 三档。</li>
+  </ul>
+  <h3>3.2 双主题</h3>
+  <ul class="todolist">
+    <li>切换主题无白闪、无残留（侧栏、卡片、输入框、表格、弹层、气泡、滚动条、原生 option）。</li>
+    <li>每种语义色在其背景上达到对比度：正文 ≥ 4.5:1；text-3 大字/辅助 ≥ 3:1（占位符允许略低但不得低于 3:1）。</li>
+    <li>焦点环在两种主题下都清晰可见。</li>
+    <li>浅色主题无“深色残影”：深色专用 rgba/阴影在浅底下不发灰、不刺眼。</li>
+  </ul>
+  <h3>3.3 层级与布局</h3>
+  <ul class="todolist">
+    <li>画布 → 卡片 → 浮层的层级一眼可分（surface/elevation/遮罩各司其职）。</li>
+    <li>卡片间距统一；对齐基线：标签列 78px 右对齐、路径行三列不跳变。</li>
+    <li>页面级无横向滚动条；宽表格只在 <code>.table-scroll</code> 内部横滚，表头粘顶有效。</li>
+    <li>长路径在只读框中钉尾显示；省略号只出现在允许清单（组名、状态栏日志、气泡标题），<strong>按钮无截断</strong>。</li>
+    <li>文本不重叠、不被图标/徽章压住；中文与西文之间留空格。</li>
+  </ul>
+  <h3>3.4 状态外观</h3>
+  <p>逐控件目视六态：常态 / 悬停 / 按下 / 聚焦 / 禁用 / 选中或忙碌。</p>
+  <ul class="todolist">
+    <li>主 CTA 禁用态中性化，不像“可点的深色大按钮”。</li>
+    <li>危险操作悬停出现红色软底/红边，常态安静。</li>
+    <li>表格悬停行、当前组、选中分段/页签的“选中语言”互不混淆（绿色软底=选中，行悬停=中性 raised）。</li>
+    <li>空态有引导动作文案与图标，不用空白或裸破折号铺满。</li>
+  </ul>
+
+  <h2 id="q-responsive"><span class="no">4</span>响应式设计验证</h2>
+  <table>
+    <tr><th>检查项</th><th>1440</th><th>1280</th><th>1180</th><th>1024</th><th>900</th></tr>
+    <tr><td>侧栏宽度按断点收敛（248/224/212/200），内容不被挤压重叠</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>存档两个操作按钮始终完整可读（无省略截断）</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>路径行（标签 78 + 输入 + 两枚 96 按钮）单行不溢出</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>替换面板：分段控件与说明文字在 ≤900 优雅换行，开关换行不重叠</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>步骤条：窄屏连接线收窄、换行无横跨长线，当前步仍醒目</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>表格工具条：搜索框收缩让位，分页器始终单行完整</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>拓展名单 18 列：容器内横滚、表头粘顶、气泡不被裁切</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>模态 92vw/86vh、抽屉 82vw 内边距不贴边</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>状态栏：日志预览先截断，状态点/进度/日志按钮永不消失</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>球员卡：≤1024 头像列与信息列不挤压，替换行可换行完整</td><td></td><td></td><td></td><td></td><td></td></tr>
+  </table>
+  <p>抽检方法：DevTools 设备工具栏逐宽度截图；或 CDP 以精确视口（DPR=1）出图，比对无元素越界（<code>scrollWidth &lt;= innerWidth</code>）。</p>
+
+  <h2 id="q-interaction"><span class="no">5</span>交互体验测试标准</h2>
+  <h3>5.1 键盘与焦点</h3>
+  <table>
+    <tr><th>用例</th><th>期望</th></tr>
+    <tr><td>从侧栏开始纯 Tab 走完全屏</td><td>焦点顺序 = 视觉顺序；无焦点掉进禁用控件</td></tr>
+    <tr><td>每个按钮/输入/下拉/开关/分段/页签/分页</td><td>Tab 到位即出现 3px 焦点环；Enter/Space 触发与点击等价</td></tr>
+    <tr><td>表格可排序表头（<code>role=button tabindex=0</code>）</td><td>Enter/Space 切换排序，升降序图标同步</td></tr>
+    <tr><td>开关 switch</td><td>焦点在轨道上显示焦点环；Space 切换且读屏播报 checked</td></tr>
+    <tr><td>模态（规则编辑）</td><td>打开后焦点进入编辑区；Esc 弹脏数据确认后关闭；保存按钮在无修改时禁用</td></tr>
+    <tr><td>日志抽屉</td><td>任意焦点位置按 Esc 关闭（不依赖先点遮罩）；再次打开状态正常</td></tr>
+    <tr><td>头像气泡</td><td>键盘聚焦「预览」按钮即弹出；Esc 关闭钉住态</td></tr>
+    <tr><td>确认对话框</td><td>危险操作（删 Profile、删组、补目录、覆写）均有原生 ask，文案含对象名/路径</td></tr>
+  </table>
+  <h3>5.2 反馈与等待</h3>
+  <ul class="todolist">
+    <li>点击「检查完整性/扫描头像/扫描RTF/读取快照」立即有反馈：状态栏任务名 + 进度条，结束 100% 停留可见。</li>
+    <li>替换中：主按钮变「替换中…」、取消可用、其余写操作全部禁用；阶段文案与百分比实时更新；结束弹结果框。</li>
+    <li>失败路径：后端报错走原生错误框 + 日志可查 + 日志按钮红色错误计数；忙碌态必定复位（不卡死）。</li>
+    <li>悬停反馈 ≤120ms 出现；按钮按下有 0.5px 按压；无“点了没反应”的控件。</li>
+    <li>300ms 搜索防抖存在（连续输入不产生逐字请求）；翻页/切组后旧响应不回填（令牌/缓存失效机制）。</li>
+  </ul>
+  <h3>5.3 文案与引导</h3>
+  <ul class="todolist">
+    <li>所有空态说明“做什么动作能出数据”（引导式空态）。</li>
+    <li>浏览未激活 Profile：顶部步骤条提示 + 写控件 <code>title</code> 解释 + 主 CTA 禁用原因明确。</li>
+    <li>图标按钮必有 title；危险按钮 title 说明后果；无英文调试文案残留。</li>
+    <li>完整性结果三态（完整/可修复/无法识别）胶囊 + 详情 + 动作同时可见。</li>
+  </ul>
+  <h3>5.4 鼠标与触控板</h3>
+  <ul class="todolist">
+    <li>表格行悬停、组条目悬停、链接悬停区域与可点区域一致（不留“看着能点其实点不到”的缝）。</li>
+    <li>气泡：悬停延迟 160ms 关闭、移入气泡不关、点击钉住、点外部/Esc/再点关闭。</li>
+    <li>自定义滚动条在深/浅主题均可见但不抢眼。</li>
+  </ul>
+
+  <h2 id="q-motion"><span class="no">6</span>动效标准</h2>
+  <div class="doc-card">
+    <ul>
+      <li>时长白名单：120 / 140 / 150 / 160 / 180ms；任何新动效 ≤200ms。</li>
+      <li>位移白名单：气泡 4px、抽屉/模态 8px；按压 0.5px；其他动效不位移。</li>
+      <li>只允许动 <code>opacity / transform / background-color / border-color / color / box-shadow</code>；进度条动 <code>width</code> 属既有例外。</li>
+    </ul>
+  </div>
+  <ul class="todolist">
+    <li>开启系统「动画效果关闭」（或 DevTools Emulate <code>prefers-reduced-motion: reduce</code>）后：弹层、呼吸点、按压、开关全部静默化，功能不受影响。</li>
+  </ul>
+
+  <h2 id="q-a11y"><span class="no">7</span>可访问性（A11y）核对</h2>
+  <ul class="todolist">
+    <li>对比度 AA：正文 4.5:1、大字/控件边界 3:1（两主题各测一次，可用 DevTools 拾色器）。</li>
+    <li>语义：侧栏 <code>&lt;aside&gt;</code>、状态栏 <code>&lt;footer&gt;</code>、步骤用 <code>&lt;ol&gt;</code>、表格用真实 <code>&lt;table&gt;/th/td</code>、弹层 <code>role=dialog aria-modal</code>。</li>
+    <li>装饰 SVG <code>aria-hidden</code>；图标按钮有 <code>aria-label</code>/<code>title</code>；状态不只靠颜色（成功/警告带圆点或文案）。</li>
+    <li>读屏顺序与视觉顺序一致；徽章、进度有文本伴随（如 <code>40% · 阶段名</code>）。</li>
+    <li>字号放大到 125%/150%（Windows 缩放）布局不破、不截断。</li>
+  </ul>
+
+  <h2 id="q-regression"><span class="no">8</span>业务回归（真实 Tauri 窗口）</h2>
+  <div class="callout info"><span class="ic">i</span><p>UI 改版不得改变业务流；以下三条主流程每次发版走一遍。</p></div>
+  <div class="doc-card">
+    <ol>
+      <li><strong>建档 → 关联组 → 设 RTF → 检查完整性（含补目录）→ 扫描 RTF → 名单预览（搜索/排序/筛选/翻页/头像气泡）</strong>。</li>
+      <li><strong>三模式替换</strong>：保留/覆写/生成各一次（可用测试 RTF）；验证进度、取消、完成弹窗、快照预览自动可读。</li>
+      <li><strong>危险操作</strong>：删组确认、删 Profile（激活档/未激活档/No Profile 三态）、规则编辑脏数据切换/关闭确认、非法 JSON 保存被拒。</li>
+    </ol>
+  </div>
+  <div class="callout warn"><span class="ic">!</span><p>附带：<code>.user/</code> 目录与 config.xml 输出与 v1 字节兼容（数据层回归，UI 改动后不得回归）。</p></div>
+
+  <h2 id="q-workflow"><span class="no">9</span>截图走查工作流（推荐）</h2>
+  <div class="doc-card">
+    <ol>
+      <li>改动前：<code>1440 深色 / 1440 浅色 / 1024 / 900</code> 四张基线图存档（本次基线存于临时评审目录，正式迭代建议入库 <code>docs/review/YYYYMMDD/</code>）。</li>
+      <li>改动后同视角出图，逐张对比：令牌色、间距、层级、控件对齐。</li>
+      <li>用 CDP/DevTools 断言：<code>document.documentElement.scrollWidth &lt;= innerWidth</code>、<code>getComputedStyle</code> 抽查令牌生效、无元素 <code>getBoundingClientRect()</code> 越界。</li>
+    </ol>
+  </div>
+  <p>缺陷分级：</p>
+  <table>
+    <tr><th>级别</th><th>定义</th><th>合并门槛</th></tr>
+    <tr><td><strong>P0</strong></td><td>数据/功能受损、主流程走不通、对比度严重不足</td><td class="nowrap" rowspan="3">P0/P1 清零<br/>才允许合并</td></tr>
+    <tr><td><strong>P1</strong></td><td>错位、截断、焦点缺失、状态歧义</td></tr>
+    <tr><td><strong>P2</strong></td><td>间距/对齐/文案等 polish</td></tr>
+  </table>
+
+  <h2 id="q-records"><span class="no">10</span>已知验收记录</h2>
+  <table>
+    <tr><th>日期</th><th>范围</th><th>结论</th></tr>
+    <tr>
+      <td class="nowrap">2026-09-15</td>
+      <td>基线审计（深色/浅色 1440、1024、820 纯浏览器）</td>
+      <td>无横向滚动、布局骨架健康；发现 P1：侧栏「No Profile」删除按钮文字居中截断；P2：820px 步骤条换行连接线横跨、favicon 404、输入框深色常态无描边、日志入口为裸文字</td>
+    </tr>
+    <tr>
+      <td class="nowrap">2026-09-15</td>
+      <td>NGM DS 1.0 落地后全量复验（双主题 × 1440/1180/1024/900/820；含数据态夹具：表格/模态/抽屉）</td>
+      <td>G1 <code>svelte-check</code> 0 错 0 警；G2 12/12 测试通过；G3 构建成功（favicon 已打包为 assets）；G4–G6 全 PASS：无横向滚动、按钮截断修复、卡片层级/控件描边/分段选中/日志胶囊/空态图标/表格排序图标/侧栏底链 1 行（≤1180 收 2×2）/820 步骤条短连接线/禁用 CTA 无绿色投影；Esc 关抽屉与模态、焦点环、reduced-motion 归零均通过。窗口默认 1280×800、下限 860×600 已在 <code>src-tauri/src/lib.rs</code> 编程式建窗（<code>WebviewWindowBuilder</code>；不能写进 tauri.conf.json 的 windows，否则与 setup 里的同名 "main" 窗口冲突 panic）。剩余建议：数据态（真实表格/球员卡/规则编辑器）在 <code>tauri dev</code> 真窗口按 §8 回归</td>
+    </tr>
+  </table>
+
+  <div class="doc-footer"><span>NewGAN Manager · UI 质量保障方案 v2</span><span>G1–G7 全绿方可合并 · 冲突以 docs/ui-quality-assurance.md 为准</span></div>
+ </div>
+</div>
+
 <script>
-/* ---- 视图切换：app / philosophy / design / roadmap ---- */
+/* ---- 视图切换：app / design / qa / roadmap ---- */
 function switchView(v, btn){
-  ['app','philosophy','design','roadmap'].forEach(k=>{
+  ['app','design','qa','roadmap'].forEach(k=>{
     document.getElementById('view-'+k).classList.toggle('hidden', k!==v);
   });
   document.querySelectorAll('.preview-bar button[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===v));
   if(v==='app') setPreviewTab('main');
-  const doc=document.getElementById('view-'+(v==='app'?'philosophy':v));
-  if(v!=='app') doc.scrollTop=0;
+  if(v!=='app') document.getElementById('view-'+v).scrollTop=0;
 }
 /* ---- 预览稿内部：名单/球员卡 两个 tab ---- */
 function setPreviewTab(tab){
@@ -1114,8 +1381,9 @@ function toggleTheme(){
     document.getElementById('theme-label').textContent='浅色';
     document.getElementById('theme-btn').textContent='切换深色';
   }
-  const v=p.get('view');
-  if(['philosophy','design','roadmap'].includes(v)){
+  let v=p.get('view');
+  if(v==='philosophy') v='design'; // 旧链接兼容：设计理念已并入设计系统
+  if(['design','qa','roadmap'].includes(v)){
     switchView(v, document.querySelector('.preview-bar button[data-view="'+v+'"]'));
   }
   if(p.get('tab')==='player') setPreviewTab('player');

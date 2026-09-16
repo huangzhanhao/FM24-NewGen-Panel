@@ -32,6 +32,8 @@ export const icons: Record<string, IconDef> = {
   x: { body: '<path d="M18 6 6 18M6 6l12 12" />' },
   chevronLeft: { body: '<path d="m15 6-6 6 6 6" />' },
   chevronRight: { body: '<path d="m9 6 6 6-6 6" />' },
+  chevronUp: { body: '<path d="m6 15 6-6 6 6" />' },
+  chevronDown: { body: '<path d="m6 9 6 6 6-6" />' },
   moon: { body: '<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.6 6.6 0 0 0 21 12.8z" />' },
   sun: {
     body: '<circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />',

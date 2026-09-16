@@ -22,20 +22,25 @@
   /** 根据 UID 拉取预览，并把图片加载为 blob URL。 */
   async function showPreview() {
     if (!uid.trim()) return;
-    preview = await api.previewPlayer(uid);
-    // 回显命中的完整 UID：输入带不带 r- 前缀都能命中，展示以数据源里的原始形态为准
-    // （输入 2000472008 命中随机人 r-2000472008 时，输入框补全前缀）。名单资料优先于映射表；
-    // 两者都空 = 没命中任何数据源，保持用户输入不动。
-    const matched = preview?.record?.uid ?? preview?.mapping?.uid;
-    if (matched) uid = matched;
-    // 加载图片为 blob URL（read_image 返回原始字节）。
-    // 【为何用 blob】WebView 不能直接用本地磁盘路径作为 <img src>，需把字节包成浏览器可识别的 blob URL。
-    if (blobUrl) {
-      URL.revokeObjectURL(blobUrl);
-      blobUrl = "";
-    } // 先释放上一次的 blob，避免内存泄漏
-    if (preview?.imagePath) {
-      blobUrl = await loadImageBlobUrl(preview.imagePath);
+    try {
+      preview = await api.previewPlayer(uid);
+      // 回显命中的完整 UID：输入带不带 r- 前缀都能命中，展示以数据源里的原始形态为准
+      // （输入 2000472008 命中随机人 r-2000472008 时，输入框补全前缀）。名单资料优先于映射表；
+      // 两者都空 = 没命中任何数据源，保持用户输入不动。
+      const matched = preview?.record?.uid ?? preview?.mapping?.uid;
+      if (matched) uid = matched;
+      // 加载图片为 blob URL（read_image 返回原始字节）。
+      // 【为何用 blob】WebView 不能直接用本地磁盘路径作为 <img src>，需把字节包成浏览器可识别的 blob URL。
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        blobUrl = "";
+      } // 先释放上一次的 blob，避免内存泄漏
+      if (preview?.imagePath) {
+        blobUrl = await loadImageBlobUrl(preview.imagePath);
+      }
+    } catch (e) {
+      // 搜索失败（UID 无数据/后端报错）走原生弹窗，与「替换」失败同一反馈口径。
+      await message(String(e), { title: t.dialog.error });
     }
   }
 
@@ -182,17 +187,41 @@
   <!-- 右列：头部（UID 输入框在最左 + 姓名）、三行信息胶囊、替换行。 -->
   <div class="player-info">
     <div class="player-head">
-      <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）；字号与姓名同级、置于最左。 -->
-      <input
-        id="pv-uid"
-        class="uid-chip"
-        type="text"
-        bind:value={uid}
-        placeholder="UID"
-        aria-label={t.viewer.hint}
-        onkeydown={(e) => e.key === "Enter" && showPreview()}
-      />
+      <!-- UID 搜索组：输入框 + 搜索按钮成组等高；回车与点按钮等价。输入框保持大号 UID 视觉签名。 -->
+      <div class="uid-search">
+        <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）；字号与姓名同级、置于最左。 -->
+        <input
+          id="pv-uid"
+          class="uid-chip"
+          type="text"
+          bind:value={uid}
+          placeholder={t.viewer.uidPlaceholder}
+          aria-label={t.viewer.hint}
+          onkeydown={(e) => e.key === "Enter" && showPreview()}
+        />
+        <button
+          type="button"
+          class="btn uid-search-btn"
+          onclick={showPreview}
+          disabled={!uid.trim()}
+          title={t.viewer.hint}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true">{@html icons.search.body}</svg
+          >
+          {t.viewer.searchBtn}
+        </button>
+      </div>
       <h2>{rec?.name || "—"}</h2>
+      <!-- 文本提示安静靠右：说明回车快捷键与 r- 前缀可省略；窄宽折到下一行（见 app.css 媒体查询）。 -->
+      <span class="uid-tip">{t.viewer.uidTip}</span>
     </div>
 
     <!-- 三行胶囊：整体作为 player-info 直接子级，左缘与 UID 输入框对齐（不跟随姓名缩进）。

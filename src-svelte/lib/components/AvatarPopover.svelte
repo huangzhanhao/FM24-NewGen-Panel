@@ -20,6 +20,7 @@
      气泡状态机/缓存/定位/样式在本组件单点维护。 -->
 <script lang="ts">
   import { t } from "../text"; // 全局文案常量
+  import { icons } from "../icons";
 
   let {
     resolve,
@@ -175,18 +176,25 @@
     </div>
     <div class="pop-cap mono" title={pop.key}>{pop.key}</div>
     {#if pop.pin}
-      <button type="button" class="pop-x" aria-label="关闭" onclick={close}
-        >×</button
-      >
+      <button type="button" class="pop-x" aria-label="关闭" onclick={close}>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.2"
+          stroke-linecap="round"
+          aria-hidden="true">{@html icons.x.body}</svg
+        >
+      </button>
     {/if}
   </div>
 {/if}
 
 <style>
   /* 钉住态的透明捕获层：点气泡外任意处关闭（浮在所有内容之上、气泡之下） */
-  .pop-backdrop { position: fixed; inset: 0; z-index: 1000; margin: 0; padding: 0; border: 0; background: transparent; cursor: default; }
+  .pop-backdrop { position: fixed; inset: 0; z-index: var(--z-popover); margin: 0; padding: 0; border: 0; background: transparent; cursor: default; }
   /* 头像气泡：固定定位脱离滚动容器；入场动画 140ms / 4px，符合动效约束 */
-  .avatar-pop { position: fixed; z-index: 1001; width: 204px; padding: 8px; border: 1px solid var(--hairline); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-pop); animation: pop-in 140ms ease; }
+  .avatar-pop { position: fixed; z-index: var(--z-popover-top); width: 204px; padding: 8px; border: 1px solid var(--hairline-2); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-2), var(--shadow-pop); animation: pop-in 140ms ease; }
   @keyframes pop-in {
     from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: none; }
@@ -197,6 +205,8 @@
   .pop-status.err { color: var(--danger); }
   /* 气泡底部的头像标识原文：超长省略，悬停看 title */
   .pop-cap { margin-top: 6px; font-size: 11px; color: var(--text-3); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pop-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 6px; background: rgba(0, 0, 0, 0.28); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; }
-  .pop-x:hover { background: rgba(0, 0, 0, 0.5); }
+  /* 钉住态关闭钮：20×20 表面色小胶囊，悬停转危险色，两主题均清晰 */
+  .pop-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--hairline-2); border-radius: 6px; background: var(--bg-surface); color: var(--text-2); line-height: 1; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; }
+  .pop-x svg { width: 11px; height: 11px; }
+  .pop-x:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 </style>

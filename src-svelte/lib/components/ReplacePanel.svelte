@@ -42,7 +42,9 @@
       // 标准归属由后端按规则 json 的 FolderList 判定；complete（含超集）→ 静默继续。
       // 经 runTask 让状态栏显示「检查完整性」进度：这条命令同样会发 task:progress，
       // 且平铺大包的顶层条目很多，用户点完「替换头像」正是最需要反馈的时刻。
-      const res = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
+      const res = await runTask(t.setup.checkIntegrityBtn, () =>
+        api.checkIntegrity(imgDir),
+      );
       if (res.status === "fixable") {
         const ok = await ask(
           t.replace.missingDirsConfirm(res.standard, res.missing.length),
@@ -161,12 +163,31 @@
   }
   /* 仅收窄本面板分段按钮的纵向内边距（全局为 7px），不影响 RuleEditor 复用的 .seg3 */
   .mode-line .seg3 button {
-    padding: 5px 10px;
+    padding: 4px 10px;
   }
   /* 选项行：三个开关 22px 间距换行 */
   .opt-line {
     display: flex;
     gap: 22px;
     flex-wrap: wrap;
+  }
+
+  /* 窄屏（窗口 ≤900px）：模式行标签与分段控件纵向堆叠，分段占满整行，说明文字自然落在下方 */
+  @media (max-width: 900px) {
+    .path-row.two {
+      grid-template-columns: 1fr;
+      gap: 7px;
+    }
+    .path-row.two .row-label {
+      text-align: left;
+    }
+    .mode-line {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 7px;
+    }
+    .mode-line .seg3 {
+      flex: 1 1 auto;
+    }
   }
 </style>

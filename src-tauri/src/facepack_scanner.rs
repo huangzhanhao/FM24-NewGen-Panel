@@ -76,7 +76,10 @@ pub fn classify(
 /// 一次目录扫描的产物：一级子目录图片索引 + 根图片索引 + 递归全量池（纯收集，无判定）。
 #[derive(Debug, Clone)]
 pub struct PackScan {
-    pub faces_map: BTreeMap<String, BTreeSet<String>>, // 一级子目录名 → 图片名（去扩展名，标准二口径）
+    /// 一级子目录名 → 该目录直接图片的词干（image_stem 口径）。
+    /// 与 recursive_pools 同源同键：标准二/标准三的主池都从这里按 FolderList 过滤而来，
+    /// 而标准三的兜底池取 recursive_pools——两者同键才能保证禁重复 / Preserve 剔除摘一份即两份生效。
+    pub faces_map: BTreeMap<String, BTreeSet<String>>,
     pub root_images: BTreeSet<String>,                 // 根目录图片名（去扩展名）
     /// 递归全量池：相对目录路径（"" = 根，多级用 "/" 分隔）→ 该目录下全部图片词干。
     /// 供 Unknown/兜底"全随机"规则使用；垃圾目录（is_junk_dir）整棵子树不收录。
@@ -109,23 +112,16 @@ pub fn is_image_ext(name: &str) -> bool {
              Some("png") | Some("jpg") | Some("jpeg"))
 }
 
-/// 图片词干的**唯一口径**：取 file_stem（"a.1.png" → "a.1"），扫描池与 xml_parser 解析/回填一致，
-/// 保证同一张图在各层只有一个身份。空词干返回 None（调用方另用 `!starts_with('.')` 排除隐藏文件）。
+/// 图片词干的**唯一口径**：取 file_stem（"a.1.png" → "a.1"），扫描池（faces_map / root_images /
+/// recursive_pools 全部经它）与 xml_parser 解析/回填一致，保证同一张图在各层只有一个身份。
+/// 空词干返回 None（调用方另用 `!starts_with('.')` 排除隐藏文件）。
 pub fn image_stem(name: &str) -> Option<String> {
     let stem = Path::new(name).file_stem()?.to_string_lossy().to_string();
     if stem.is_empty() { None } else { Some(stem) }
 }
 
-/// 【旧口径，标准二 faces_map 专用，勿用于其他扫描路径】取首个 "." 之前的部分（"a.1.png" → "a"）。
-/// 与 image_stem 的 file_stem 规则不同：标准二 generic 路径历史上按此建立子目录图片索引，
-/// 改动会让既有标准二包的 faces_map 键漂移，故隔离保留于此并显式命名。
-fn legacy_face_stem(name: &str) -> Option<String> {
-    let stem = name.split('.').next().unwrap_or("").to_string();
-    if stem.is_empty() { None } else { Some(stem) }
-}
-
 /// 打包/系统垃圾目录：macOS 压缩包解出的 `__MACOSX`、各类 `.` 开头目录（.git 等）。
-/// 仅用于过滤 classify 的输入与递归池；faces_map 仍原样收录，标准二 generic 路径行为不受影响。
+/// 仅用于过滤 classify 的输入与递归池；faces_map 仍收录该键（值为空集）——判定层按本函数过滤键名。
 pub fn is_junk_dir(name: &str) -> bool { name.starts_with('.') || name == "__MACOSX" }
 
 /// 递归收集 dir 及其全部子/孙目录的图片（词干用 file_stem，跳过 `.` 开头文件）。
@@ -185,21 +181,17 @@ pub fn scan_pack_progress(
 
     // 第二趟：逐个一级子目录建索引，每扫完一个上报一次进度。
     for (i, (fname, path)) in subdirs.iter().enumerate() {
-        // faces_map：一级子目录 → 其直接图片（保持旧 FaceMapper::new 口径，标准二专用）。
-        let mut imgs = BTreeSet::new();
-        if let Ok(files) = std::fs::read_dir(path) {
-            for f in files.flatten() {
-                if f.path().is_file() {
-                    let n = f.file_name().to_string_lossy().to_string();
-                    if let Some(stem) = legacy_face_stem(&n) { imgs.insert(stem); }
-                }
-            }
-        }
-        faces_map.insert(fname.clone(), imgs);
-        // 递归全量池：垃圾目录整棵跳过。
+        // 递归全量池：垃圾目录整棵跳过（目录本身仍进 faces_map，只是值为空集）。
         if !is_junk_dir(fname) {
             walk_recursive(path, fname.clone(), &mut recursive_pools);
         }
+        // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不再单独 read_dir：
+        // 主池（标准二/三按 FolderList 过滤 faces_map）与兜底池（recursive_pools）是同一批图的两份索引，
+        // 同源取值才保证两者逐字同键——否则词干规则一有分歧（历史上 "a.1.png" 在主池是 "a"、在兜底池是
+        // "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、这张图会被发出两次。
+        // 顺带省掉每个一级目录的第二遍 read_dir。
+        let imgs = recursive_pools.get(fname).cloned().unwrap_or_default();
+        faces_map.insert(fname.clone(), imgs);
         progress(i + 1, total);
     }
     // 根目录图片也归入递归池（键 = 空串），全随机规则据此连根图一起抽。
@@ -412,7 +404,7 @@ mod tests {
         std::fs::write(dir.path().join("__MACOSX").join("._a.png"), b"png").unwrap();
         let scan = scan_pack(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(scan.root_images, BTreeSet::from(["a".to_string(), "b.1".to_string()]));
-        // faces_map 原样收录垃圾目录（不参与判定），其内 ._a.png 因空词干被排除。
+        // faces_map 原样收录垃圾目录键（不参与判定、值恒为空集），其内 ._a.png 因隐藏文件过滤被排除。
         assert!(scan.faces_map.contains_key("__MACOSX"));
         assert!(scan.faces_map.contains_key(".git"));
         assert!(scan.faces_map["__MACOSX"].is_empty());
@@ -433,12 +425,32 @@ mod tests {
         }
         let scan = scan_pack(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(scan.faces_map.len(), 14);
-        assert!(scan.faces_map.values().all(|s| s.len() == 2)); // e1 + e2（split 词干）
+        assert!(scan.faces_map.values().all(|s| s.len() == 2)); // e1 + e2（image_stem 唯一口径）
         assert!(scan.root_images.is_empty());
         // 递归池 = 根池（空集，键恒存在）+ 14 个种族目录。
         assert_eq!(scan.recursive_pools.len(), 15);
         assert!(scan.recursive_pools.get("").unwrap().is_empty());
         assert!(scan.recursive_pools.values().skip(1).all(|s| s.len() == 2));
+    }
+
+    #[test]
+    fn faces_map_and_recursive_pools_share_stem_rule() {
+        // 含点号文件名（"a.1.png"）在整条链路上只有一个身份 "a.1"：主池（faces_map）与兜底池
+        // （recursive_pools）必须逐字同键，否则禁重复 / Preserve 剔除只摘得掉一份、同一张图会被发出两次。
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("SpanMed");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.png"), b"png").unwrap();
+        std::fs::write(d.join("a.1.png"), b"png").unwrap();
+        std::fs::write(d.join("._hidden.png"), b"png").unwrap(); // AppleDouble：隐藏名不入池
+        std::fs::write(d.join("notes.txt"), b"t").unwrap();       // 非图片不入池
+        std::fs::write(d.join("config.xml"), b"<x/>").unwrap();   // 辅助文件不入池
+        let scan = scan_pack(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(scan.faces_map["SpanMed"], BTreeSet::from(["a".to_string(), "a.1".to_string()]));
+        // 同源：每个一级目录在两份索引里的键集逐字相同（faces_map 直接取自 recursive_pools）。
+        for (k, v) in &scan.faces_map {
+            assert_eq!(scan.recursive_pools.get(k), Some(v), "目录 {k} 的图集在两份索引中应完全一致");
+        }
     }
 
     #[test]

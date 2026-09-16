@@ -60,6 +60,12 @@
   已无调用方，保留给测试用，标了 `#[cfg(test)]` —— 这样发布构建不报 dead_code，测试又不用到处写
   空回调。（更早的 `check_integrity`/`scan_and_total` 当时是直接删掉并改测试调用点，两种做法都行，
   以「少改测试」优先时选 cfg(test)。）
+- **图片词干只有一个口径**：`facepack_scanner::image_stem`（`file_stem`，`"a.1.png"`→`"a.1"`）。
+  `PackScan` 的三份索引全部经它：`root_images`、`recursive_pools`、以及 **faces_map——faces_map 的值
+  直接取自 recursive_pools**（`scan_pack_progress` 第二趟先 `walk_recursive` 再 `get(fname)`），
+  因此标准二/三主池与标准三兜底池逐字同键，禁重复 / Preserve 剔除摘一份即两份生效。
+  历史上 faces_map 用过 `legacy_face_stem`（取首个 `.` 之前）——已删除，勿再引入第二套词干规则。
+  非图片文件与 `.` 开头文件不入池（在 `walk_recursive` 里统一过滤）。
 - 改完 Rust 自检：`$env:CARGO_TARGET_DIR='<repo>\target'; cargo test --manifest-path src-tauri/Cargo.toml`
   （构建产物在仓库根的 target，不在 src-tauri/target）。仓库整体不是 `cargo fmt --check` 干净的，
   别全量 fmt，只保证新代码不新增 fmt 差异。

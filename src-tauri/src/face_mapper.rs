@@ -320,6 +320,35 @@ mod tests {
     }
 
     #[test]
+    fn preserve_with_no_duplicates_excludes_images_occupied_by_xml() {
+        // Preserve + 未勾选「允许复用」：config.xml 已占用的图先按 from 全路径从池中剔除。
+        // facepack() 每个种族目录 3 张图，SpanMed 被旧映射占掉 e0/e1 → 新球员只能拿到 e2（确定性断言）。
+        let dir = tempfile::tempdir().unwrap();
+        let img = facepack(&dir);
+        crate::xml_parser::write_xml(
+            &[
+                MappingEntry { uid: "r-2001".into(), ethnicity: "SpanMed".into(), image: "e0".into() },
+                MappingEntry { uid: "r-2002".into(), ethnicity: "SpanMed".into(), image: "e1".into() },
+            ],
+            Path::new(&img), false,
+        ).unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
+        let data = vec![player("r-2001", "ESP", "1"), player("r-2003", "ESP", "1")];
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Preserve, false, &cancel, &mut |_, _, _| {})
+            .unwrap();
+        // 新球员拿到池里仅剩的那张，不会复用旧映射已占用的图。
+        let new = mapping.iter().find(|m| m.uid == "r-2003").unwrap();
+        assert_eq!((new.ethnicity.as_str(), new.image.as_str()), ("SpanMed", "e2"),
+                   "旧映射占用的 e0/e1 不得再发给新球员");
+        // 旧映射原样保留（Preserve 不重抽）。
+        let old = mapping.iter().filter(|m| m.uid == "r-2001").collect::<Vec<_>>();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].image, "e0");
+    }
+
+    #[test]
     fn cancel_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
@@ -356,6 +385,28 @@ mod tests {
         for m in &mapping {
             assert!(xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some());
         }
+    }
+
+    #[test]
+    fn standard2_dotted_filename_stem_resolves_to_real_file() {
+        // 含点号文件名（"x.1.png"）：写出的 from 必须是 "SpanMed/x.1" 才能定位到真实文件
+        //（词干走 file_stem 唯一口径，扫描池与 xml_parser 的解析/回填同规则）。
+        let dir = tempfile::tempdir().unwrap();
+        let img = facepack(&dir);
+        let spanmed = dir.path().join("SpanMed");
+        for i in 0..3 {
+            std::fs::remove_file(spanmed.join(format!("e{i}.png"))).unwrap();
+        }
+        std::fs::write(spanmed.join("x.1.png"), b"png").unwrap(); // SpanMed 池只剩这一张
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(&[player("r-2001", "ESP", "1")], Mode::Generate, true, &cancel,
+                              &mut |_, _, _| {})
+            .unwrap();
+        assert_eq!((mapping[0].ethnicity.as_str(), mapping[0].image.as_str()), ("SpanMed", "x.1"));
+        assert!(xml_parser::resolve_image_file(Path::new(&img), "SpanMed", "x.1").is_some(),
+                "from 应能定位到真实文件 SpanMed/x.1.png");
     }
 
     #[test]

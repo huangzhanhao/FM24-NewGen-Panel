@@ -389,6 +389,8 @@ impl Standard3Rule {
     /// 禁重复时把已抽出的图从两份索引里同时摘掉。
     /// 【为什么必须同步】`pools`（规则用的一级目录池）与 `recursive_pools`（兜底用的递归全池）
     /// 是同一批图片的两份索引；只摘一份的话，同一张图可能先被规则命中、再被兜底抽中。
+    /// 扫描侧已保证两者同源同键（faces_map 取自 recursive_pools，词干同为 image_stem），
+    /// 这里两份都摘，是为了不依赖「上游同源」这一前提本身。
     fn drop_image(&mut self, dir: &str, stem: &str, duplicates: bool) {
         if duplicates { return; }
         if let Some(pool) = self.pools.get_mut(dir) { pool.remove(stem); }
@@ -869,6 +871,30 @@ mod tests {
         assert_eq!(issued.len(), total, "禁重复应恰好抽完全部 {total} 张图（含包外目录）");
         // 耗尽后继续抽仍为 None（不 panic、不复活已抽走的图）。
         assert!(rule.pick(&player("tail", "ESP", "1"), false).is_none());
+    }
+
+    #[test]
+    fn dotted_filename_has_single_identity_in_both_indexes() {
+        // 含点号文件名（"sp.1.png"）经扫描后在主池与兜底池里是同键 "sp.1"。
+        // 词干规则若在两份索引里分歧（老口径主池 "sp"、兜底池 "sp.1"），会出现两个后果：
+        // ① 写出的 from 定位不到真实文件；② 同一张图先被规则发出、再从兜底池发出第二次。
+        let rcfg = RuleConfig::builtin();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Spain")).unwrap();
+        std::fs::write(dir.path().join("Spain").join("sp.1.png"), b"png").unwrap();
+        let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
+        // ① 禁重复连抽两次：第一次拿走 "sp.1"，第二次主池与兜底池都已摘空 → None。
+        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, &rcfg.standard3);
+        let img = rule.pick(&player("r-1", "ESP", "1"), false).unwrap();
+        assert_eq!((img.dir.as_str(), img.stem.as_str()), ("Spain", "sp.1"));
+        assert!(
+            rule.pick(&player("r-2", "ESP", "1"), false).is_none(),
+            "同一张图不得从兜底池被第二次发出"
+        );
+        // ② Preserve 剔除：from "Spain/sp.1" 在主池与兜底池里都命中，抽不出第二张。
+        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, &rcfg.standard3);
+        rule.exclude_used(&sset(&["Spain/sp.1"]));
+        assert!(rule.pick(&player("r-3", "ESP", "1"), true).is_none());
     }
 
     #[test]

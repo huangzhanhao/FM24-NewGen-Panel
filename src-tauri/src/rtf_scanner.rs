@@ -126,7 +126,12 @@ const PLAYER_BASED_HEADERS: [&str; 2] = ["based", "所在地"];
 const STAFF_JOB_HEADERS: [&str; 2] = ["preferred job", "偏好工作"];
 
 /// 名单的列结构。数据语言不在这里（它根据国籍列查翻译表判断），见 `RtfScanner::language`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// 序列化身份：该枚举直接 derive Serialize（camelCase 变体名）作为前端业务判定的协议码
+/// （basic/extPlayer/extStaff），前端不得再拿 label 的中文文案做判定——
+/// 重命名变体等于显式改协议，编译器会逼你处理所有 match 分支；而改 label 文案不影响逻辑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RtfFormat {
     /// 基础名单：7 列，从「is newgen」过滤视图导出，所有记录都是随机人。
     #[default]
@@ -138,7 +143,7 @@ pub enum RtfFormat {
 }
 
 impl RtfFormat {
-    /// 返回中文名称，用于日志和摘要展示。
+    /// 返回中文名称，用于日志和摘要展示（仅展示，不作协议判据）。
     pub fn label(self) -> &'static str {
         match self {
             RtfFormat::Basic => "基础名单",
@@ -158,8 +163,10 @@ pub struct RosterSummary {
     pub total: usize,         // 名单总条数
     pub newgan: usize,        // 随机人（r- 前缀）条数
     pub detailed: bool,       // 是否含拓展信息（拓展名单为 true）
-    pub format: &'static str, // 格式中文名（RtfFormat::label）
-    pub language: String,     // "English" / "简体中文"
+    pub format: &'static str, // 格式中文名（RtfFormat::label，仅展示/日志）
+    /// 格式协议码：RtfFormat 枚举自身的序列化值（camelCase 变体名），前端业务判定只认它。
+    pub format_code: RtfFormat,
+    pub language: String, // "English" / "简体中文"
 }
 
 impl RosterSummary {
@@ -173,6 +180,7 @@ impl RosterSummary {
                 .count(),
             detailed: data.iter().any(|p| p.detailed.is_some()),
             format: scanner.format.label(),
+            format_code: scanner.format,
             language: scanner.language.clone(),
         }
     }
@@ -812,7 +820,11 @@ pub fn query_page(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageResul
     let total = rows.len();
     PageResult {
         total,
-        items: rows.into_iter().skip(query.offset).take(query.limit).collect(),
+        items: rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect(),
     }
 }
 

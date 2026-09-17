@@ -110,9 +110,9 @@
     return "";
   }
 
-  // 第 15 列语义：按扫描摘要的格式名区分球员（所在地）/职员（偏好工作），格式级信号比逐页猜值更可靠。
+  // 第 15 列语义：按后端结构化协议码区分球员（所在地）/职员（偏好工作），不依赖中文展示文案。
   const isStaffRoster = $derived(
-    appStore.lastRtfScan?.format.includes("职员") ?? false,
+    appStore.lastRtfScan?.formatCode === "extStaff",
   );
   const basedHeader = $derived(
     isStaffRoster ? t.table.colJob : t.table.colBased,

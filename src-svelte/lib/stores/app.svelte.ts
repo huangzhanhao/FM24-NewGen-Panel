@@ -10,6 +10,9 @@ import { api } from '../api';
 import type { AppSnapshot, ProgressPayload, RtfScanResult, TaskProgressPayload } from '../types';
 import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 
+/** 替换流水线的最终结果（'' = 尚未发生过替换）。事件载荷不含 ''，lastResult 初始值用它。 */
+export type ReplaceResult = 'finished' | 'cancelled' | 'failed' | '';
+
 /** 全局应用状态（runes，响应式）。snapshot 由命令返回值整体替换。 */
 export const appStore = $state({
   snapshot: null as AppSnapshot | null, // 后端回传的全局快照（真实激活态；初始为 null，启动后填充）
@@ -29,11 +32,14 @@ export const appStore = $state({
   task: { status: '', value: 0, current: 0, total: 0 } as TaskProgressPayload,
   /** 是否有轻量任务在跑：由 runTask 包住命令调用置位。状态栏据此优先显示 task 进度。 */
   taskRunning: false,
-  lastResult: '' as 'finished' | 'cancelled' | 'failed' | '', // 最近一次替换结果
+  lastResult: '' as ReplaceResult, // 最近一次替换结果
+  /** 「保存备份」开关：批量替换与单人微调共用（两处写 config.xml 前是否先备份）。
+   *  只在本会话内存活（mode 等其余替换选项也都是组件内会话态），不做持久化。 */
+  saveBackup: true,
   rosterVersion: 0,                     // 名单预览版本号：名单缓存被填充/清空时 +1（「扫描RTF」成功、替换结束），触发 PlayersTable 重载
   /** 最近一次解析名单的摘要（null=手上没有名单）。两条来源：「扫描RTF」成功、替换成功
    *  （摘要随 replace:finished 回传，无需用户再点一次扫描）。名单预览/单人微调据此判断名单格式
-   *  ——拓展格式才有「随机人」筛选，且 format 含「职员」时第 15 列是偏好工作。 */
+   *  ——拓展格式才有「随机人」筛选，且 formatCode 为 extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
   /** 名单缓存可读标记：后端名单缓存里有没有数据。对应快照预览的 snapshotReadPath。
    *  两处会填充后端缓存：「扫描RTF」成功 → true；替换结束 → 成功为 true、失败/取消为 false
@@ -141,7 +147,7 @@ export async function reloadLogs() {
 }
 
 /** 订阅后端事件（App 挂载时调用一次）。onFinished 是替换结束时的回调。 */
-export async function initListeners(onFinished: (r: string) => Promise<void>) {
+export async function initListeners(onFinished: (r: ReplaceResult) => Promise<void>) {
   if (inited) return; // 防止重复订阅
   inited = true;
   await refreshSnapshot(); // 先拉一次全局快照，界面立即有数据可渲染
@@ -165,10 +171,10 @@ export async function initListeners(onFinished: (r: string) => Promise<void>) {
     appStore.task = e.payload;
   });
   // 订阅完成事件：记下结果、刷新快照（replacing 会变 false）、调用回调弹窗提示。
-  await listen<{ result: string; roster: RtfScanResult | null }>(
+  await listen<{ result: Exclude<ReplaceResult, ''>; roster: RtfScanResult | null }>(
     'replace:finished',
     async (e) => {
-      appStore.lastResult = e.payload.result as typeof appStore.lastResult;
+      appStore.lastResult = e.payload.result;
       // 名单摘要随事件回传（后端替换时已经解析过名单）：前端不必再点一次「扫描RTF」就知道
       // 名单格式；失败/取消时为 null——后端已把名单缓存写回空表，摘要一并清掉。
       appStore.lastRtfScan = e.payload.roster;

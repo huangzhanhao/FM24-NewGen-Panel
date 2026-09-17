@@ -24,7 +24,7 @@ mod templates; // 头像包标准与抽图模型（一个标准一个自包含�
 mod xml_parser; // 读写 config.xml（FM 认的头像映射配置）
 
 use commands::AppState;
-use logger::{LogMemory, Logger};
+use logger::{LogMemory, LogSink, Logger};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};

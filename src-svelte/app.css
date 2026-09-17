@@ -684,25 +684,31 @@ table.grid tbody tr:hover { background: var(--bg-raised); }
 .mapping::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
 .mapping.set::before { background: var(--accent); }
 .player-info { flex: 1; min-width: 380px; display: flex; flex-direction: column; gap: 14px; }
-/* 头部：UID 搜索组在最左（与姓名同级字号），姓名在右，文本提示靠右 */
-.player-head { display: flex; align-items: center; justify-content: flex-start; column-gap: 18px; row-gap: 8px; flex-wrap: wrap; }
-.player-head h2 { font-size: 21px; font-weight: 700; margin: 0; letter-spacing: .2px; }
-/* UID 搜索组：输入框与「搜索」按钮成组、拉伸等高（同排控件等高规则） */
+/* 头部：标准尺寸 UID 搜索组在最左，姓名居中，文本提示贴右缘；默认单行不折行，
+   空间不足时由姓名省略号让位（仅 ≤900px 窄窗让提示独占下一行）。 */
+.player-head { display: flex; align-items: center; justify-content: flex-start; column-gap: 16px; row-gap: 8px; flex-wrap: nowrap; }
+.player-head h2 {
+  font-size: 21px; font-weight: 700; margin: 0; letter-spacing: .2px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* UID 搜索组：输入框与「搜索」按钮均为设计系统 §5 标准控件（高 30px、字 13px、圆角 md），
+   组内 stretch 等高；按钮不做任何外观覆盖，完全沿用 button.btn（§5.1 次级按钮）。 */
 .uid-search { display: flex; align-items: stretch; gap: 8px; flex-shrink: 0; }
-.uid-search-btn { white-space: nowrap; }
-/* 右侧文本提示：12px 弱化色，占满头部剩余空间的右缘 */
-.uid-tip { margin-left: auto; align-self: center; font-size: var(--fs-sm); color: var(--text-3); }
-.uid-chip {
-  font-family: var(--mono); font-size: 12px; color: var(--text-2); background: var(--bg-inset);
-  border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 4px 10px;
+/* 右侧文本提示：12px 弱化色，贴住头部右缘，自身永不折行 */
+.uid-tip {
+  margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
+  font-size: var(--fs-sm); color: var(--text-3);
 }
-/* UID 胶囊在球员卡里是可输入框（保留输入 + 回车预览语义）；视觉尺寸与姓名 h2 同级，固定在头部最左。 */
+/* UID 输入框：背景/描边/高度/字号/聚焦环全部沿用标准文本输入（§5.2：inset 底、hairline-2 边、
+   高 30、13px、聚焦 accent 边 + 3px ring）；仅按 §4「UID 一律等宽体」覆盖字体族并以 semibold
+   表达数字标识语义；宽 17ch 容得下最长 r- UID（r- + 10 位）。 */
 input.uid-chip {
-  flex-shrink: 0; width: 16ch; max-width: 100%; padding: 1px 12px;
-  font-family: var(--mono); font-size: 21px; font-weight: 700; line-height: 1.35; color: var(--text-1);
+  flex-shrink: 0; width: 17ch; max-width: 100%;
+  font-family: var(--mono); font-size: var(--fs-md); font-weight: 600; color: var(--text-1);
 }
-/* 窄屏：文本提示独占下一行、左对齐，不再贴右缘 */
+/* 窄屏：恢复折行，文本提示独占下一行、左对齐，不再贴右缘 */
 @media (max-width: 900px) {
+  .player-head { flex-wrap: wrap; }
   .uid-tip { flex-basis: 100%; margin-left: 0; }
 }
 /* 三行信息胶囊：作为 player-info 直接子级，左缘与 UID 输入框对齐；行间距小于卡片级 gap */

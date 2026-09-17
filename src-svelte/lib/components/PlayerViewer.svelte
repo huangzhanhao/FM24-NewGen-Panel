@@ -5,6 +5,7 @@
 <script lang="ts">
   import { open, message } from "@tauri-apps/plugin-dialog";
   import { api } from "../api";
+  import { showError } from "../dialog";
   import { loadImageBlobUrl } from "../images";
   import { t } from "../text"; // 全局文案常量
   import { appStore } from "../stores/app.svelte";
@@ -17,7 +18,6 @@
   let blobUrl = $state(""); // 图片的 blob URL（供 <img src> 使用）
 
   const snap = $derived(appStore.snapshot);
-  const saveBackup = true; // 与主界面备份开关联动可后续扩展，先保持 v1 Viewer 行为
 
   /** 根据 UID 拉取预览，并把图片加载为 blob URL。 */
   async function showPreview() {
@@ -39,8 +39,8 @@
         blobUrl = await loadImageBlobUrl(preview.imagePath);
       }
     } catch (e) {
-      // 搜索失败（UID 无数据/后端报错）走原生弹窗，与「替换」失败同一反馈口径。
-      await message(String(e), { title: t.dialog.error });
+      // 搜索失败（UID 无数据/后端报错）走统一错误弹窗，与批量替换失败同一反馈口径。
+      await showError(e);
     }
   }
 
@@ -64,7 +64,12 @@
       return;
     }
     try {
-      const hit = await api.replaceSingleFace(uid, imgPathInput, saveBackup);
+      // 备份开关读「替换执行」面板的同一共享值：关掉后单人微调也不备份。
+      const hit = await api.replaceSingleFace(
+        uid,
+        imgPathInput,
+        appStore.saveBackup,
+      );
       // hit=true 表示命中并替换；false 表示 config.xml 里本来就没这个 UID，未做修改。
       await message(
         hit ? t.viewer.replacedOk(uid) : t.viewer.mappingNotFound(uid),
@@ -72,16 +77,16 @@
       );
       await showPreview(); // 刷新预览
     } catch (e) {
-      await message(String(e), { title: t.dialog.error });
+      await showError(e);
     }
   }
 
   // 球员记录简写（未预览时为 null，模板用 ?? '—' 兜底）。
   const rec = $derived(preview?.record ?? null);
 
-  // 第 15 列语义：按扫描摘要的格式名区分球员（所在地）/职员（偏好工作），与名单预览表同一口径。
+  // 第 15 列语义：按后端结构化协议码区分球员/职员，与名单预览表同一口径（不依赖中文文案）。
   const isStaffRoster = $derived(
-    appStore.lastRtfScan?.format.includes("职员") ?? false,
+    appStore.lastRtfScan?.formatCode === "extStaff",
   );
 
   /** 一个信息胶囊：标签 + 值；accent=强调色（随机人），mono=等宽（映射路径）。 */
@@ -187,9 +192,9 @@
   <!-- 右列：头部（UID 输入框在最左 + 姓名）、三行信息胶囊、替换行。 -->
   <div class="player-info">
     <div class="player-head">
-      <!-- UID 搜索组：输入框 + 搜索按钮成组等高；回车与点按钮等价。输入框保持大号 UID 视觉签名。 -->
+      <!-- UID 搜索组：标准尺寸输入框 + 搜索按钮成组等高；回车与点按钮等价。 -->
       <div class="uid-search">
-        <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）；字号与姓名同级、置于最左。 -->
+        <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）；标准输入框尺寸、等宽 semibold，置于最左。 -->
         <input
           id="pv-uid"
           class="uid-chip"
@@ -219,8 +224,9 @@
           {t.viewer.searchBtn}
         </button>
       </div>
-      <h2>{rec?.name || "—"}</h2>
-      <!-- 文本提示安静靠右：说明回车快捷键与 r- 前缀可省略；窄宽折到下一行（见 app.css 媒体查询）。 -->
+      <!-- 姓名为头部视觉主体；极端窄宽下由省略号收口（title 悬停看全名），不再把右侧提示挤换行。 -->
+      <h2 title={rec?.name ?? undefined}>{rec?.name || "—"}</h2>
+      <!-- 文本提示安静靠右：说明回车快捷键与 r- 前缀可省略；默认单行，仅 ≤900px 窄窗折到下一行（见 app.css）。 -->
       <span class="uid-tip">{t.viewer.uidTip}</span>
     </div>
 

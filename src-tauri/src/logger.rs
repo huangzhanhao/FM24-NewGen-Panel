@@ -118,9 +118,9 @@ impl LogMemory {
     }
 }
 
-/// 应用日志门面：调用方持有的稳定 API（info/warn/error/...），内部转发给 log 门面宏，
-/// 由官方插件的三个 target（stdout / 滚动文件 / 内存缓冲）各自消化。
-/// path/memory 只是随身携带「打开日志文件」与「回查历史」所需的信息。
+/// 应用日志门面：级别 API（trace/debug/info/warn/error）全部由 `LogSink` trait 提供，
+/// 统一经 `write` 转发给 log 门面宏，再由官方插件三个 target（stdout / 滚动文件 / 内存缓冲）消化。
+/// Logger 自身只随身携带「打开日志文件」的路径与「回查历史」的内存缓冲。
 pub struct Logger {
     path: PathBuf,          // 日志文件路径（前端「打开日志文件」按钮用）
     memory: Arc<LogMemory>, // 内存环形缓冲（query 回查用）
@@ -132,16 +132,6 @@ impl Logger {
     pub fn new(data_dir: &Path, memory: Arc<LogMemory>) -> Self {
         Self { path: data_dir.join("newgan.log"), memory }
     }
-
-    // 常用级别快捷方法：直接走 log 门面宏，module 即门面的 target。
-    // trace/debug 当前无调用点（API 完整性：接入门面后为依赖库日志与未来调试预留）。
-    #[allow(dead_code)]
-    pub fn trace(&self, module: &str, msg: impl Into<String>) { log::trace!(target: module, "{}", msg.into()) }
-    #[allow(dead_code)]
-    pub fn debug(&self, module: &str, msg: impl Into<String>) { log::debug!(target: module, "{}", msg.into()) }
-    pub fn info(&self, module: &str, msg: impl Into<String>) { log::info!(target: module, "{}", msg.into()) }
-    pub fn warn(&self, module: &str, msg: impl Into<String>) { log::warn!(target: module, "{}", msg.into()) }
-    pub fn error(&self, module: &str, msg: impl Into<String>) { log::error!(target: module, "{}", msg.into()) }
 
     /// 对外暴露日志文件路径。
     pub fn path(&self) -> &Path { &self.path }
@@ -156,8 +146,17 @@ impl Logger {
 /// 测试 = ChannelLogger 把日志送进通道供断言（单元测试装不了全局 logger）。
 /// 泛型默认方法保持 run() 等调用点 `logger.info("模块", 消息)` 的写法不变。
 pub trait LogSink: Send + Sync {
+    /// 唯一实现点：把「一条消息 + 级别 + 模块名」发出去（生产转发全局 log 门面，测试进通道）。
     fn write(&self, level: log::Level, module: &str, msg: String);
+    // 五个级别快捷方法：全部转发给 write，级别语义由 log::Level 承载（调用点写法与旧固有方法一致）。
+    // trace/debug 当前无调用点，且全局阈值为 Info 会被过滤；保留为 API 完整性，故 allow(dead_code)。
+    #[allow(dead_code)]
+    fn trace(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Trace, module, msg.into()) }
+    #[allow(dead_code)]
+    fn debug(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Debug, module, msg.into()) }
     fn info(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Info, module, msg.into()) }
+    fn warn(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Warn, module, msg.into()) }
+    fn error(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Error, module, msg.into()) }
 }
 
 impl LogSink for Logger {

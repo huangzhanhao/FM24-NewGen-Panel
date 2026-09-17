@@ -43,8 +43,16 @@ export interface IntegrityResult {
 /** 「扫描头像」返回摘要（对应 Rust 的 ImageScanResult）。 */
 export interface ImageScanResult { total: number; standard: number; }
 
+/** 名单格式协议码：Rust 枚举 RtfFormat 的 serde 序列化值（camelCase 变体名）。
+ *  它是枚举变体的身份、不是可改的文案——Rust 侧重命名变体属于显式协议变更（match 强制穷举），
+ *  而 format 中文串只是展示/日志文案，可随意改词。 */
+export type RtfFormatCode = 'basic' | 'extPlayer' | 'extStaff';
+
 /** 「扫描RTF」返回摘要（对应 Rust 的 RtfScanResult）。 */
-export interface RtfScanResult { total: number; newgan: number; detailed: boolean; format: string; language: string; }
+export interface RtfScanResult {
+  total: number; newgan: number; detailed: boolean; format: string;
+  formatCode: RtfFormatCode; language: string;
+}
 
 /** 当前组 config.xml 的路径与存在性（对应 Rust 的 ConfigXmlInfo）。 */
 export interface ConfigXmlInfo { path: string; exists: boolean; }

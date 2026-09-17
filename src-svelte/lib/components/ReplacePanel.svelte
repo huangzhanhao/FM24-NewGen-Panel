@@ -13,11 +13,11 @@
     t.replace.modes.find((m) => m.value === mode)?.desc ?? "",
   );
 
-  // 四个表单选项（与复选框双向绑定）；mode 的取值是发往后端的协议值。
+  // 三个表单选项（与复选框双向绑定）；mode 的取值是发往后端的协议值。
+  // saveBackup 用 appStore 共享：单人微调页读同一个开关，两条路径行为一致。
   let mode = $state<"Preserve" | "Overwrite" | "Generate">("Preserve");
   let allowDuplicates = $state(true);
   let filterNewgan = $state(true);
-  let saveBackup = $state(true);
 
   // 替换只作用于后端当前激活档（浏览态禁用）；展示态统一取自 store getter。
   const snap = $derived(appStore.snapshot);
@@ -63,7 +63,7 @@
         mode,
         filterNewgan,
         allowDuplicates,
-        saveBackup,
+        saveBackup: appStore.saveBackup,
       });
       await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效
     } catch (e) {
@@ -104,7 +104,11 @@
         <span class="track"></span>{t.replace.optFilterNewgan}
       </label>
       <label class="switch">
-        <input type="checkbox" bind:checked={saveBackup} disabled={busy} />
+        <input
+          type="checkbox"
+          bind:checked={appStore.saveBackup}
+          disabled={busy}
+        />
         <span class="track"></span>{t.replace.optSaveBackup}
       </label>
     </div>

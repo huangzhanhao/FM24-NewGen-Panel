@@ -33,6 +33,7 @@ venv/
 .qoder
 .design-qa/
 .zcode/
+.workbuddy/
 .idea/
 scripts_dev/
 *.iml

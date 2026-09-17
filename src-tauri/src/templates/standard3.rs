@@ -6,7 +6,7 @@
 //! 规则块的键有三类：国籍三字码（国家级块）、目录名（族群/群组块）、`_DEFAULT_`（全局块）。
 //! 每条规则有四种形态：`"default"`（归属者自己的目录）、`directly`（单一目录）、
 //! `random`（等概率多选一）、`randomWithWeight`（按权重多选一）。
-use super::{filter_pools, pick_from_pools_flat, PickedImage, PickRule, RuleFile};
+use super::{pick_from_pools_flat, sorted_unique, PickedImage, PickRule, Pools, RuleFile};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -327,32 +327,55 @@ fn save_file(path: &Path, content: &str) -> Result<(), String> {
 }
 
 /// 标准三抽图规则：规则块模型。
+///
+/// 【为什么只有一份池】历史上这里有两份索引：`pools`（清单内目录）与 `recursive_pools`（递归全池），
+/// 于是「禁重复摘图」必须两边都摘（drop_image），漏一处同一张图就会被发出两次；反过来兜底抽中的图
+/// 也得回头从主池摘。现在只有**一份全池**，规则与兜底都从它取图 —— 摘一次即两边同时生效，
+/// 同步问题在结构上就不存在了；顺带省掉构造时的整份克隆（28 万词条，约几十 MB）。
 pub struct Standard3Rule {
-    pools: BTreeMap<String, BTreeSet<String>>,           // FolderList 过滤后的一级目录池
-    recursive_pools: BTreeMap<String, BTreeSet<String>>, // Fallback::Random 用的递归全池
-    cfg: Standard3Config,                                // 构造时只拿自己这份配置
+    /// 唯一的图片存储：目录路径 → 词干池（含清单内、清单外与根 ""）。
+    pools: Pools,
+    /// 清单内（FolderList）、且构造时非空的目录名 —— 规则候选目录只有这些算「可用」。
+    /// 只存目录名不存图，所以包外目录（Scandinavian / Staff/WF 之类）天然进不了规则池，
+    /// 但它们的图仍在 `pools` 里，供 `Fallback::Random` 兜底。
+    rule_dirs: BTreeSet<String>,
+    cfg: Standard3Config, // 构造时只拿自己这份配置
     fallback: Fallback,
 }
 
 impl Standard3Rule {
-    /// 构造规则：`faces_map` 经 FolderList 过滤成主池（规则解析出的目录从这里取图），
-    /// `recursive_pools` 是 `Fallback::Random` 用的递归全池，`cfg.fallback` 决定第二级兜底策略。
+    /// 构造规则：以 `recursive_pools`（递归全池，含包外目录与根）为**唯一存储**，
+    /// 按 `cfg.folder_list` 过滤出「规则可用目录」的名字集合；`cfg.fallback` 决定第二级兜底策略。
+    /// 【faces_map 只用来判名】扫描侧保证 `faces_map[dir]` 与 `recursive_pools[dir]` 逐字同键同值
+    /// （主池直接取自递归池），所以拿哪一份判断「该目录非空」都等价；这里只为判定，不再复制图。
     pub fn new(
         faces_map: &BTreeMap<String, BTreeSet<String>>,
         recursive_pools: &BTreeMap<String, BTreeSet<String>>,
         cfg: &Standard3Config,
     ) -> Self {
-        Self {
-            pools: filter_pools(faces_map, &cfg.folder_list),
-            recursive_pools: recursive_pools.clone(),
-            fallback: cfg.fallback,
-            cfg: cfg.clone(),
-        }
+        let mut pools: Pools = recursive_pools
+            .iter()
+            .map(|(dir, stems)| (dir.clone(), sorted_unique(stems.iter().cloned())))
+            .collect();
+        // 根键兜底：扫描侧恒会写入 "" 键（无根图时为空集），这里补一次是为了不依赖该前提。
+        pools.entry(String::new()).or_default();
+        let rule_dirs: BTreeSet<String> = cfg
+            .folder_list
+            .iter()
+            .filter(|d| faces_map.get(*d).is_some_and(|s| !s.is_empty()))
+            .cloned()
+            .collect();
+        Self { pools, rule_dirs, fallback: cfg.fallback, cfg: cfg.clone() }
+    }
+
+    /// 目录是否「可用」：在清单内、且池里还有图。规则只允许从这样的目录取图。
+    fn usable(&self, d: &str) -> bool {
+        self.rule_dirs.contains(d) && self.pools.get(d).is_some_and(|p| !p.is_empty())
     }
 
     /// 按候选形态挑一个「包内存在且非空」的目录；加权形态会先裁掉不可用项再归一。
     fn choose_dir(&self, candidates: &Candidates) -> Option<String> {
-        let usable = |d: &str| self.pools.get(d).is_some_and(|s| !s.is_empty());
+        let usable = |d: &str| self.usable(d);
         match candidates {
             Candidates::Single(d) => usable(d).then(|| d.clone()),
             Candidates::Uniform(list) => {
@@ -376,35 +399,21 @@ impl Standard3Rule {
 
     /// 从指定目录池随机取一张图；禁重复时把它从池中移除。目录不可用返回 None。
     fn take_from(&mut self, dir: &str, duplicates: bool) -> Option<PickedImage> {
-        let stem = {
-            let pool = self.pools.get_mut(dir)?;
-            if pool.is_empty() { return None; }
-            let idx = rand::rng().random_range(0..pool.len());
-            pool.iter().nth(idx).cloned()?
-        };
-        self.drop_image(dir, &stem, duplicates);
+        // 清单外目录不得被规则取图（可用性判定与 choose_dir 同一处，owner_folder 路径也走这里）。
+        if !self.usable(dir) { return None; }
+        let pool = self.pools.get_mut(dir)?;
+        let idx = rand::rng().random_range(0..pool.len());
+        // 下标直取 O(1)（旧写法 iter().nth(idx) 是 O(idx) 线性游走，实测占抽图成本大头）；
+        // 禁重复就地 swap_remove 摘除，同样 O(1)，且**不需要**再按值找一遍位置。
+        let stem = if duplicates { pool[idx].clone() } else { pool.swap_remove(idx) };
         Some(PickedImage { dir: dir.to_string(), stem })
-    }
-
-    /// 禁重复时把已抽出的图从两份索引里同时摘掉。
-    /// 【为什么必须同步】`pools`（规则用的一级目录池）与 `recursive_pools`（兜底用的递归全池）
-    /// 是同一批图片的两份索引；只摘一份的话，同一张图可能先被规则命中、再被兜底抽中。
-    /// 扫描侧已保证两者同源同键（faces_map 取自 recursive_pools，词干同为 image_stem），
-    /// 这里两份都摘，是为了不依赖「上游同源」这一前提本身。
-    fn drop_image(&mut self, dir: &str, stem: &str, duplicates: bool) {
-        if duplicates { return; }
-        if let Some(pool) = self.pools.get_mut(dir) { pool.remove(stem); }
-        if let Some(pool) = self.recursive_pools.get_mut(dir) { pool.remove(stem); }
     }
 }
 
 impl PickRule for Standard3Rule {
     fn exclude_used(&mut self, used: &BTreeSet<String>) {
-        // 按 from 全路径精确匹配，不跨目录误伤同名图；递归兜底池同样剔除。
+        // 按 from 全路径精确匹配，不跨目录误伤同名图。只有一份全池，剔一次即对规则与兜底同时生效。
         for (dir, pool) in self.pools.iter_mut() {
-            pool.retain(|s| !used.contains(&record_from(dir, s)));
-        }
-        for (dir, pool) in self.recursive_pools.iter_mut() {
             pool.retain(|s| !used.contains(&record_from(dir, s)));
         }
     }
@@ -422,11 +431,9 @@ impl PickRule for Standard3Rule {
             if let Some(img) = self.take_from(owner, duplicates) { return Some(img); }
         }
         match self.fallback {
-            Fallback::Random => {
-                let img = pick_from_pools_flat(&mut self.recursive_pools, duplicates)?;
-                self.drop_image(&img.dir, &img.stem, duplicates); // 主池同步摘除
-                Some(img)
-            }
+            // 兜底从同一份全池里抽：规则已抽走的图不在池里，天然不会重复；
+            // 兜底抽中的图也已从这份池里摘掉，后续规则不会再抽到它 —— 一份存储，无需同步。
+            Fallback::Random => pick_from_pools_flat(&mut self.pools, duplicates),
             Fallback::Skip => None,
         }
     }
@@ -803,14 +810,14 @@ mod tests {
         assert_eq!(layout,
                    crate::facepack_scanner::PackLayout::Standard { standard: 3, complete: true });
         let rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
-        // 抽图主池只收清单内目录：包外目录不进规则池（含与清单目录同在一级的 Scandinavian）。
-        assert_eq!(rule.pools.len(), cfg.folder_list.len());
-        assert!(["Scandinavian", "Staff", "WF"].iter().all(|d| !rule.pools.contains_key(*d)));
-        // 递归全池仍收录包外目录与嵌套子树（Fallback::Random 的兜底来源），根池键恒存在。
-        assert!(rule.recursive_pools.contains_key("Scandinavian"));
-        assert!(rule.recursive_pools.contains_key("Staff/African"));
-        assert!(rule.recursive_pools.contains_key("WF/BrazilMixed"));
-        assert!(rule.recursive_pools.contains_key(""));
+        // 规则可用目录只收清单内且非空的：包外目录不进规则池（含与清单目录同在一级的 Scandinavian）。
+        assert_eq!(rule.rule_dirs.len(), cfg.folder_list.len());
+        assert!(["Scandinavian", "Staff", "WF"].iter().all(|d| !rule.rule_dirs.contains(*d)));
+        // 唯一的全池仍收录包外目录与嵌套子树（Fallback::Random 的兜底来源），根池键恒存在。
+        assert!(rule.pools.contains_key("Scandinavian"));
+        assert!(rule.pools.contains_key("Staff/African"));
+        assert!(rule.pools.contains_key("WF/BrazilMixed"));
+        assert!(rule.pools.contains_key(""));
     }
 
     #[test]

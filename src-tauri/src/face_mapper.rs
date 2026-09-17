@@ -4,7 +4,7 @@
 //! （templates::PickRule）算出目标种族目录并随机取图，产出「球员 UID → 图片」的映射条目。
 //! 三模式（保留/覆写/生成）决定与现有 config.xml 的合并方式；包布局扫描与标准判定在
 //! facepack_scanner，本模块只消费其结果。
-use crate::facepack_scanner::{self, scan_pack_progress, PackLayout, PackScan};
+use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::templates::{self, PickRule, RuleConfig};
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
@@ -54,14 +54,19 @@ pub struct FaceMapper {
 }
 
 impl FaceMapper {
-    /// 扫描头像包并建立索引。扫描交给 facepack_scanner::scan_pack_progress（逐一级子目录上报），
-    /// 标准判定与模型选择交给 templates。progress 供调用方把「第 n 个 / 共 total 个」折算成百分比。
+    /// 扫描头像包并建立索引（「扫盘 + 判定 + 选规则」一体的便捷入口）。
+    ///
+    /// 【仅测试】生产路径不再经过它：替换流水线要**拿到扫出来的索引本身**去回填「扫描头像」缓存
+    /// （见 `replace_flow::map_stage` 与 `RunResult::scan`），所以那边自己调
+    /// `scan_pack_progress` + `from_scan`。留这个包装只是让测试少写两行，故标 cfg(test)
+    /// 免得发布构建报 dead_code。
+    #[cfg(test)]
     pub fn new(
         img_dir: &str,
         config: &RuleConfig,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Self, String> {
-        let scan = scan_pack_progress(img_dir, progress)?;
+        let scan = crate::facepack_scanner::scan_pack_progress(img_dir, progress)?;
         Self::from_scan(img_dir, &scan, config)
     }
 
@@ -118,18 +123,22 @@ impl FaceMapper {
         // 按模式分发到具体处理函数。抽图前先报一次步骤锚点（0/0）：Generate 没有读 XML 那一步，
         // 这个锚点是它唯一的机会把状态栏从「读取头像包索引」切到「映射球员头像」。
         progress(MapStep::Players, 0, 0);
+        // 【xml_data 按值交出】Preserve/Overwrite 都要把「旧映射原样带回」，把所有权传下去后即可
+        // 直接 `into_values()` 搬进结果 Vec；沿用 & 引用就必须 `values().cloned()` 整表克隆一遍
+        // （15 万条实测约 0.1 s，纯白复制）。上面的 exclude_used 只借用了一次，此处移动不冲突。
         match mode {
-            Mode::Preserve => self.process_preserve(rtf_data, &xml_data, duplicates, cancel, progress),
-            Mode::Overwrite => self.process_overwrite(rtf_data, &xml_data, duplicates, cancel, progress),
+            Mode::Preserve => self.process_preserve(rtf_data, xml_data, duplicates, cancel, progress),
+            Mode::Overwrite => self.process_overwrite(rtf_data, xml_data, duplicates, cancel, progress),
             Mode::Generate => self.process_generate(rtf_data, duplicates, cancel, progress),
         }
     }
 
     /// Preserve：跳过 XML 已存在的 UID，只给新球员建映射，旧映射原样保留。
+    /// `xml_data` 按值接收：旧映射要原样带回结果，拿所有权才能 `into_values()` 搬运而不克隆。
     fn process_preserve(
         &mut self,
         rtf_data: &[PlayerRecord],
-        xml_data: &HashMap<String, MappingEntry>,
+        xml_data: HashMap<String, MappingEntry>,
         duplicates: bool,
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(MapStep, usize, usize),
@@ -137,6 +146,7 @@ impl FaceMapper {
         let mut mapping = Vec::new();
         // filter 只留下 XML 中还没有的 UID（即新球员）。先收集成 Vec：进度分母要的是「本次真正要抽图的
         // 球员数」（过滤后的），拿 rtf_data.len() 当分母会让进度条永远走不满。
+        // 该闭包只借用 xml_data 一小会儿，collect 结束即释放，不影响下面把它移走。
         let targets: Vec<&PlayerRecord> = rtf_data
             .iter()
             .filter(|p| !xml_data.contains_key(&p.uid))
@@ -151,8 +161,8 @@ impl FaceMapper {
             }
             progress(MapStep::Players, i + 1, total);
         }
-        // 原样保留 XML 中所有旧映射。
-        mapping.extend(xml_data.values().cloned());
+        // 原样保留 XML 中所有旧映射（into_values 直接搬所有权，不克隆整表）。
+        mapping.extend(xml_data.into_values());
         Some(mapping)
     }
 
@@ -160,12 +170,12 @@ impl FaceMapper {
     fn process_overwrite(
         &mut self,
         rtf_data: &[PlayerRecord],
-        xml_data: &HashMap<String, MappingEntry>,
+        xml_data: HashMap<String, MappingEntry>,
         duplicates: bool,
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(MapStep, usize, usize),
     ) -> Option<Vec<MappingEntry>> {
-        let mut rest = xml_data.clone(); // 先把旧映射全部拷贝一份，后续逐个剔除名单内的
+        let mut rest = xml_data; // 直接接管旧映射的所有权，逐个剔除名单内的（不再整表克隆一份）
         let mut mapping = Vec::new();
         let total = rtf_data.len();
         for (i, p) in rtf_data.iter().enumerate() {
@@ -178,7 +188,9 @@ impl FaceMapper {
             }
             progress(MapStep::Players, i + 1, total);
         }
-        mapping.extend(rest.into_values()); // 剩下的（名单外）保留
+        // 剩下的（名单外）保留。注意：HashMap 的迭代顺序本就未定义，所以保留项在结果里的相对顺序
+        // 与改造前 `values().cloned()` 同属「不确定但等价」——不要写依赖该顺序的断言。
+        mapping.extend(rest.into_values());
         Some(mapping)
     }
 

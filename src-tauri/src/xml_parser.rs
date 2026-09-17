@@ -46,14 +46,23 @@ pub fn parse_xml_entries(path: &Path) -> Result<Vec<MappingEntry>, String> {
     parse_xml_entries_progress(path, &mut |_, _| {})
 }
 
+/// 映射行的行首标记：既是进度分母的计数口径，也是 `RECORD_RE` 的必需前缀。
+///
+/// 【为什么要单独给分母】`captures_iter` 是懒迭代器，不先拿到总数就没有分母。原先写作
+/// `RECORD_RE.find_iter(&text).count()` —— 那是**第二趟完整正则匹配**，15 万行的大表约占总解析
+/// 耗时的三成。本标记是 `RECORD_RE` 里的硬性字面片段（`from="`），所以 `text.matches(...)` 的计数
+/// **≥ 真实匹配数**：分母偏大只会让进度条提前停在区间内（紧随其后就是下一阶段的锚点，仍单调），
+/// 绝不会因为分母偏小而让计数越界。`matches` 走 memchr，比跑一遍正则快得多。
+/// 【口径同步】它与 `RECORD_RE` 必须一致；`parse_xml_entries_progress_reports_exact_total` 测试守着这条。
+const RECORD_MARK: &str = "<record from=\"";
+
 /// 同 `parse_xml_entries`，额外把「已解析第 n 条 / 共 total 条」上报给进度回调（「读取快照」状态栏进度用）。
-/// 【为何先数一遍】captures_iter 是懒迭代器，不先取总数就没有分母；find_iter 只定位、不建对象，开销很小。
 pub fn parse_xml_entries_progress(
     path: &Path,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<MappingEntry>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("读取 config.xml 失败: {e}"))?;
-    let total = RECORD_RE.find_iter(&text).count(); // 映射条数（进度分母）
+    let total = text.matches(RECORD_MARK).count(); // 进度分母（计数口径见 RECORD_MARK 的说明）
     let mut done = 0usize;
     let mut entries = Vec::new();
     for cap in RECORD_RE.captures_iter(&text) {
@@ -62,11 +71,13 @@ pub fn parse_xml_entries_progress(
 
         // from 的内容为相对路径："SpanMed/img1"（标准二）、"img1"（标准一平铺）、
         // "子目录/孙目录/图名"（Unknown 嵌套）。最后一段是图名，其余整体为相对目录。
-        let parts: Vec<&str> = cap[1].split('/').collect();
-        let (eth, img) = if parts.len() >= 2 {
-            (parts[..parts.len() - 1].join("/"), parts[parts.len() - 1])
-        } else {
-            (String::new(), parts[0])
+        // 【为什么用 rsplit_once 而不是 split('/').collect() + join("/")】后者每行先建一个 Vec、
+        // 再建一个新 String（15 万行 = 30 万次额外分配）；前者只从右切一次、只建两个 String，
+        // 语义完全等价（含 "a/" → ("a","")、"/x" → ("","x") 这些边界）。
+        let from = &cap[1];
+        let (eth, img) = match from.rsplit_once('/') {
+            Some((dir, name)) => (dir.to_string(), name.to_string()),
+            None => (String::new(), from.to_string()),
         };
         entries.push(MappingEntry {
             uid: cap[2].to_string(),
@@ -410,6 +421,53 @@ mod tests {
         let map = parse_xml(&pack.join("config.xml")).unwrap();
         assert_eq!(map.len(), 2);
         assert_eq!(map["r-2000000002"].image, "m9");
+    }
+
+    #[test]
+    fn written_mapping_reparses_identically_in_order() {
+        // 【P0-3 的等价性依据】write_xml 按**传入顺序**逐行写出，parse_xml_entries 又按**文件顺序**
+        // 返回，所以「拿本次 mapping 直填快照缓存」与「回读刚写出的文件」结果逐条相同（顺序也相同）。
+        // 替换收尾省掉的正是那次回读（15 万行实测 1.4–1.5 s，且卡住按钮解禁）——
+        // 这条断言就是那次省略的安全网：一旦 write/parse 的口径不再互逆，它会立刻失败。
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        let data = vec![
+            MappingEntry { uid: "r-1001".into(), ethnicity: "".into(), image: "flat1".into() },
+            MappingEntry { uid: "r-1002".into(), ethnicity: "SpanMed".into(), image: "s.1".into() },
+            MappingEntry { uid: "2000000003".into(), ethnicity: "MENA/sub".into(), image: "deep".into() },
+        ];
+        write_xml(&data, &pack, false).unwrap();
+        let parsed = parse_xml_entries(&pack.join("config.xml")).unwrap();
+        assert_eq!(parsed, data, "直填（用写入的 Vec）必须与回读文件逐条相同");
+    }
+
+    #[test]
+    fn parse_xml_entries_progress_reports_exact_total() {
+        // 进度分母（RECORD_MARK 的字面计数）必须与真实解析出的条数一致。
+        // 分母偏大只会让进度条在区间内提前停住（后面还有下一阶段的锚点，仍单调），不会越界；
+        // 但若 RECORD_RE 改了而 RECORD_MARK 忘了同步，这条断言会立刻失败——两份口径的唯一守卫。
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        write_xml(
+            &[
+                MappingEntry { uid: "2000000001".into(), ethnicity: "Asian".into(), image: "a1".into() },
+                MappingEntry { uid: "r-2000000002".into(), ethnicity: "MENA/sub".into(), image: "m9".into() },
+                MappingEntry { uid: "2000000003".into(), ethnicity: "".into(), image: "flat".into() },
+            ],
+            &pack,
+            false,
+        )
+        .unwrap();
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        let entries =
+            parse_xml_entries_progress(&pack.join("config.xml"), &mut |d, t| seen.push((d, t))).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(seen.last().copied(), Some((3, 3)), "进度应报到 (条数, 条数)：{seen:?}");
+        // 模板自身（<record> 根元素、注释、<list>）不含行首标记，所以计数恰好等于映射行数。
+        let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
+        assert_eq!(text.matches(RECORD_MARK).count(), 3);
     }
 
     #[test]

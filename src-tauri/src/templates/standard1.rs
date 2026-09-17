@@ -3,32 +3,34 @@
 //! 【为什么这个标准没有 json 规则文件】它没有任何可配数据：布局判定靠"无子目录 + 根目录有图"，
 //! 抽图靠单一根池。所以 `RuleConfig` 里没有它的字段，`folder_lists()` 里也没有它，
 //! `IMPLEMENTED_STANDARDS` 的拦截同样不经过它（那个拦截只针对 `PackLayout::Standard`）。
-use super::{PickedImage, PickRule};
+use super::{sorted_unique, PickedImage, PickRule};
 use crate::rtf_scanner::PlayerRecord;
 use rand::Rng;
 use std::collections::BTreeSet;
 
 /// 包根全部图片为一个单一池，完全随机抽图。
-pub struct Standard1Rule { pool: BTreeSet<String> }
+/// 池用有序 `Vec`：随机下标直取 O(1)、禁重复 `swap_remove` 也是 O(1)（理由见 templates::Pools）。
+pub struct Standard1Rule { pool: Vec<String> }
 
 impl Standard1Rule {
     /// 用包根图片池（`scan.root_images`）构造；`pick` 忽略球员的国籍与种族码，纯粹从池中随机取图。
-    pub fn new(pool: BTreeSet<String>) -> Self { Self { pool } }
+    /// 【为什么传引用】扫描结果就在调用方手上，构造时转一次池即可，不必先整份克隆再转第二遍。
+    pub fn new(pool: &BTreeSet<String>) -> Self {
+        Self { pool: sorted_unique(pool.iter().cloned()) }
+    }
 }
 
 impl PickRule for Standard1Rule {
     fn exclude_used(&mut self, used: &BTreeSet<String>) {
-        // 平铺条目的 from 全路径就是纯词干，直接比对。
+        // 平铺条目的 from 全路径就是纯词干，直接比对。retain 保持相对顺序，池仍有序。
         self.pool.retain(|s| !used.contains(s));
     }
 
     fn pick(&mut self, _player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
         if self.pool.is_empty() { return None; }
         let idx = rand::rng().random_range(0..self.pool.len());
-        let stem = self.pool.iter().nth(idx).cloned()?;
-        if !duplicates {
-            self.pool.remove(&stem); // 禁重复：选过的图不再出现
-        }
+        // 下标直取 O(1)（旧写法 iter().nth(idx) 是 O(idx)）；禁重复就地摘除，不再按值 linear search。
+        let stem = if duplicates { self.pool[idx].clone() } else { self.pool.swap_remove(idx) };
         Some(PickedImage { dir: String::new(), stem })
     }
 }
@@ -49,7 +51,7 @@ mod tests {
 
     #[test]
     fn standard1_picks_from_root_and_excludes_used() {
-        let mut rule = Standard1Rule::new(sset(&["a", "b", "c"]));
+        let mut rule = Standard1Rule::new(&sset(&["a", "b", "c"]));
         // 全随机：多次抽取都应落在池内，且 dir 为空串。
         for _ in 0..10 {
             let img = rule.pick(&player("r-1", "ZZZ", "1"), true).unwrap();
@@ -66,7 +68,7 @@ mod tests {
 
     #[test]
     fn standard1_empty_pool_skips_every_player() {
-        let mut rule = Standard1Rule::new(BTreeSet::new());
+        let mut rule = Standard1Rule::new(&BTreeSet::new());
         assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
         assert!(rule.pick(&player("r-1", "ESP", "1"), false).is_none());
     }

@@ -2,7 +2,7 @@
 //! 抽图逻辑 = 国籍查表（json `Ethnics`）→ 种族码修正（json `CodeRules`）→ 池优先级 → 随机抽图。
 //! 规则全部来自 `assets/standard2.json`（内置默认）与 `data/rules/standard2.json`（用户可编辑），
 //! 本模块不硬编码任何目录名或码表。
-use super::{filter_pools, PickedImage, PickRule, RuleFile};
+use super::{filter_pools, PickedImage, PickRule, Pools, RuleFile};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -66,8 +66,9 @@ pub fn apply_code_rule(
 }
 
 /// 标准二抽图规则：池 = FolderList 过滤后的一级种族/国籍目录。
+/// 池用有序 `Vec`（见 `templates::Pools`）：随机下标直取 O(1)、禁重复 O(1) 摘除。
 pub struct Standard2Rule {
-    pools: BTreeMap<String, BTreeSet<String>>,
+    pools: Pools,
     cfg: Standard2Config, // 构造时只拿自己这份配置，之后不再看其他标准
 }
 
@@ -96,10 +97,9 @@ impl Standard2Rule {
             let Some(pool) = self.pools.get_mut(dir) else { continue };
             if pool.is_empty() { continue; }
             let idx = rand::rng().random_range(0..pool.len());
-            if let Some(choice) = pool.iter().nth(idx).cloned() {
-                if !duplicates { pool.remove(&choice); }
-                return Some(choice);
-            }
+            // 下标直取 O(1)（旧写法 iter().nth(idx) 是 O(idx) 线性游走）；
+            // 禁重复就地 swap_remove 摘除，不需要再按值 linear search 一遍。
+            return Some(if duplicates { pool[idx].clone() } else { pool.swap_remove(idx) });
         }
         None
     }

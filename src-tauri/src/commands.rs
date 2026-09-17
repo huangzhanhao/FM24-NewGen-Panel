@@ -5,7 +5,7 @@
 //! 也跑在单独线程，因此 AppState 的共享字段用 Mutex 保护、跨线程引用用 Arc、
 //! 运行/取消标志用 AtomicBool。返回 Result<T, String> 时，Err 的中文描述由前端直接弹窗展示。
 use crate::face_mapper::Mode;
-use crate::facepack_scanner::{self, IntegrityResult, PackScan};
+use crate::facepack_scanner::{self, IntegrityResult, PackScan, PackSig};
 use crate::logger::{LogPage, LogSink, Logger};
 use crate::paging::PageResult;
 use crate::profile_manager::ProfileManager;
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 
 // 标准二的 14 目录常量保留在此 re-export（validate_image_dirs 与既有测试引用路径不变）；
@@ -38,10 +39,14 @@ pub struct AppState {
     pub data_dir: PathBuf, // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
-/// 「扫描头像」产出的索引缓存：目录 + 完整扫描结果（仅按 img_dir 命中，切组即失效）。
+/// 「扫描头像」产出的索引缓存：目录 + 完整扫描结果 + 目录签名。
+/// 【命中条件】`img_dir` 相同**且**签名一致（见 facepack_scanner::PackSig）。
+/// 只比路径的话，用户在两次替换之间删掉包里某张图时，我们会拿过期索引写出**指向不存在图片**的
+/// 映射（FM 显示空白头像）且全无提示；签名把这一情况拦在复用之前。切组（img_dir 变）仍然直接失效。
 pub struct FaceIndex {
     pub img_dir: String,
     pub scan: Arc<PackScan>,
+    pub sig: Option<PackSig>,
 }
 
 /// 「读取快照」产出的解析缓存：快照文件路径 + 有序映射条目（快照预览分页查询复用）。
@@ -478,21 +483,33 @@ pub async fn scan_images(
 
     // 进度以「一级子目录」为单位（见 scan_pack_progress），扫完一个大包能明显看到进度在走。
     let mut progress = TaskProgress::new(&app, "扫描头像");
+    let t = Instant::now(); // 扫盘是替换流水线的最大单项开销，这里单独记一条供对比
     let (total, standard, scan) = facepack_scanner::scan_and_total_progress(
         &img_dir,
         &config.folder_lists(),
         &mut |done, total| progress.report(done, total),
     )?;
+    let scan_elapsed = t.elapsed();
+    // 目录签名随索引一起存：替换复用前先比对（包内文件被增删时重扫，避免拿过期索引写错映射）。
+    // 【计时必须与扫盘分开】pack_sig 不递归，但要读完包根并**逐个一级目录数一遍直接子条目**
+    // （标准三 28 万图实测 0.15–0.19 s，与扫盘本身同量级）。混在一起记会把扫盘说得比实际慢一倍多
+    //（实测：扫盘 128 ms 的包，这条日志会显示成 317 ms）。
+    let t_sig = Instant::now();
+    let sig = facepack_scanner::pack_sig(&img_dir);
+    let sig_elapsed = t_sig.elapsed();
     // Arc 包一层入缓存：替换复用时只涨引用计数，不复制整份图片索引。
     *state.faces_cache.lock().unwrap() = Some(FaceIndex {
         img_dir,
         scan: Arc::new(scan),
+        sig,
     });
     state.logger.info(
         "scan",
         format!(
-            "扫描头像完成：{total} 张图片（{}）",
-            layout_label(standard, &config)
+            "扫描头像完成：{total} 张图片（{}），扫盘耗时 {:.1?}，目录签名 {:.1?}",
+            layout_label(standard, &config),
+            scan_elapsed,
+            sig_elapsed
         ),
     );
     progress.finish(); // 收尾 100%（空包/平铺包没有子目录可报，进度条也得走满）
@@ -510,6 +527,7 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
     // 进度以「数据行」为单位（解析前先数一遍行数拿到分母，见 parse_roster_progress）。
     let mut progress = TaskProgress::new(&app, "扫描RTF");
     // &*state.logger：&Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）。
+    let t = Instant::now(); // 解析名单的耗时口径（识别 + 全量解析），与替换流水线里的同一段同口径
     let (summary, data) = scan_rtf_core(&rtf, &*state.logger, &mut |done, total| {
         progress.report(done, total)
     })?;
@@ -517,8 +535,8 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
     state.logger.info(
         "scan",
         format!(
-            "扫描 RTF 完成：{} 条（随机人 {}，{}，{}）",
-            summary.total, summary.newgan, summary.format, summary.language
+            "扫描 RTF 完成：{} 条（随机人 {}，{}，{}），耗时 {:.1?}",
+            summary.total, summary.newgan, summary.format, summary.language, t.elapsed()
         ),
     );
     progress.finish(); // 收尾 100%（空名单/无数据行时进度条也得走满）
@@ -601,16 +619,9 @@ pub fn start_replace(
             return Err(e);
         }
     };
-    // 「扫描头像」缓存命中同一目录则复用其索引（避免重复扫盘）；切组即失效、现场新扫描。
-    let pre_scan = {
-        state
-            .faces_cache
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|c| c.img_dir == img_dir)
-            .map(|c| c.scan.clone())
-    };
+    // 「扫描头像」缓存命中同一目录**且目录签名一致**时才复用其索引（避免重复扫盘）；
+    // 切组即失效；签名不一致（包内图片被增删改名）也重扫——宁可慢几秒，也不拿过期索引
+    // 写出指向不存在图片的映射（那类错误完全静默，事后无从发现）。
     let params = ReplaceParams {
         rtf_path: rtf,
         img_dir,
@@ -618,15 +629,34 @@ pub fn start_replace(
         filter_newgen: args.filter_newgan,
         allow_duplicates: args.allow_duplicates,
         save_backup: args.save_backup,
-        pre_scan,
+        pre_scan: None, // 由后台线程按「缓存命中 + 目录签名」填，见下
         rule_config,
     };
     // 后台线程需要的句柄先 clone 出来（Arc::clone 只涨引用计数，不拷贝真实数据）。
     let (cancel, running) = (state.cancel.clone(), state.running.clone());
     let (rtf_cache, mapping_cache) = (state.rtf_cache.clone(), state.mapping_cache.clone());
     let snapshot_cache = state.snapshot_cache.clone(); // 替换成功时同步刷新（快照预览的数据源）
+    let faces_cache = state.faces_cache.clone(); // 复用前比对 + 现场扫盘后回填，都在这份缓存上
     let logger = state.logger.clone();
     std::thread::spawn(move || {
+        // 【签名比对为什么挪进线程】pack_sig 不递归，但要读完包根**并逐个一级目录数一遍直接子条目**
+        // （标准三 28 万图实测 0.15–0.19 s）。同步命令跑在主线程上，留在那里会让点击「替换」后
+        // 先有约 0.2 s 的无响应；挪进来既不阻塞界面，日志顺序也自然（签名 → 开始替换 → 索引完成）。
+        let mut params = params;
+        let t_sig = Instant::now();
+        let want_sig = facepack_scanner::pack_sig(&params.img_dir);
+        let reuse = faces_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|c| c.img_dir == params.img_dir)
+            .filter(|c| c.sig.is_some() && c.sig == want_sig)
+            .map(|c| c.scan.clone());
+        logger.info("replace", format!(
+            "头像包索引缓存：{}，目录签名比对耗时 {:.1?}",
+            if reuse.is_some() { "命中（复用，不扫盘）" } else { "未命中（将现场扫盘）" },
+            t_sig.elapsed()));
+        params.pre_scan = reuse;
         let emit_app = app.clone();
         // 跑流水线；progress 回调里通过 emit 把进度发给前端（事件名 replace:progress）。
         // 流水线关键步骤的日志经 logger 记录，由 log:batch 事件实时回显前端日志面板。
@@ -651,19 +681,44 @@ pub fn start_replace(
             &cancel,
             &*logger, // &Arc<Logger> 显式解引用成 &Logger（泛型参数处不会自动解强制引用）
         );
+        // 【收尾计时】下面这段（把两份缓存写回去 + 同步存档快照 + 发完成事件）全在 run() 返回之后，
+        // 不属于流水线自己的「总耗时」，却卡着 running 复位（界面全局禁用）——必须单独计时才看得见。
+        let t_tail = Instant::now();
         // 把解析结果与映射写入缓存（供后续预览/分页查询使用）。
-        *rtf_cache.lock().unwrap() = result.rtf_data.clone();
-        *mapping_cache.lock().unwrap() = result.mapping.clone();
+        // 【按值搬走，不再 clone】result 后面只用到 outcome / roster / scan，rtf_data 与 mapping
+        // 都能直接移动；15 万条实测一次整表 clone 约 0.1 s。mapping 仍需留一份给下面的快照直填，
+        // 所以只 clone 一次（与改造前的量相同），另一处改为移动。
+        let mapping = result.mapping;
+        let mapping_empty = mapping.is_empty();
+        *rtf_cache.lock().unwrap() = result.rtf_data;
+        *mapping_cache.lock().unwrap() = mapping.clone();
+        // 【头像包索引回填】本轮是现场扫盘的话，把索引连同目录签名写回「扫描头像」缓存：
+        // 下次替换同一目录只需比对目录签名（实测 28 万图约 0.15 s）即可复用，省掉整包重扫
+        //（实测：旧口径单线程 14.6–39 s，改并行 + `file_type()` 后约 0.13 s）。
+        // 【签名直接复用线程开头那一份，不再重算】替换自己只写 config.xml 与 config备份_*.xml，
+        // 两者都不入签名（见 PackSig 的文档），所以 want_sig 此刻仍然代表磁盘现状；
+        // 若包在本轮被外部改动，这份签名会与磁盘不符 → 下次替换签不上 → 重扫（失败方向是安全的）。
+        // 命中缓存的一轮 fresh_scan 为 None，不动缓存；失败/取消没有写出 config.xml，同样不动。
+        if matches!(result.outcome, Outcome::Finished) {
+            if let Some(scan) = result.scan {
+                *faces_cache.lock().unwrap() = Some(FaceIndex {
+                    img_dir: params.img_dir.clone(),
+                    scan,
+                    sig: want_sig,
+                });
+                logger.info("replace", "头像包索引已回填缓存：下次替换同一目录可免重扫");
+            }
+        }
         // 快照预览的数据源也在收尾处刷新（与「读取快照」按钮写的是同一份缓存）：
-        // 替换成功 → 把刚写好的 config.xml 备份到该档快照位置并重解析入缓存，让快照预览
-        // 无需再点「读取快照」就能看到本次结果；失败/取消不改 config.xml，快照保持原样
+        // 替换成功 → 把刚写好的 config.xml 备份到该档快照位置，并**直接用本次映射**填缓存，
+        // 让快照预览无需再点「读取快照」就能看到本次结果；失败/取消不改 config.xml，快照保持原样
         //（已读过的那份仍然有效，所以这里只写不清）。
         if matches!(result.outcome, Outcome::Finished) {
             if let Some(snap_path) = snapshot_path.as_deref() {
-                sync_group_snapshot(snap_path, &params.img_dir, &snapshot_cache, &*logger);
+                sync_group_snapshot(snap_path, &params.img_dir, &mapping, &snapshot_cache, &*logger);
             }
         }
-        if matches!(result.outcome, Outcome::Finished) && result.mapping.is_empty() {
+        if matches!(result.outcome, Outcome::Finished) && mapping_empty {
             // 跑完却一条映射也没有：config.xml 会被写成空表，必须留 WARNING
             logger.warn("replace", "映射结果为空：本次写入的 config.xml 不含任何映射（多为「仅随机人」过滤掉了全部名单，或头像包内无图片）");
         }
@@ -679,6 +734,10 @@ pub fn start_replace(
                 "failed"
             }
         };
+        // 收尾耗时（写两份缓存 + 同步快照）：这段在流水线「总耗时」之外，
+        // 但它是 running 复位（按钮解禁）之前最后一段阻塞，单独记一条方便对比。
+        logger.info("replace", format!(
+            "收尾完成：耗时 {:.1?}（写缓存 + 快照同步）", t_tail.elapsed()));
         // 发「完成」事件（前端收到后刷新快照并弹提示）。
         let _ = app.emit(
             "replace:finished",
@@ -794,12 +853,13 @@ pub async fn read_snapshot(
     }
     // 进度以「映射条数」为单位（解析前先数一遍条目拿到分母，见 parse_xml_entries_progress）。
     let mut progress = TaskProgress::new(&app, "读取快照");
+    let t = Instant::now(); // 快照整表重解析的耗时口径（替换收尾同步的同一段代码）
     let total = cache_snapshot(&state.snapshot_cache, &path, &mut |done, total| {
         progress.report(done, total)
     })?;
     state
         .logger
-        .info("scan", format!("读取快照完成：{total} 条映射"));
+        .info("scan", format!("读取快照完成：{total} 条映射，耗时 {:.1?}", t.elapsed()));
     progress.finish(); // 收尾 100%（空 config.xml / 无映射时进度条也得走满）
     Ok(SnapshotInfo { total })
 }
@@ -823,16 +883,26 @@ fn cache_snapshot(
 
 /// 替换收尾时同步该档的存档 XML 快照：把刚写入的 config.xml 备份到该档快照位置
 /// （等价于切档时 save_group_xml 做的备份，保证「存档资料」里那份也是最新的），
-/// 再按新文件重写快照缓存——快照预览因此无需再点「读取快照」就能看到本次结果。
-/// 任何失败都只记 WARNING 不返回 Err：快照新旧不影响本次替换的结论（config.xml 已写好）。
+/// 再把**本次映射直填**进快照缓存——快照预览因此无需再点「读取快照」就能看到本次结果。
+///
+/// 【为什么不回读刚写出的文件】`write_xml` 按**传入顺序**逐行写出、`parse_xml_entries` 又按
+/// **文件顺序**返回，所以直填与「重解析一遍」逐条相同（`written_mapping_reparses_identically_in_order`
+/// 守着这条等价性）。省掉的是一次整表正则解析（15 万行实测 1.4–1.5 s，而且卡住 running 复位＝按钮
+/// 解禁）；更关键的是在 SMB/NFS（FM 玩家常把头像包放 NAS）或杀软实时扫描介入的目录上，
+/// 「刚写完立刻读回来」还可能读到尚未完全落盘的内容——直填连这个不确定性一并去掉。
+/// 【失败路径也少了一条】不再有解析，于是「解析失败 → 清空缓存」那段宁缺勿旧的分支自然消失。
+/// 拷贝失败仍只记 WARNING、不返回 Err：快照新旧不影响本次替换的结论（config.xml 已写好）。
 /// 【只写不清】失败/取消时调用方根本不会调它（config.xml 未被改写，已读的那份仍有效）。
 fn sync_group_snapshot(
     snapshot_path: &Path,
     img_dir: &str,
+    mapping: &[MappingEntry],
     cache: &Mutex<Option<SnapshotCache>>,
     logger: &impl LogSink,
 ) {
     let src = Path::new(img_dir).join("config.xml");
+    // 计时现在只覆盖拷贝一步（原来是「拷贝 + 重解析整表」）——这条日志的数值应明显变小。
+    let t_sync = Instant::now();
     if !src.is_file() {
         return; // 没有 config.xml（替换成功时必有，这里只做防御）
     }
@@ -854,20 +924,14 @@ fn sync_group_snapshot(
         );
         return;
     }
-    // 替换收尾的同步不报进度（此时状态栏归替换流水线接管），传无操作回调。
-    match cache_snapshot(cache, snapshot_path, &mut |_, _| {}) {
-        Ok(total) => logger.info("replace", format!("同步存档快照完成：{total} 条映射")),
-        // 解析失败：宁缺勿旧——清空缓存而不是留着可能正是这份路径的旧数据（留着会让预览显示替换前的旧表）；
-        // 清空后快照预览查询会按磁盘上新文件重读一次。
-        Err(e) => {
-            *cache.lock().unwrap() = None;
-            logger.write(
-                log::Level::Warn,
-                "replace",
-                format!("同步存档快照后解析失败：{e}"),
-            );
-        }
-    }
+    // 直填：缓存里存的就是刚写进快照的那份映射，路径与「读取快照」命令写的一致（同一个 group_xml_path）。
+    let total = mapping.len();
+    *cache.lock().unwrap() = Some(SnapshotCache {
+        xml_path: snapshot_path.to_string_lossy().to_string(),
+        entries: mapping.to_vec(),
+    });
+    logger.info("replace", format!(
+        "同步存档快照完成：{total} 条映射（直填，未重解析），耗时 {:.1?}", t_sync.elapsed()));
 }
 
 /// 快照预览分页查询：UID 筛选 + 分页，数据留在缓存里，IPC 只传当前页。
@@ -1119,7 +1183,7 @@ mod tests {
         let snap_path = tmp.path().join("档1").join("graphics_pack_snapshot.xml");
         let cache = Mutex::new(None);
         let (logger, _rx) = ChannelLogger::channel();
-        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &cache, &logger);
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &entries, &cache, &logger);
 
         assert!(snap_path.is_file()); // 快照文件已生成（父目录一并补建）
         let got = cache.lock().unwrap();
@@ -1127,6 +1191,37 @@ mod tests {
         assert_eq!(c.xml_path, snap_path.to_str().unwrap()); // 路径即快照预览查询的比对键
         assert_eq!(c.entries.len(), 1);
         assert_eq!(c.entries[0].uid, "r-1001");
+    }
+
+    #[test]
+    fn sync_group_snapshot_fills_cache_from_mapping_not_by_reparsing() {
+        // 缓存内容必须来自**传入的映射**，而不是回读刚写出的文件。
+        // 这里故意让盘上的 config.xml 与传入映射不一致：若实现退回「重解析」，缓存里会是盘上那份。
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("pack");
+        std::fs::create_dir_all(&img).unwrap();
+        xml_parser::write_xml(
+            &[MappingEntry { uid: "r-9999".into(), ethnicity: "Asian".into(), image: "stale".into() }],
+            &img,
+            false,
+        )
+        .unwrap();
+        let mapping = vec![MappingEntry {
+            uid: "r-1001".into(),
+            ethnicity: "SpanMed".into(),
+            image: "img1".into(),
+        }];
+        let snap_path = tmp.path().join("档1").join("snap.xml");
+        let cache = Mutex::new(None);
+        let (logger, _rx) = ChannelLogger::channel();
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &mapping, &cache, &logger);
+
+        let got = cache.lock().unwrap();
+        let c = got.as_ref().expect("快照缓存应被填充");
+        assert_eq!(c.entries, mapping, "缓存必须直填传入映射，而不是回读文件");
+        // 快照文件本身仍是「盘上 config.xml 的副本」（拷贝语义不变，与缓存内容无关）。
+        let copied = xml_parser::parse_xml_entries(&snap_path).unwrap();
+        assert_eq!(copied[0].uid, "r-9999", "快照文件是 config.xml 的拷贝");
     }
 
     #[test]
@@ -1141,7 +1236,7 @@ mod tests {
             entries: Vec::new(),
         }));
         let (logger, _rx) = ChannelLogger::channel();
-        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &cache, &logger);
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &[], &cache, &logger);
 
         assert!(!snap_path.is_file());
         let got = cache.lock().unwrap();

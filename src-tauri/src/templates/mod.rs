@@ -160,59 +160,85 @@ pub fn ensure_user_files(data_dir: &Path) -> Result<(), String> {
 }
 
 /// 按扫描出的布局选择对应标准规则（唯一分发入口）。
+/// 【一律借用、由各规则自己转池】大包索引（28 万图片名）整份 clone 一次就是几十 MB 的白复制，
+/// 所以这里只传 `&PackScan` 的引用，各规则构造时按需把要用的那部分转成自己的池。
 pub fn for_layout(layout: PackLayout, scan: &PackScan, config: &RuleConfig) -> Box<dyn PickRule> {
     match layout {
         // 标准一：包根单一池，完全随机。
-        PackLayout::Flat => Box::new(standard1::Standard1Rule::new(scan.root_images.clone())),
+        PackLayout::Flat => Box::new(standard1::Standard1Rule::new(&scan.root_images)),
         PackLayout::Standard { standard, .. } => match standard {
             2 => Box::new(standard2::Standard2Rule::new(&scan.faces_map, &config.standard2)),
             3 => Box::new(standard3::Standard3Rule::new(
                 &scan.faces_map, &scan.recursive_pools, &config.standard3)),
             // 未实现标准号已被 replace_flow 拦截；防御性返回永不命中的空规则。
-            _ => Box::new(standard1::Standard1Rule::new(BTreeSet::new())),
+            _ => Box::new(standard1::Standard1Rule::new(&BTreeSet::new())),
         },
         // 空包 / 无法识别：递归全池全随机（Empty 池为空 → 全部球员跳过）。
         PackLayout::Empty | PackLayout::Unknown =>
-            Box::new(unknown::UnknownRule::new(scan.recursive_pools.clone())),
+            Box::new(unknown::UnknownRule::new(&scan.recursive_pools)),
     }
 }
 
 // ---------------- 两个跨标准无语义的机械工具 ----------------
 
+/// 图片池：目录路径 → 该目录下的图片词干列表（"" = 包根，多级用 "/" 分隔）。
+///
+/// 【为什么是 Vec 而不是 BTreeSet】抽图要按**随机下标**取图，BTreeSet 只能 `iter().nth(idx)`，
+/// 那是 O(idx) 线性游走（标准三大池每球员平均要走两千多步，实测是抽图成本的大头）；Vec 下标直取
+/// O(1)，禁重复时 `swap_remove` 也是 O(1)，且不必再按值在线性表里找位置。
+///
+/// 【为什么仍然有序】所有池都经 `sorted_unique` 构造（排序 + 去重）：发图顺序可复现，
+/// 也把 `read_dir` 的顺序差异（NTFS≈名字序 / ext4·APFS≈哈希序）挡在池外面。
+pub type Pools = BTreeMap<String, Vec<String>>;
+
+/// 把图片词干收集成池：排序 + 去重。
+///
+/// 【去重不是多余的】上游扫描结果是 `BTreeSet`（天生按词干去重），但同目录下 `face1.png` 与
+/// `face1.jpg` 的词干相同——一旦上游换成非去重来源，Vec 会同时装下两项：禁重复时抽走第一项
+/// `swap_remove` 掉、第二项还在，两人就会拿到同一张图（from 相同）。显式去重把这条兜住，
+/// 三个平台的这个场景（同目录同词干不同扩展名）都是合法的。
+///
+/// 【排序是白送的】上游 BTreeSet 本就升序，Rust 的排序对已序输入接近线性，成本可忽略。
+pub fn sorted_unique(items: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut v: Vec<String> = items.into_iter().collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// 按"目录 → 图片集合"的池构造规则时通用：只保留 FolderList 内、且非空的目录。
 /// 【语义】json 未配置的多余子目录不进入抽图池。
-fn filter_pools(
-    faces_map: &BTreeMap<String, BTreeSet<String>>,
-    folder_list: &[String],
-) -> BTreeMap<String, BTreeSet<String>> {
+fn filter_pools(faces_map: &BTreeMap<String, BTreeSet<String>>, folder_list: &[String]) -> Pools {
     folder_list
         .iter()
-        .filter_map(|d| faces_map.get(d).filter(|s| !s.is_empty()).map(|s| (d.clone(), s.clone())))
+        .filter_map(|d| {
+            faces_map
+                .get(d)
+                .filter(|s| !s.is_empty())
+                .map(|s| (d.clone(), sorted_unique(s.iter().cloned())))
+        })
         .collect()
 }
 
-/// 从"目录 → 图片集合"的多级池中全局随机取一张（展平计数按下标取，有序集合保证可复现）。
-/// 禁重复时把选中的图从池中移除。标准三的兜底与 Unknown 布局共用。
-fn pick_from_pools_flat(
-    pools: &mut BTreeMap<String, BTreeSet<String>>,
-    duplicates: bool,
-) -> Option<PickedImage> {
+/// 从"目录 → 图片集合"的多级池中全局随机取一张（展平计数按下标取，有序池保证可复现）。
+/// 禁重复时把选中的图从池中移除（swap_remove：O(1)，不需要按值查找）。标准三的兜底与 Unknown 布局共用。
+fn pick_from_pools_flat(pools: &mut Pools, duplicates: bool) -> Option<PickedImage> {
     let total: usize = pools.values().map(|s| s.len()).sum();
     if total == 0 { return None; }
     let idx = rand::rng().random_range(0..total);
     let mut passed = 0usize;
     let mut chosen: Option<(String, String)> = None;
-    for (dir, set) in pools.iter() {
-        if idx < passed + set.len() {
-            chosen = Some((dir.clone(), set.iter().nth(idx - passed).cloned().unwrap_or_default()));
+    for (dir, pool) in pools.iter_mut() {
+        if idx < passed + pool.len() {
+            let i = idx - passed;
+            // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
+            let stem = if duplicates { pool[i].clone() } else { pool.swap_remove(i) };
+            chosen = Some((dir.clone(), stem));
             break;
         }
-        passed += set.len();
+        passed += pool.len();
     }
     let (dir, stem) = chosen?;
-    if !duplicates {
-        if let Some(set) = pools.get_mut(&dir) { set.remove(&stem); }
-    }
     Some(PickedImage { dir, stem })
 }
 

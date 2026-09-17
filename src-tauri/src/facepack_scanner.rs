@@ -10,6 +10,7 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 14 个种族目录（标准二出厂默认的 FolderList 数据，也是 validate_image_dirs 的对照基准）。
 pub const FACEPACK_DIRS: [&str; 14] = [
@@ -106,6 +107,72 @@ impl PackScan {
     }
 }
 
+/// 头像包目录的轻量签名：用来判断缓存的扫描索引是否还能代表磁盘现状。
+///
+/// 【为什么需要】索引按 `img_dir` 字符串命中就复用（见 `commands::FaceIndex`），而用户完全可能在
+/// 两次替换之间动过包里的文件。索一旦过期，抽图就会写出**指向不存在图片**的映射
+/// （FM 里那名球员显示空白头像），而且**静默**——不校验的话没有任何人会发现。
+///
+/// 【只统计「会影响抽图池」的条目】每个非垃圾一级子目录记 (名字, mtime, 直接子条目数)，
+/// 每个非隐藏根图记 (名字, mtime, 0)。`config.xml` / `config备份_*.xml` / README 之类一律不入签名——
+/// 否则替换自己写完 config.xml 就会让缓存失效，下次又要重扫 28 万文件（这正是要避免的）。
+///
+/// 【为什么 mtime 与条目数都要】两者互补：改名只动 mtime（条目数不变），同秒内「删一张再加一张」
+/// 只动条目数（mtime 可能相同）。名字也在签名里，所以一级目录被改名同样能被发现。
+///
+/// 【能拦住】删/改名某张图片（所在一级目录 mtime 变）✓ 增删一级目录或根图（名字集合变）✓
+///   一级目录内增删子目录/图片（直接子条目数变）✓
+/// 【拦不住】孙目录内的**改名**（一级目录的 mtime 与直接条目数都可能不变）——已知的残余窗口，
+///   只影响会递归到孙目录的池（Unknown / 标准三兜底），用「不重扫 28 万文件」换这一小段窗口。
+/// 【为什么不递归算】递归一遍就等于把扫盘又做了一次，缓存也就失去意义了。
+/// 【失败方向一律是安全的】目录 mtime 在 NTFS 上是「句柄关闭时」才落定的（实测刚写完立刻读，
+/// 与 1.6 ms 后再读能差 15969 个 100 ns tick），加上 FAT32/SMB 的粗精度，签名可能**多失配一次**
+/// → 白扫一遍盘；但不会在包真变了的时候误判命中。宁可偶尔多扫一次，也不写出指向不存在图片的映射。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackSig {
+    entries: Vec<(String, Option<std::time::SystemTime>, usize)>,
+}
+
+/// 读取头像包目录的签名（只看顶层 + 每个一级目录的直接子条目数，不递归）。
+/// 目录读不到时返回 None —— 调用方据此判定「无法确认缓存有效」而重扫（安全方向）。
+pub fn pack_sig(img_dir: &str) -> Option<PackSig> {
+    let rd = std::fs::read_dir(img_dir).ok()?;
+    let mut entries: Vec<(String, Option<std::time::SystemTime>, usize)> = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let is_dir = entry_is_dir(&e);
+        // 只跟踪会进池的条目：非垃圾目录、非隐藏图片。其余（config.xml / 备份 / 说明文件）跳过。
+        if is_dir {
+            if is_junk_dir(&name) { continue; }
+        } else if !is_image_ext(&name) || name.starts_with('.') {
+            continue;
+        }
+        // DirEntry::metadata 不跟随符号链接（软链自身的时间戳即可反映它有没有被换掉）。
+        let mtime = e.metadata().and_then(|m| m.modified()).ok();
+        // 用条目名排序而非 read_dir 顺序：ext4/APFS 给的是哈希序，NTFS 近似名字序，
+        // 不排序的话两次计算无法逐项比对。
+        let count = if is_dir { pool_entry_count(&e.path()) } else { 0 };
+        entries.push((name, mtime, count));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(PackSig { entries })
+}
+
+/// 一级目录里「会影响抽图池的直接子条目」数：非垃圾子目录 + 非隐藏图片。
+/// 口径与 walk_recursive 的收录规则一致，所以 Thumbs.db / desktop.ini 之类不会造成无谓的重扫。
+fn pool_entry_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    if entry_is_dir(e) { !is_junk_dir(&n) } else { is_image_ext(&n) && !n.starts_with('.') }
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// 按扩展名判断是否图片文件（png/jpg/jpeg，大小写不敏感）。
 pub fn is_image_ext(name: &str) -> bool {
     matches!(name.rsplit('.').next().map(|s| s.to_ascii_lowercase()).as_deref(),
@@ -124,24 +191,150 @@ pub fn image_stem(name: &str) -> Option<String> {
 /// 仅用于过滤 classify 的输入与递归池；faces_map 仍收录该键（值为空集）——判定层按本函数过滤键名。
 pub fn is_junk_dir(name: &str) -> bool { name.starts_with('.') || name == "__MACOSX" }
 
+/// 目录判定（扫描侧**唯一口径**）：优先用 readdir 自带的文件类型（Unix 的 `d_type` / Windows 的
+/// `FIND_DATA` 属性），省掉每个条目一次 metadata 系统调用 —— 大包（28 万条目）扫盘的主要成本就在这里。
+///
+/// 【为什么不能直接写 `e.file_type().is_dir()`】两者只在**符号链接**上分道扬镳，而那个分歧恰好跨平台：
+/// `file_type()` **不跟随**符号链接，`Path::is_dir()` **跟随**。Linux/macOS 上把大包软链进包根
+/// （`~/packs/NG -> /mnt/big/NG`）是常规用法；若把符号链接目录判成文件，`is_image_ext` 不认它，
+/// **整棵子树会静默消失**（索引为空 → 布局退化成 Empty → 名单里所有球员被跳过，只留一条 WARNING）。
+/// 因此只在「符号链接」这一种情况下回退一次 `is_dir()`；普通目录/文件仍零额外系统调用。
+/// Windows 的 junction 自带 DIRECTORY 属性，`file_type().is_dir()` 直接为真，走不进回退分支。
+/// 【d_type 缺失】XFS(ftype=0)/NFS/FUSE/exFAT 上 readdir 不给类型（`file_type()` 返回 Err），
+/// 此时退回 `is_dir()`（一次 stat），与改造前行为一致 —— 这些环境省不掉系统调用。
+///
+/// 【为何是自由函数】扫盘的两趟递归、第一趟列顶层、以及「检查完整性」四处都靠它判目录；
+/// 抽出来才有单一真源 —— 否则「检查完整性」认符号链接目录、抽图池不认，missing/extra 与池内容对不上。
+fn entry_is_dir(e: &std::fs::DirEntry) -> bool {
+    match e.file_type() {
+        Ok(t) => t.is_dir() || (t.is_symlink() && e.path().is_dir()),
+        Err(_) => e.path().is_dir(),
+    }
+}
+
 /// 递归收集 dir 及其全部子/孙目录的图片（词干用 file_stem，跳过 `.` 开头文件）。
 /// 键为相对头像包根的目录路径（"" = 根，多级用 "/" 分隔）；垃圾目录整棵子树跳过。
 fn walk_recursive(dir: &Path, rel: String, pools: &mut BTreeMap<String, BTreeSet<String>>) {
     let mut imgs = BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
-            let p = e.path();
             let fname = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
+            // 目录判定走 entry_is_dir：普通条目零额外系统调用（不再每条目 e.path() + is_dir()）。
+            if entry_is_dir(&e) {
                 if is_junk_dir(&fname) { continue; } // 垃圾目录整棵不入池
                 let child = if rel.is_empty() { fname } else { format!("{rel}/{fname}") };
-                walk_recursive(&p, child, pools);
+                walk_recursive(&e.path(), child, pools);
             } else if is_image_ext(&fname) && !fname.starts_with('.') {
                 if let Some(stem) = image_stem(&fname) { imgs.insert(stem); }
             }
         }
     }
     pools.insert(rel, imgs);
+}
+
+/// 并行扫盘的最小一级子目录数：低于它时不起线程（起线程与合并的开销摊不平）。
+/// 标准二 14 个目录、标准三 62 个目录；实测 28 万图那次扫盘 14.6–39 s，正是这里的目标。
+const PARALLEL_SCAN_MIN_DIRS: usize = 4;
+
+/// 并行度上限。再多也只是把并发的 metadata 请求堆在文件系统与杀软实时扫描那一层，
+/// 反而加剧争抢（实测同一目录树两次扫描 24 s ↔ 36 s，说明瓶颈在 I/O 而不在 CPU）。
+const PARALLEL_SCAN_MAX_THREADS: usize = 8;
+
+/// 遍历一个一级子目录（含其全部子孙），返回「相对头像包根的目录路径 → 词干集合」。
+/// 键空间只覆盖该一级目录及其子孙（前缀就是它的名字），因此不同目录的成果互不相交，可并行后合并。
+/// 垃圾目录整棵不入池（该目录自身仍会由调用方在 faces_map 里留下空集键）。
+fn scan_one_subdir(name: &str, path: &Path) -> BTreeMap<String, BTreeSet<String>> {
+    let mut local = BTreeMap::new();
+    if !is_junk_dir(name) {
+        walk_recursive(path, name.to_string(), &mut local);
+    }
+    local
+}
+
+/// 把一个一级子目录的遍历成果合并进全局递归池。
+/// 【为何用 insert 而非 extend】键空间本不相交，两者等价；但万一上游键规则变了导致撞键，
+/// insert 会因为 debug 断言立刻暴露，而 extend 会静默把两份合成一份（图凭空少一半且无声）。
+fn merge_into(
+    target: &mut BTreeMap<String, BTreeSet<String>>,
+    local: BTreeMap<String, BTreeSet<String>>,
+) {
+    for (k, v) in local {
+        debug_assert!(!target.contains_key(&k), "一级子目录的键空间不应相交：{k}");
+        target.insert(k, v);
+    }
+}
+
+/// 本次扫盘用几个线程：拿不到 CPU 数、只剩一个 CPU、或目录太少时都退化为 1（顺序遍历）。
+fn scan_threads(total_dirs: usize) -> usize {
+    if total_dirs < PARALLEL_SCAN_MIN_DIRS {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(PARALLEL_SCAN_MAX_THREADS)
+}
+
+/// 顺序遍历全部一级子目录并报进度（每完成一个报一次）。
+fn build_pools_sequential(
+    subdirs: &[(String, PathBuf)],
+    recursive_pools: &mut BTreeMap<String, BTreeSet<String>>,
+    progress: &mut dyn FnMut(usize, usize),
+) {
+    for (i, (fname, path)) in subdirs.iter().enumerate() {
+        merge_into(recursive_pools, scan_one_subdir(fname, path));
+        progress(i + 1, subdirs.len());
+    }
+}
+
+/// 并行遍历全部一级子目录：N 个 worker 用原子下标抢任务（work-stealing，谁快谁多干），
+/// 每个子目录的成果单独发回主线程，由主线程合并并上报进度。
+/// 【为什么进度只能在主线程报】进度回调是 `&mut dyn FnMut`，既不是 Sync 也不能并发调用；
+/// 所以 worker 只负责遍历、把结果发回来，所有的合并与报进度都在主线程做。
+/// 【为什么结果与顺序遍历逐字相同】各子目录键空间互不相交，合并顺序无关；
+/// 池内部是 BTreeMap/BTreeSet，插入顺序也不影响内容。
+fn build_pools_parallel(
+    subdirs: &[(String, PathBuf)],
+    recursive_pools: &mut BTreeMap<String, BTreeSet<String>>,
+    progress: &mut dyn FnMut(usize, usize),
+    threads: usize,
+) {
+    let total = subdirs.len();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..threads.min(total) {
+            let tx = tx.clone();
+            let next = &next;
+            scope.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((fname, path)) = subdirs.get(i) else { return };
+                if tx.send(scan_one_subdir(fname, path)).is_err() { return; }
+            });
+        }
+        // 主线程自己那份 Sender 必须丢掉：否则 rx 要等它被 drop 才结束（worker 退出后仍然挂着）。
+        drop(tx);
+        let mut done = 0usize;
+        for local in rx {
+            merge_into(recursive_pools, local);
+            done += 1;
+            progress(done, total);
+        }
+    });
+}
+
+/// 第二趟：为每个一级子目录建递归池（目录足够多时并行），每完成一个报一次进度。
+fn build_pools(
+    subdirs: &[(String, PathBuf)],
+    recursive_pools: &mut BTreeMap<String, BTreeSet<String>>,
+    progress: &mut dyn FnMut(usize, usize),
+) {
+    let threads = scan_threads(subdirs.len());
+    if threads <= 1 {
+        build_pools_sequential(subdirs, recursive_pools, progress);
+    } else {
+        build_pools_parallel(subdirs, recursive_pools, progress, threads);
+    }
 }
 
 /// 重扫描：建 faces_map + root_images + 递归全量池（纯收集；布局判定由调用方用 classify 完成）。
@@ -169,7 +362,8 @@ pub fn scan_pack_progress(
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let fname = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
+        // 目录判定走 entry_is_dir（唯一口径）——软链目录在这里也必须算目录，否则整棵子树不进索引。
+        if entry_is_dir(&entry) {
             subdirs.push((fname, path));
         } else if is_image_ext(&fname) && !fname.starts_with('.') {
             // 根图词干走 image_stem 唯一口径（与 parse_image_path_in_pack 同规则，"a.1.png"→"a.1"）；
@@ -177,22 +371,16 @@ pub fn scan_pack_progress(
             if let Some(stem) = image_stem(&fname) { root_images.insert(stem); }
         }
     }
-    let total = subdirs.len(); // 进度分母（0 = 平铺包/空包，订阅方按 total==0 直接给 100%）
-
-    // 第二趟：逐个一级子目录建索引，每扫完一个上报一次进度。
-    for (i, (fname, path)) in subdirs.iter().enumerate() {
-        // 递归全量池：垃圾目录整棵跳过（目录本身仍进 faces_map，只是值为空集）。
-        if !is_junk_dir(fname) {
-            walk_recursive(path, fname.clone(), &mut recursive_pools);
-        }
-        // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不再单独 read_dir：
-        // 主池（标准二/三按 FolderList 过滤 faces_map）与兜底池（recursive_pools）是同一批图的两份索引，
-        // 同源取值才保证两者逐字同键——否则词干规则一有分歧（历史上 "a.1.png" 在主池是 "a"、在兜底池是
-        // "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、这张图会被发出两次。
-        // 顺带省掉每个一级目录的第二遍 read_dir。
+    // 第二趟：逐个一级子目录建递归池（目录够多时并行遍历，见 build_pools），每完成一个报一次进度。
+    build_pools(&subdirs, &mut recursive_pools, progress);
+    // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不再单独 read_dir：
+    // 主池（标准二/三按 FolderList 过滤 faces_map）与兜底池（recursive_pools）是同一批图的两份索引，
+    // 同源取值才保证两者逐字同键——否则词干规则一有分歧（历史上 "a.1.png" 在主池是 "a"、在兜底池是
+    // "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、这张图会被发出两次。
+    // 顺带省掉每个一级目录的第二遍 read_dir。
+    for (fname, _path) in subdirs.iter() {
         let imgs = recursive_pools.get(fname).cloned().unwrap_or_default();
         faces_map.insert(fname.clone(), imgs);
-        progress(i + 1, total);
     }
     // 根目录图片也归入递归池（键 = 空串），全随机规则据此连根图一起抽。
     recursive_pools.entry(String::new()).or_default().extend(root_images.iter().cloned());
@@ -250,9 +438,10 @@ pub fn check_integrity_progress(
     let mut entries: Vec<(bool, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(img_dir) {
         for e in rd.flatten() {
-            let p = e.path();
             let fname = e.file_name().to_string_lossy().to_string();
-            let is_dir = p.is_dir();
+            // 目录判定与扫盘同源（entry_is_dir）：否则「检查完整性」认软链目录、「扫描头像」不认，
+            // missing/extra 与实际抽图池就对不上了。
+            let is_dir = entry_is_dir(&e);
             // 子目录全收（垃圾目录在下面判定时再滤）；根图只认非隐藏的图片文件（与 scan_pack 口径一致）。
             if is_dir || (!fname.starts_with('.') && is_image_ext(&fname)) {
                 entries.push((is_dir, fname));
@@ -471,6 +660,161 @@ mod tests {
         assert_eq!(pools.get("weirdA/sub").map(|s| s.iter().cloned().collect::<Vec<_>>()),
                    Some(vec!["j.1".to_string()]));
         assert!(!pools.contains_key("weirdA/__MACOSX")); // 垃圾目录整棵跳过
+    }
+
+    /// 等到目录签名稳定后再取值。
+    /// 【为什么必须等】NTFS 的目录 mtime 是**句柄关闭时**才落定的：刚写完文件立刻读可能读到旧值，
+    /// 过一两毫秒再读才是最终值（实测第一次取值与 1.6 ms 后的取值差 15969 个 100ns tick）。
+    /// 生产侧这条只会让缓存「多失效一次」（＝重扫，安全方向），但测试里必须等到稳定才谈得上比对。
+    fn stable_sig(dir: &Path) -> PackSig {
+        let mut prev = pack_sig(dir.to_str().unwrap()).unwrap();
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let now = pack_sig(dir.to_str().unwrap()).unwrap();
+            if now == prev { return now; }
+            prev = now;
+        }
+        prev
+    }
+
+    #[test]
+    fn pack_sig_tracks_only_pool_affecting_entries() {
+        // 签名是「索引缓存能不能复用」的唯一判据，两条都必须成立：
+        //   ① 影响抽图池的改动 → 签名变（否则缓存过期，会写出指向不存在图片的映射）；
+        //   ② 与池无关的改动 → 签名不变（否则替换自己写 config.xml 就会让缓存失效、下次白扫 28 万图）。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("African")).unwrap();
+        std::fs::write(p.join("African").join("a.png"), b"png").unwrap();
+        std::fs::write(p.join("African").join("Thumbs.db"), b"x").unwrap(); // 非图片，不进池
+        std::fs::write(p.join("root.png"), b"png").unwrap();
+        std::fs::write(p.join("config.xml"), b"<x/>").unwrap();
+        let s1 = stable_sig(p);
+
+        // ② 与池无关的改动：替换收尾写 config.xml、生成备份、用户丢个 README —— 签名必须不变。
+        std::fs::write(p.join("config.xml"), b"<y/>").unwrap();
+        std::fs::write(p.join("config备份_20260101-000000.xml"), b"<z/>").unwrap();
+        std::fs::write(p.join("README.md"), b"md").unwrap();
+        assert_eq!(stable_sig(p), s1, "非池文件不得影响签名");
+
+        // ① 一级目录内新增图片 → 直接子条目数变 → 签名变。
+        std::fs::write(p.join("African").join("b.png"), b"png").unwrap();
+        let s2 = stable_sig(p);
+        assert_ne!(s2, s1, "一级目录内新增图片应改变签名");
+
+        // ① 一级目录内**改名**（条目数不变，只有 mtime 变）→ 也要能被发现。
+        std::fs::rename(p.join("African").join("b.png"), p.join("African").join("c.png")).unwrap();
+        let s3 = stable_sig(p);
+        assert_ne!(s3, s2, "一级目录内改名应改变签名（靠 mtime）");
+
+        // ① 新增/删除一级目录与根图 → 名字集合变。
+        std::fs::create_dir_all(p.join("Asian")).unwrap();
+        let s4 = stable_sig(p);
+        assert_ne!(s4, s3, "新增一级目录应改变签名");
+        std::fs::remove_file(p.join("root.png")).unwrap();
+        assert_ne!(stable_sig(p), s4, "删除根图应改变签名");
+
+        // ① 垃圾目录不进池，也不该进签名（否则 __MACOSX 一出现就白扫一遍）。
+        let s5 = stable_sig(p);
+        std::fs::create_dir_all(p.join("__MACOSX")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        assert_eq!(stable_sig(p), s5, "垃圾目录不得影响签名");
+
+        // 读不到的目录 → None（调用方据此判定「无法确认缓存有效」而重扫）。
+        assert!(pack_sig(p.join("nonexistent").to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn parallel_scan_merges_identically_to_sequential() {
+        // 并行只改「遍历的调度」，不得改变任何池内容。这里直接调并行实现（不依赖测试机的 CPU 数），
+        // 与顺序遍历逐字对比——覆盖垃圾子树跳过、dot 文件排除、孙目录独立成键三个易错点。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for (d, n) in [("African", 3), ("Asian", 2), ("Caucasian", 4), ("EECA", 1), ("Italmed", 2)] {
+            std::fs::create_dir_all(p.join(d)).unwrap();
+            for i in 0..n {
+                std::fs::write(p.join(d).join(format!("f{i}.png")), b"png").unwrap();
+            }
+        }
+        std::fs::create_dir_all(p.join("EECA").join("sub")).unwrap();
+        std::fs::write(p.join("EECA").join("sub").join("deep.1.jpg"), b"jpg").unwrap();
+        std::fs::write(p.join("EECA").join("._hidden.png"), b"png").unwrap(); // 隐藏名不入池
+        std::fs::write(p.join("EECA").join("notes.txt"), b"t").unwrap();      // 非图片不入池
+        std::fs::create_dir_all(p.join("African").join("__MACOSX")).unwrap();
+        std::fs::write(p.join("African").join("__MACOSX").join("x.png"), b"png").unwrap();
+
+        // 与 scan_pack_progress 第一趟同口径的顶层目录清单。
+        let subdirs: Vec<(String, PathBuf)> = ["African", "Asian", "Caucasian", "EECA", "Italmed"]
+            .iter()
+            .map(|n| (n.to_string(), p.join(n)))
+            .collect();
+
+        let mut seq: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        build_pools_sequential(&subdirs, &mut seq, &mut |_, _| {});
+
+        let mut par: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        build_pools_parallel(&subdirs, &mut par, &mut |d, t| seen.push((d, t)), 4);
+
+        assert_eq!(par, seq, "并行扫盘结果必须与顺序扫盘逐字相同");
+        // 每个一级目录都报一次进度，且最终走满（订阅方靠它把进度条推到区间右端）。
+        assert_eq!(seen.len(), subdirs.len());
+        assert_eq!(seen.last().copied(), Some((subdirs.len(), subdirs.len())));
+        // 抽查：孙目录独立成键、垃圾子树整棵不入池、一级目录自己的图不被子孙覆盖。
+        assert_eq!(par.get("EECA/sub").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+                   Some(vec!["deep.1".to_string()]));
+        assert!(!par.contains_key("African/__MACOSX"));
+        assert_eq!(par.get("EECA").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+                   Some(vec!["f0".to_string()]));
+        assert_eq!(par.get("African").map(|s| s.len()), Some(3));
+    }
+
+    #[test]
+    fn scan_threads_only_parallelizes_when_worth_it() {
+        // 目录太少（空包 0 个、小包 3 个以下）不起线程：起线程与合并的开销摊不平。
+        assert_eq!(scan_threads(0), 1);
+        assert_eq!(scan_threads(PARALLEL_SCAN_MIN_DIRS - 1), 1);
+        // 多核机器上目录够多则并行，且不超过上限；单核机器恒为 1（退化为顺序遍历）。
+        let many = scan_threads(62);
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 2 {
+            assert!(many >= 2, "多核机器上 62 个目录应并行");
+        }
+        assert!(many <= PARALLEL_SCAN_MAX_THREADS);
+    }
+
+    /// 【为什么只在 Unix 上跑这个用例】两个原因，都不是「懒得写」：
+    ///
+    /// ① **危险场景本来就长在 Unix 上**：`~/packs/NG -> /mnt/big/NG`（把大包软链进包根）是
+    ///    Linux/macOS 的常规用法。Windows 上用户用的是 **junction**，而 junction 同时带 DIRECTORY
+    ///    属性，`file_type().is_dir()` 直接为真，根本走不到 `entry_is_dir` 的符号链接回退分支。
+    /// ② **Windows 上跑它要付 30 秒**：建目录符号链接需要管理员权限或开发者模式；实测在缺权限的
+    ///    机器上，这一次 `CreateSymbolicLinkW` 调用要等 **约 30 秒**才返回失败（授权路径的等待；
+    ///    对照 PowerShell 自己的同等操作是 0.007 s 秒回权限错误）。把它放进常规循环等于让每次
+    ///    `cargo test` 多花半分钟，换不来任何断言。
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_directory_is_still_treated_as_directory() {
+        // entry_is_dir 的核心回归：`DirEntry::file_type()` **不跟随**符号链接，直接拿它判目录会让
+        // 软链目录被当成文件 → `is_image_ext` 不认 → **整棵子树静默消失**（索引为空 → 布局退化 →
+        // 全部球员被跳过，只剩一条 WARNING）。所以符号链接必须回退一次 is_dir()。
+        let dir = tempfile::tempdir().unwrap();
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("a.png"), b"png").unwrap();
+        std::fs::create_dir_all(real.path().join("sub")).unwrap();
+        std::fs::write(real.path().join("sub").join("b.png"), b"png").unwrap();
+        // 本用例唯一需要的 OS 调用；Unix 上建软链无需特权。
+        std::os::unix::fs::symlink(real.path(), dir.path().join("African")).unwrap();
+
+        let scan = scan_pack(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(scan.faces_map["African"], BTreeSet::from(["a".to_string()]),
+                   "符号链接目录必须被当作目录遍历（否则整棵子树静默消失）");
+        // 经软链的子孙目录同样递归到。
+        assert_eq!(scan.recursive_pools["African/sub"], BTreeSet::from(["b".to_string()]));
+
+        // 「检查完整性」与扫盘同口径（都走 entry_is_dir）：软链目录算目录 → 单目录包判标准二子集。
+        let cfg = crate::templates::RuleConfig::builtin();
+        let r = check_integrity_progress(dir.path().to_str().unwrap(), &cfg.folder_lists(), &mut |_, _| {});
+        assert_eq!((r.standard, r.found), (2, 1), "完整性检查也必须把软链目录算作目录");
     }
 
     // ---------------- 完整性检查 / 扫描总数（原 commands.rs，随 check_integrity/scan_and_total 下沉） ----------------

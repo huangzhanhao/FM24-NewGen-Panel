@@ -201,7 +201,10 @@ pub fn run() {
             logger.info("app", "Starting Application v2");
 
             // 5) 初始化存档管理器（ProfileManager），读取或创建用户配置。
-            let pm = profile_manager::ProfileManager::new(None, &data_dir)?;
+            //    并把日志出口交给它：切档时的档景（快照）存取异常此前是静默的，
+            //    而快照正是替换的判据，静默失败＝下次替换按旧档景判断（见 profile_manager 的 warn）。
+            let mut pm = profile_manager::ProfileManager::new(None, &data_dir)?;
+            pm.set_logger(logger.clone());
 
             // 5.5) 标准规则：首次运行把内置默认（assets/standardN.json）导出为用户可编辑文件
             //      （data/rules/standardN.json，已存在不覆盖）。失败不阻断启动，仅记警告。

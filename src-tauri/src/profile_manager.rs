@@ -8,11 +8,13 @@
 //!   再把目标存档的快照恢复回头像包目录——这样不同存档共享同一头像包目录也不会互相覆盖。
 //! 【线程安全】ProfileManager 自身可变且非线程安全，由 commands::AppState 包在 Mutex 里串行化访问。
 use crate::json_store::{self, LoadError};
+use crate::logger::LogSinkDyn; // 档景（快照）存取异常要进日志：此前这些分支全是静默的
 use crate::paths::{group_xml_path, norm_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap; // 有序字典：保证组/存档的遍历顺序稳定
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 单个组的配置。目前只存 RTF 路径（#[serde(default)] 表示旧文件缺这个字段时用默认值）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -42,13 +44,28 @@ pub struct GlobalCfg {
 }
 
 /// 存档管理器：整个应用围绕它管理所有存档与组的配置。
-#[derive(Debug)]
 pub struct ProfileManager {
     user_dir: PathBuf,   // <data>/.user 目录
     pub config: GlobalCfg,       // 全局配置（哪些存档、哪个激活）
     pub cur_prf: String,         // 当前激活存档名
     pub prf_cfg: PrfCfg,         // 当前存档的配置（组、当前组）
     pub cur_group: Option<String>, // 当前选中的组
+    /// 日志出口（**后置注入**：lib.rs 先建 logger 再建本管理器，测试则不注入＝不写日志）。
+    /// 只用来记「档景（快照）存取异常」——这类失败会让某个档的现有映射静默变旧，
+    /// 是替换判据出错的源头（见 FaceMapper::existing_xml），必须能在日志里看见。
+    logger: Option<Arc<dyn LogSinkDyn>>,
+}
+
+/// 手写 Debug：`dyn LogSinkDyn` 没有 Debug，不能 derive（日志器不该出现在调试输出里）。
+impl std::fmt::Debug for ProfileManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileManager")
+            .field("user_dir", &self.user_dir)
+            .field("cur_prf", &self.cur_prf)
+            .field("prf_cfg", &self.prf_cfg)
+            .field("cur_group", &self.cur_group)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProfileManager {
@@ -98,7 +115,22 @@ impl ProfileManager {
         // 加载当前存档的组配置，并选定当前组。
         let prf_cfg = Self::load_profile_cfg(&user_dir, &cur_prf)?;
         let cur_group = Self::pick_cur_group(&prf_cfg);
-        Ok(Self { user_dir, config, cur_prf, prf_cfg, cur_group })
+        Ok(Self { user_dir, config, cur_prf, prf_cfg, cur_group, logger: None })
+    }
+
+    /// 注入日志出口（lib.rs 在构造后调用；测试注入 `ChannelLogger` 以便断言告警）。
+    /// 【为什么不做成构造参数】本管理器的绝大多数用例（含单元测试）与日志无关，
+    /// 后置注入让 `new` 的签名与既有调用点（8 处测试）保持不变。
+    pub fn set_logger(&mut self, logger: Arc<dyn LogSinkDyn>) {
+        self.logger = Some(logger);
+    }
+
+    /// 记一条 WARNING（未注入 logger 时静默）。模块名用 profile，与命令层的建档/切档日志同源，
+    /// 方便在日志抽屉里按模块串起来看。
+    fn warn(&self, msg: String) {
+        if let Some(l) = &self.logger {
+            l.write(log::Level::Warn, "profile", msg);
+        }
     }
 
     /// 选定当前组：优先用配置里记录的 cur_group（且它仍存在），否则回退到第一个组。
@@ -239,7 +271,17 @@ impl ProfileManager {
         self.config.profile.remove(name); // 从全局配置移除
         let _ = fs::remove_file(Self::prf_path(&self.user_dir, name)); // 删档配置文件（新位置）
         let _ = fs::remove_file(Self::legacy_prf_path(&self.user_dir, name)); // 兼容删除旧位置档 json
-        let _ = fs::remove_dir_all(self.user_dir.join(crate::paths::sanitize(name))); // 删快照目录（含 XML 与 json）
+        // 删快照目录（含 XML 与 json）。删不掉要留痕：同名存档日后重建时，残留的旧快照会被
+        // 当成它的现有映射（判据是快照），等于把已删档的脸悄悄带回新档。
+        let snap_dir = self.user_dir.join(crate::paths::sanitize(name));
+        if snap_dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&snap_dir) {
+                self.warn(format!(
+                    "删除存档 {name}：快照目录删除失败（{e}）：{}。同名存档重建时会沿用这份旧档景",
+                    snap_dir.display()
+                ));
+            }
+        }
         json_store::save(&Self::global_cfg_path(&self.user_dir), &self.config)?;
         if was_current {
             self.load_profile("No Profile")?; // 只在删除当前激活档时回到默认档
@@ -276,6 +318,8 @@ impl ProfileManager {
     }
 
     /// 把头像包目录里的 config.xml 拷到该档的快照位置（切走时调用）。
+    /// 【失败必须留痕】快照是「本档本组的现有映射」的唯一真值源（替换的保留/覆写判据取自它），
+    /// 备份失败＝该档的档景停留在上一次的内容，而界面与后续替换都不会有任何提示。
     fn save_group_xml(&self, profile: &str, img_dir: &str) {
         let src = Path::new(img_dir).join("config.xml");
         if !src.is_file() {
@@ -283,18 +327,52 @@ impl ProfileManager {
         }
         let dst = group_xml_path(&self.user_dir, profile, img_dir);
         if let Some(p) = dst.parent() {
-            let _ = fs::create_dir_all(p); // 确保快照子目录存在
+            if let Err(e) = fs::create_dir_all(p) {
+                self.warn(format!(
+                    "保存档景失败：无法创建快照目录（{e}）。{profile} 在 {img_dir} 的档景未更新，\
+                     仍为上一次保存的内容；本次切走后该档可能按旧档景判断「谁已换过脸」"
+                ));
+                return;
+            }
         }
-        let _ = fs::copy(&src, &dst);
+        if let Err(e) = fs::copy(&src, &dst) {
+            self.warn(format!(
+                "保存档景失败：{e}。{profile} 在 {img_dir} 的档景未更新（仍为上一次的内容）"
+            ));
+        }
     }
 
     /// 把快照恢复回头像包目录的 config.xml（切入时调用）。
+    /// 【三条跳过/失败分支都要留痕】live `config.xml` 是**全档共享**的一份，它的归属完全靠
+    /// save/restore 配对维持；任一条静默跳过，live 里就会留下**上一个档**的内容——而 FM 读的正是它，
+    /// 用户会看到别档的头像（替换判据已改读快照，故这只影响显示与 FM 实际读取）。
     fn restore_group_xml(&self, profile: &str, img_dir: &str) {
         let src = group_xml_path(&self.user_dir, profile, img_dir);
         let dst = Path::new(img_dir).join("config.xml");
-        // 头像包目录已不存在（换盘/被删）：保留快照，跳过恢复（对等 v1）。
-        if src.is_file() && Path::new(img_dir).is_dir() {
-            let _ = fs::copy(&src, &dst);
+        // 分支① 本档在此目录还没有快照（没换过脸、或建组后从未切走过）。
+        // 目录里若已有 config.xml，那内容不是本档的：不恢复、也不删（删了会破坏原主的档景），
+        // 但要留痕——两档共用同一头像包时，这里就是串档发生的现场。
+        if !src.is_file() {
+            if dst.is_file() {
+                self.warn(format!(
+                    "恢复档景：{profile} 在 {img_dir} 还没有快照，目录里的 config.xml 保持原样\
+                     （它可能属于其他存档）；本档首次替换将按「无历史」处理"
+                ));
+            }
+            return;
+        }
+        // 分支② 头像包目录已不存在（换盘/被删/NAS 离线）：保留快照，跳过恢复（对等 v1）。
+        if !Path::new(img_dir).is_dir() {
+            self.warn(format!(
+                "恢复档景：头像包目录不可用（{img_dir}），{profile} 的档景未能恢复到 config.xml"
+            ));
+            return;
+        }
+        // 分支③ 拷贝失败：此时 live 里可能仍是上一个档的内容。
+        if let Err(e) = fs::copy(&src, &dst) {
+            self.warn(format!(
+                "恢复档景失败：{e}。{img_dir} 里的 config.xml 可能仍是上一个存档的内容"
+            ));
         }
     }
 
@@ -333,7 +411,14 @@ impl ProfileManager {
         }
         let snap = group_xml_path(&self.user_dir, &self.cur_prf, &dir);
         if snap.is_file() {
-            let _ = fs::remove_file(&snap); // 删掉快照文件
+            // 删不掉要留痕：组配置已移除、快照却还在，日后重新关联同一目录时，
+            // 这份「该删的备份」会被当成该档的现有映射（替换的保留/覆写判据取自快照）。
+            if let Err(e) = fs::remove_file(&snap) {
+                self.warn(format!(
+                    "删除组：快照文件删除失败（{e}）：{}。若以后重新关联该目录，这份旧档景会被当成现有映射",
+                    snap.display()
+                ));
+            }
         }
         // 若删的正好是当前组，重新选一个当前组。
         if self.cur_group.as_deref() == Some(dir.as_str()) {
@@ -390,6 +475,18 @@ impl ProfileManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logger::ChannelLogger;
+
+    /// 取出注入的日志出口收到的全部告警正文（模块名固定 profile）。
+    fn warns_of(rx: &std::sync::mpsc::Receiver<crate::logger::LogLine>) -> Vec<String> {
+        rx.try_iter()
+            .map(|l| {
+                assert_eq!(l.module, "profile");
+                assert_eq!(l.level, "WARNING");
+                l.message
+            })
+            .collect()
+    }
 
     fn data_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -585,5 +682,56 @@ mod tests {
         let new_path = user.join("档A").join("档A.json");
         assert!(new_path.is_file(), "存档 json 应移入存档子目录");
         assert!(!user.join("档A.json").is_file(), "旧位置不应保留");
+    }
+
+    #[test]
+    fn restore_warns_when_profile_has_no_snapshot_but_live_has_content() {
+        // 串档现场：切入的档在该目录**没有快照**，而 live 里有内容（属于其他存档）。
+        // 以前这里静默跳过、什么也不说（用户只会看到头像没变），现在必须留一条 WARN。
+        let pack = tempfile::tempdir().unwrap();
+        let img = pack.path().join("pack");
+        fs::create_dir_all(&img).unwrap();
+        let dir = data_dir();
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        let (logger, rx) = ChannelLogger::channel();
+        pm.set_logger(Arc::new(logger));
+        pm.create_profile("档A").unwrap();
+        pm.create_profile("档B").unwrap(); // 切到档B：档A 此时还没有组
+        pm.load_profile("档A").unwrap();
+        pm.ensure_group(img.to_str().unwrap()).unwrap(); // 档A 有组、无快照
+        pm.load_profile("档B").unwrap(); // 切走：live 里没有 config.xml → 不产生快照
+        fs::write(img.join("config.xml"), "别档留下的内容").unwrap();
+        pm.load_profile("档A").unwrap(); // 切回：快照缺失 + live 有内容 → 该报 WARN
+
+        let warns = warns_of(&rx);
+        assert_eq!(warns.len(), 1, "应恰好一条 WARN：{warns:?}");
+        assert!(warns[0].contains("还没有快照"), "{}", warns[0]);
+        // 不恢复、也不删：原主（别档）的档景不被破坏
+        assert_eq!(fs::read_to_string(img.join("config.xml")).unwrap(), "别档留下的内容");
+    }
+
+    #[test]
+    fn restore_warns_when_pack_dir_unavailable() {
+        // 换盘 / NAS 离线：快照在、目录不在。以前静默跳过，用户以为档景已恢复（其实 FM 读到的是旧内容）。
+        let pack = tempfile::tempdir().unwrap();
+        let img = pack.path().join("pack");
+        fs::create_dir_all(&img).unwrap();
+        fs::write(img.join("config.xml"), "档A的档景").unwrap();
+        let dir = data_dir();
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        let (logger, rx) = ChannelLogger::channel();
+        pm.set_logger(Arc::new(logger));
+        pm.create_profile("档A").unwrap();
+        pm.ensure_group(img.to_str().unwrap()).unwrap();
+        pm.create_profile("档B").unwrap(); // 切走：存档A 的快照已存下（此处不该有 WARN）
+        assert!(warns_of(&rx).is_empty(), "正常切走不该产生告警");
+        fs::remove_dir_all(&img).unwrap(); // 目录变得不可用
+        pm.load_profile("档A").unwrap(); // 切回：快照在、目录不在 → 该报 WARN
+
+        let warns = warns_of(&rx);
+        assert_eq!(warns.len(), 1, "应恰好一条 WARN：{warns:?}");
+        assert!(warns[0].contains("目录不可用"), "{}", warns[0]);
+        // 快照必须保留（目录恢复后还要用它）
+        assert!(group_xml_path(&dir.path().join(".user"), "档A", &norm_dir(img.to_str().unwrap())).is_file());
     }
 }

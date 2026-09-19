@@ -131,7 +131,7 @@ export const t = {
       { value: 'Generate', label: '生成', desc: '无视现有 config.xml，从零生成全部映射' },
     ] as const,
     startBtn: '替换头像',
-    runningBtn: '替换中…',
+    runningBtn: '替换中', // 按钮上会追加实时百分比，如「替换中 45%」
     cancelBtn: '取消',
     browseDisabledHint: '请先在左侧「激活」存档后再执行替换（当前为浏览预览）',
     browseNotice: (name: string) =>

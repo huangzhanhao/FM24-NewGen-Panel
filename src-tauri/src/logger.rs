@@ -165,6 +165,22 @@ impl LogSink for Logger {
     }
 }
 
+/// 对象安全的日志出口：只留唯一那个 `write`，供需要**按 trait 对象持有**日志器的地方使用
+/// （如 `ProfileManager` 后置注入的 `Arc<dyn …>` 字段）。
+/// 【为什么不直接存 `Arc<dyn LogSink>`】`LogSink` 的五个便捷方法收 `impl Into<String>`
+/// （泛型方法）→ 该 trait **不是 dyn 兼容的**，无法组成 trait 对象。
+/// 实现由下面的 blanket impl 自动提供（库里任何 `LogSink` 都是 `LogSinkDyn`），
+/// 于是「调用点写 `info/warn/…`」与「字段存 trait 对象」两件事都不必将就。
+pub trait LogSinkDyn: Send + Sync {
+    fn write(&self, level: log::Level, module: &str, msg: String);
+}
+
+impl<T: LogSink + ?Sized> LogSinkDyn for T {
+    fn write(&self, level: log::Level, module: &str, msg: String) {
+        LogSink::write(self, level, module, msg)
+    }
+}
+
 /// 测试用捕获器：日志进通道，测试端 try_iter 收集断言（仅测试构建参与编译）。
 #[cfg(test)]
 pub struct ChannelLogger(Sender<LogLine>);

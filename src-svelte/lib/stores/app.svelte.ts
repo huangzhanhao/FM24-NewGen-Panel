@@ -81,11 +81,26 @@ export const appStore = $state({
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */
 export async function refreshSnapshot() {
-  appStore.snapshot = await api.getAppState();
+  await applySnapshot(await api.getAppState());
 }
 
-/** 直接用命令返回的快照替换本地状态（避免多一次 get_app_state 往返）。 */
+/** 直接用命令返回的快照替换本地状态（避免多一次 get_app_state 往返）。
+ *  【作用域变化要复位派生标记】`rosterReady`/`lastRtfScan` 描述的是「后端名单缓存里有没有数据」，
+ *  而后端在切档 / 切组 / 换名单时会清空该缓存（commands.rs 的 clear_caches_if_scope_changed）——
+ *  它只回传快照，缓存状态变了只能靠这几个量比对出来。不复位的话，名单预览会继续显示
+ *  **上一个档/组**的名单（查询打在后端已被清空的缓存上，或干脆是上一次的查询结果）。 */
 export async function applySnapshot(s: AppSnapshot) {
+  const prev = appStore.snapshot;
+  const scopeChanged =
+    !!prev &&
+    (prev.currentProfile !== s.currentProfile ||
+      prev.currentGroup !== s.currentGroup ||
+      prev.currentRtf !== s.currentRtf);
+  if (scopeChanged) {
+    appStore.rosterReady = false; // 后端名单缓存已作废 → 名单预览回到引导空态
+    appStore.lastRtfScan = null; // 摘要同上（它是「这份名单解析出来的」，名单换了就作废）
+    appStore.rosterVersion++; // 触发名单预览重载：按清空后的空态重画
+  }
   appStore.snapshot = s;
 }
 

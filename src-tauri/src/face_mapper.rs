@@ -2,14 +2,15 @@
 //!
 //! 这是整个应用的「大脑」：按每个球员的国籍 + 种族码，经所选标准的抽图规则
 //! （templates::PickRule）算出目标种族目录并随机取图，产出「球员 UID → 图片」的映射条目。
-//! 三模式（保留/覆写/生成）决定与现有 config.xml 的合并方式；包布局扫描与标准判定在
+//! 三模式（保留/覆写/生成）决定与「本档该组的存档快照」的合并方式（判据来源见
+//! `FaceMapper::existing_xml`，**不是**头像包里的 live config.xml——那是全档共享的一份）；包布局扫描与标准判定在
 //! facepack_scanner，本模块只消费其结果。
 use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::templates::{self, PickRule, RuleConfig};
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::{self, MappingEntry};
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `generate_mapping` 内部两个「可数」子步骤。
@@ -46,11 +47,23 @@ impl Mode {
 
 /// 头像映射器：持有扫描判定的布局与对应标准的抽图模型，负责按模式编排并组装映射条目。
 pub struct FaceMapper {
-    pub img_dir: String,
     /// 布局判定结果（facepack_scanner::classify 按 templates 的 FolderList 判定）；replace_flow 据此拦截未实现标准。
     pub layout: PackLayout,
     /// 抽图模型（标准一平铺 / 标准二种族匹配 / 标准三细分目录检索 / 退化布局递归全池），池的所有权在模型内。
     rule: Box<dyn PickRule>,
+    /// **判据来源**：Preserve/Overwrite 要读的「现有映射」文件。由命令层传当前档当前组的
+    /// 存档快照路径（`paths::group_xml_path(user_dir, cur_prf, cur_group)`）；`None` 或文件不存在
+    /// ＝该档在该头像包目录下还没有历史 → 按空表处理。
+    ///
+    /// 【为什么不能读 `img_dir/config.xml`】那份 live 文件是**所有档共享**的（config.xml 躺在头像包
+    /// 目录里，一个目录只有一份），它的「归属」全靠切档时 save/restore 配对维持，而
+    /// `restore_group_xml` 有三条静默跳过分支（该档在此目录无快照、目录当时不可用、copy 失败）。
+    /// 任一条命中，live 里就还是**上一个档**（或上次会话）的残留内容：此时按 live 判断
+    /// 「哪些球员已经换过脸」，会把别档的映射当成本档的历史——Preserve 直接跳过重抽、Overwrite
+    /// 把别档名单外的行原样带回，而且错结果会被收尾同步写进本档快照，第二次替换起不可逆。
+    /// 快照按 (档, 组) 唯一，读它天然免疫串档（详见 `docs` 与本文件回归测试
+    /// `overwrite_ignores_other_profiles_live_config_xml`）。
+    existing_xml: Option<PathBuf>,
 }
 
 impl FaceMapper {
@@ -67,19 +80,29 @@ impl FaceMapper {
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Self, String> {
         let scan = crate::facepack_scanner::scan_pack_progress(img_dir, progress)?;
-        Self::from_scan(img_dir, &scan, config)
+        // 测试沿用「判据 = 头像包里的 config.xml」的老口径：fixture 把旧映射直接写在包目录里，
+        // 于是这些用例不必为快照另造一份文件。生产由 commands 层传当前档的快照路径。
+        let existing = Some(PathBuf::from(img_dir).join("config.xml"));
+        Self::from_scan(&scan, config, existing)
     }
 
     /// 用现成的扫描结果构造（「扫描头像」命令的缓存复用入口）。
     /// 【借用而非所有权】内部只读 scan（classify 与 for_layout 都吃 &PackScan），
     /// 大包索引（数万图片名）一份克隆就是几十 MB 白复制，不强制调用方克隆。
-    pub fn from_scan(img_dir: &str, scan: &PackScan, config: &RuleConfig) -> Result<Self, String> {
+    /// `existing_xml` 见字段注释——传当前档的档快照路径，**不要传 `img_dir/config.xml`**。
+    /// 【为什么不收 img_dir】布局判定与抽图池全部来自 scan，img_dir 只在扫描那一步用得到；
+    /// 留着这个字段只会诱使后来者再写一次 `img_dir/config.xml`——那正是串档的来源。
+    pub fn from_scan(
+        scan: &PackScan,
+        config: &RuleConfig,
+        existing_xml: Option<PathBuf>,
+    ) -> Result<Self, String> {
         // classify 输入剔除垃圾目录（__MACOSX 等不参与判定）——与「扫描头像」共用同一前导。
         let layout = facepack_scanner::classify_scan(scan, &config.folder_lists());
         Ok(Self {
-            img_dir: img_dir.to_string(),
             layout,
             rule: templates::for_layout(layout, scan, config),
+            existing_xml,
         })
     }
 
@@ -98,21 +121,27 @@ impl FaceMapper {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        // Preserve/Overwrite 需要现有 config.xml 作为基础；Generate 从零开始，用空表。
-        // 读进来的过程按条上报（大包 config.xml 可上万行）。Generate 没有这一步，连 ReadXml
+        // Preserve/Overwrite 需要「本档现有映射」作为基础；Generate 从零开始，用空表。
+        // 读进来的过程按条上报（大快照可上万行）。Generate 没有这一步，连 ReadXml
         // 都不报——否则状态栏会先亮一下「读取现有映射」又立刻切到下一阶段。
+        // 【读的是档快照，不是 img_dir/config.xml】原因见 existing_xml 字段注释；快照缺失
+        // （该档在此目录还没换过脸）就当空表，等价于「本档无历史」，不再继承别档残留。
         let xml_data = match mode {
             Mode::Preserve | Mode::Overwrite => {
                 progress(MapStep::ReadXml, 0, 0); // 步骤锚点：先让状态栏亮出「读取现有映射」，再逐条报
-                xml_parser::parse_xml_progress(
-                    &Path::new(&self.img_dir).join("config.xml"),
-                    &mut |done, total| progress(MapStep::ReadXml, done, total),
-                )
-                .unwrap_or_default() // 解析失败（如没文件）就用空字典
+                self.existing_xml
+                    .as_deref()
+                    .map(|path| {
+                        xml_parser::parse_xml_progress(path, &mut |done, total| {
+                            progress(MapStep::ReadXml, done, total)
+                        })
+                        .unwrap_or_default() // 解析失败（如文件被删）就用空字典
+                    })
+                    .unwrap_or_default()
             }
             Mode::Generate => HashMap::new(),
         };
-        // Preserve + 禁重复：把现有 config.xml 已占用的图片从池中剔除（避免新球员抽到已被占用的图）。
+        // Preserve + 禁重复：把本档现有映射已占用的图片从池中剔除（避免新球员抽到已被占用的图）。
         // used 用 from 全路径做键（种族目录非空 → "种族/图名"，平铺 → "图名"），由规则内部精确比对。
         if !duplicates && mode == Mode::Preserve {
             let used: BTreeSet<String> = xml_data.values()
@@ -234,6 +263,7 @@ impl FaceMapper {
 mod tests {
     use super::*;
     use crate::templates::RuleConfig;
+    use std::path::Path;
 
     /// 测试用规则配置：内置出厂默认。
     fn config() -> RuleConfig {
@@ -509,5 +539,75 @@ mod tests {
         for m in &mapping {
             assert!(xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some());
         }
+    }
+
+    /// 手写一份 config.xml 文本：快照文件不在头像包目录里，用不了 `write_xml`（它只会写
+    /// `<img_dir>/config.xml`，而本用例恰恰要让「快照」与「live」内容不同）。
+    fn config_xml_text(rows: &[(&str, &str)]) -> String {
+        let body: Vec<String> = rows
+            .iter()
+            .map(|(uid, from)| {
+                format!(r#"<record from="{from}" to="graphics/pictures/person/{uid}/portrait"/>"#)
+            })
+            .collect();
+        format!("<root>\n                {}\n</root>\n", body.join("\n                "))
+    }
+
+    #[test]
+    fn preserve_and_overwrite_ignore_other_profiles_live_config_xml() {
+        // 【串档回归】两档共用同一个头像包时，live config.xml 里可能残留**别档**的映射
+        // （切档 restore 有三条静默跳过分支：该档在此目录无快照／目录不可用／copy 失败）。
+        // 判据必须取自本档快照：否则会把别档的 r-8001 当成本档「已换过」——Preserve 跳过重抽、
+        // Overwrite 把它原样带回，且错结果会被收尾同步写进本档快照，第二次替换起不可逆。
+        let dir = tempfile::tempdir().unwrap();
+        let img = facepack(&dir);
+        let snap_dir = dir.path().join("snap");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        let snap = snap_dir.join("group.xml");
+        // 本档快照：只有 r-7001（本档上次换脸的结果，图片钉死 e0 便于断言「原样保留」）。
+        std::fs::write(&snap, config_xml_text(&[("r-7001", "SpanMed/e0")])).unwrap();
+        // live（别档残留）：只有 r-8001，本档名单里没有它 → 绝不能出现在结果里。
+        xml_parser::write_xml(
+            &[MappingEntry { uid: "r-8001".into(), ethnicity: "SpanMed".into(), image: "e0".into() }],
+            Path::new(&img), false,
+        ).unwrap();
+        let roster = vec![player("r-7001", "ESP", "1")];
+        let cancel = AtomicBool::new(false);
+        // 每次生成映射都会改动规则内部状态（禁重复的池），所以每轮都重新扫包建 mapper。
+        let scan_pack = || crate::facepack_scanner::scan_pack_progress(&img, &mut |_, _| {}).unwrap();
+
+        for mode in [Mode::Preserve, Mode::Overwrite] {
+            let scan = scan_pack();
+            let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
+            let mapping = mapper
+                .generate_mapping(&roster, mode, true, &cancel, &mut |_, _, _| {})
+                .unwrap();
+            assert!(
+                !mapping.iter().any(|m| m.uid == "r-8001"),
+                "别档残留的映射被带进了本档结果（mode={mode:?}）：{mapping:?}"
+            );
+            assert_eq!(mapping.len(), 1, "mode={mode:?} 结果只应剩本档那一条：{mapping:?}");
+        }
+        // Preserve 的原样保留：快照里那条的 (种族, 图名) 必须逐字不变（Overwrite 会重抽，不查）。
+        let scan = scan_pack();
+        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
+        let kept = mapper
+            .generate_mapping(&roster, Mode::Preserve, true, &cancel, &mut |_, _, _| {})
+            .unwrap();
+        assert_eq!(
+            (kept[0].uid.as_str(), kept[0].ethnicity.as_str(), kept[0].image.as_str()),
+            ("r-7001", "SpanMed", "e0")
+        );
+        // 反向确认：判据换成 live（修复前的口径）确实会带进 r-8001 —— 守着「这条断言不是靠巧合成立」。
+        let scan = scan_pack();
+        let live = Path::new(&img).join("config.xml");
+        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(live)).unwrap();
+        let wrong = mapper
+            .generate_mapping(&roster, Mode::Preserve, true, &cancel, &mut |_, _, _| {})
+            .unwrap();
+        assert!(
+            wrong.iter().any(|m| m.uid == "r-8001"),
+            "老口径（读 live）本应带进别档映射，说明本用例没有真正区分两个来源：{wrong:?}"
+        );
     }
 }

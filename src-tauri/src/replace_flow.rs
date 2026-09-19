@@ -14,7 +14,7 @@ use crate::logger::LogSink;
 use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
 use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner};
 use crate::xml_parser::{self, MappingEntry};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -74,6 +74,14 @@ pub struct ReplaceParams {
     /// 「扫描头像」命令缓存的包索引（按 img_dir 命中即复用，避免重复扫盘）。
     /// Arc 共享缓存里的同一份——克隆只涨引用计数，不复制数万图片名表；None = 现场新扫描。
     pub pre_scan: Option<Arc<crate::facepack_scanner::PackScan>>,
+    /// **保留/覆写判据的来源**：当前档当前组的存档快照路径
+    /// （`paths::group_xml_path(user_dir, cur_prf, cur_group)`，与收尾同步写的是同一个路径）。
+    /// `None` = 没有当前组（正常流程走不到）。
+    /// 【为何不读 `img_dir/config.xml`】那一份是**全档共享**的 live 文件，切档 restore 一旦
+    /// 静默跳过（该档在此目录无快照／目录不可用／copy 失败）就会残留别的档的内容，而按残留内容
+    /// 判断「谁已经换过脸」正是串档的根源；快照按 (档, 组) 唯一，读它天然隔离。详见
+    /// `FaceMapper::existing_xml`。
+    pub source_xml: Option<PathBuf>,
     /// 标准规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
     pub rule_config: RuleConfig,
 }
@@ -123,6 +131,42 @@ pub fn run(
         yes_no(params.allow_duplicates), yes_no(params.save_backup)));
     logger.info("replace", format!("头像包：{}", params.img_dir));
     logger.info("replace", format!("RTF 名单：{}", params.rtf_path));
+    // 【判据来源写进日志】保留/覆写读的是**本档本组的存档快照**（见 ReplaceParams::source_xml）。
+    // 快照缺失＝本档在此目录还没换过脸，按无历史处理。把来源写在明处，两档共用同一头像包时
+    // 一查日志就能确认有没有读到别档的内容；Generate 不读判据，省略此行。
+    if params.mode != Mode::Generate {
+        match params.source_xml.as_deref() {
+            Some(p) if p.is_file() => logger.info(
+                "replace",
+                format!("现有映射来源（本档快照）：{}", p.display()),
+            ),
+            Some(p) => logger.info(
+                "replace",
+                format!("现有映射来源：本档在此目录尚无快照（{}），按无历史处理", p.display()),
+            ),
+            None => logger.info("replace", "现有映射来源：无（未取到当前组，按无历史处理）"),
+        }
+        // 【一致性自检】判据取自本档快照，而 live（头像包目录里的 config.xml）**设计上应当与它一致**：
+        // 切档 restore、替换收尾同步、单人微调三处都在维持这条恒等。一旦不一致，只可能是两种情况——
+        // ① live 被手工或别的程序改过；② 切档时 restore 被静默跳过（该档在此目录无快照／目录不可用／
+        // copy 失败），live 里还是**别档**的残留，也就是「两档共用同一头像包」的典型现场。
+        // 两种情况都只记 WARN 不阻断：本次判据以本档快照为准，live 那份会被写入结果覆盖，
+        // 但用户得有机会先抢救（例如刚在文本编辑器里改过 config.xml）。
+        // 【成本】只对 Preserve/Overwrite 做，且是两次整文件读 + 逐字节比较（15 万行 ≈ 10 MB，
+        // 十几毫秒量级），相对本轮流水线可忽略；跑在后台线程，不占主线程。
+        if let (Some(snap), Ok(live)) = (
+            params.source_xml.as_deref().filter(|p| p.is_file()),
+            std::fs::read(Path::new(&params.img_dir).join("config.xml")),
+        ) {
+            if std::fs::read(snap).map(|s| s != live).unwrap_or(false) {
+                logger.warn(
+                    "replace",
+                    "头像包里的 config.xml 与本档存档快照不一致（可能被外部修改，或切档时未恢复成功）：\
+                     本次判据以本档快照为准，该文件将被结果覆盖",
+                );
+            }
+        }
+    }
 
     // 计时只覆盖流水线主体（run_body）：开始那三行日志本身的开销不该算进替换耗时。
     let started = Instant::now();
@@ -259,7 +303,8 @@ fn map_stage(
     // 可以原样交回命令层入缓存，同样的错误不再犯第二次。
     let (mut mapper, fresh_scan) = match &params.pre_scan {
         Some(scan) => (
-            FaceMapper::from_scan(&params.img_dir, scan, &params.rule_config).map_err(|e| failed(&e))?,
+            FaceMapper::from_scan(scan, &params.rule_config, params.source_xml.clone())
+                .map_err(|e| failed(&e))?,
             None,
         ),
         None => {
@@ -267,7 +312,7 @@ fn map_stage(
                 item(&mut *progress, "读取头像包索引…", STAGE_INDEX, done, total)
             })
             .map_err(|e| failed(&e))?;
-            let mapper = FaceMapper::from_scan(&params.img_dir, &scan, &params.rule_config)
+            let mapper = FaceMapper::from_scan(&scan, &params.rule_config, params.source_xml.clone())
                 .map_err(|e| failed(&e))?;
             (mapper, Some(Arc::new(scan)))
         }
@@ -419,6 +464,7 @@ mod tests {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
@@ -449,6 +495,7 @@ mod tests {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
@@ -486,6 +533,7 @@ mod tests {
             img_dir: dir.path().join("nonexistent").to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
@@ -511,6 +559,7 @@ mod tests {
             img_dir: dir.path().to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
@@ -526,6 +575,7 @@ mod tests {
             rtf_path: rtf, img_dir: img, mode: Mode::Generate,
             filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
@@ -572,6 +622,7 @@ mod tests {
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // Generate 模式不读判据
             rule_config,
         };
         let cancel = AtomicBool::new(false);
@@ -620,6 +671,7 @@ mod tests {
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);
@@ -666,6 +718,7 @@ mod tests {
             // 禁重复：池恰好 3 张、名单 3 人 → from 全集必等于递归池全集（确定性断言）。
             mode: Mode::Generate, filter_newgen: true, allow_duplicates: false, save_backup: false,
             pre_scan: None,
+            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
         };
         let cancel = AtomicBool::new(false);

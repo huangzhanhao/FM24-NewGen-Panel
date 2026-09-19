@@ -174,7 +174,7 @@ pub fn single_replacement(
 fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     // 用当前时间戳生成唯一备份名，先拷贝一份。
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let backup = img_dir.join(format!("config备份_{ts}.xml"));
+    let backup = img_dir.join(format!("config_backup_{ts}.xml"));
     fs::copy(config_path, &backup).map_err(|e| e.to_string())?;
     // 列出目录下所有历史备份。
     let mut backups: Vec<_> = fs::read_dir(img_dir)
@@ -182,7 +182,7 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let n = e.file_name().to_string_lossy().to_string();
-            n.starts_with("config备份_") && n.ends_with(".xml")
+            n.starts_with("config_backup_") && n.ends_with(".xml")
         })
         .map(|e| e.path())
         .collect();
@@ -214,8 +214,8 @@ pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(Stri
     if !p.is_file() {
         return None;
     } // 手输路径可能打错：不存在的文件写进 config.xml 会替换「成功」但 FM 显示空
-    // 两边 canonicalize 后做前缀剥离（Windows 大小写/分隔符不敏感的权威比较）；
-    // 剥离失败 = 图片在包外（含不同盘），直接拒绝，不再退化取目录名。
+      // 两边 canonicalize 后做前缀剥离（Windows 大小写/分隔符不敏感的权威比较）；
+      // 剥离失败 = 图片在包外（含不同盘），直接拒绝，不再退化取目录名。
     let parent = p.parent()?;
     let rel = parent
         .canonicalize()
@@ -433,9 +433,21 @@ mod tests {
         let pack = dir.path().join("pack");
         std::fs::create_dir_all(&pack).unwrap();
         let data = vec![
-            MappingEntry { uid: "r-1001".into(), ethnicity: "".into(), image: "flat1".into() },
-            MappingEntry { uid: "r-1002".into(), ethnicity: "SpanMed".into(), image: "s.1".into() },
-            MappingEntry { uid: "2000000003".into(), ethnicity: "MENA/sub".into(), image: "deep".into() },
+            MappingEntry {
+                uid: "r-1001".into(),
+                ethnicity: "".into(),
+                image: "flat1".into(),
+            },
+            MappingEntry {
+                uid: "r-1002".into(),
+                ethnicity: "SpanMed".into(),
+                image: "s.1".into(),
+            },
+            MappingEntry {
+                uid: "2000000003".into(),
+                ethnicity: "MENA/sub".into(),
+                image: "deep".into(),
+            },
         ];
         write_xml(&data, &pack, false).unwrap();
         let parsed = parse_xml_entries(&pack.join("config.xml")).unwrap();
@@ -452,9 +464,21 @@ mod tests {
         std::fs::create_dir_all(&pack).unwrap();
         write_xml(
             &[
-                MappingEntry { uid: "2000000001".into(), ethnicity: "Asian".into(), image: "a1".into() },
-                MappingEntry { uid: "r-2000000002".into(), ethnicity: "MENA/sub".into(), image: "m9".into() },
-                MappingEntry { uid: "2000000003".into(), ethnicity: "".into(), image: "flat".into() },
+                MappingEntry {
+                    uid: "2000000001".into(),
+                    ethnicity: "Asian".into(),
+                    image: "a1".into(),
+                },
+                MappingEntry {
+                    uid: "r-2000000002".into(),
+                    ethnicity: "MENA/sub".into(),
+                    image: "m9".into(),
+                },
+                MappingEntry {
+                    uid: "2000000003".into(),
+                    ethnicity: "".into(),
+                    image: "flat".into(),
+                },
             ],
             &pack,
             false,
@@ -462,9 +486,14 @@ mod tests {
         .unwrap();
         let mut seen: Vec<(usize, usize)> = Vec::new();
         let entries =
-            parse_xml_entries_progress(&pack.join("config.xml"), &mut |d, t| seen.push((d, t))).unwrap();
+            parse_xml_entries_progress(&pack.join("config.xml"), &mut |d, t| seen.push((d, t)))
+                .unwrap();
         assert_eq!(entries.len(), 3);
-        assert_eq!(seen.last().copied(), Some((3, 3)), "进度应报到 (条数, 条数)：{seen:?}");
+        assert_eq!(
+            seen.last().copied(),
+            Some((3, 3)),
+            "进度应报到 (条数, 条数)：{seen:?}"
+        );
         // 模板自身（<record> 根元素、注释、<list>）不含行首标记，所以计数恰好等于映射行数。
         let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
         assert_eq!(text.matches(RECORD_MARK).count(), 3);

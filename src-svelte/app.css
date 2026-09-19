@@ -296,6 +296,22 @@ select option { background: var(--bg-surface); color: var(--text-1); }
 .cta-row .btn.primary { flex: 1; padding: 9px; font-size: 14px; }
 /* 与主 CTA 同高（主按钮 padding 9、取消按钮默认 7，会形成错位） */
 .cta-row .btn.cancel { width: 92px; padding: 9px 0; }
+/* 替换进度画进主 CTA 本身：按钮作定位容器并裁剪溢出，填充层在底下、文字浮在上层 */
+.cta-row .btn.primary { position: relative; overflow: hidden; }
+.cta-row .btn.primary .btn-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 0;
+  background: var(--accent); pointer-events: none;
+  transition: width var(--dur-fast) var(--ease-out);
+}
+.cta-row .btn.primary .btn-label {
+  position: relative; z-index: 1;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+/* 替换中不套全局禁用的 55% 透明度（否则绿色填充被冲淡成“水洗绿”）；
+   灰底仍未就绪的观感由 button.btn.primary:disabled 的灰底 + 灰字给出 */
+.cta-row .btn.primary.running:disabled { opacity: 1; }
+/* 填充是主色绿，文字统一用主色对比色，保证压在灰底和绿底上都清晰 */
+.cta-row .btn.primary.running .btn-label { color: var(--accent-contrast); }
 .progress-line { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .progress-text { color: var(--text-2); font-size: 12px; min-width: 210px; }
 

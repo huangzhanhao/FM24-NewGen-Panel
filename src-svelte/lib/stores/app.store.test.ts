@@ -8,7 +8,8 @@ const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
 
-import { appStore, BAR_LINGER_MS, runTask } from './app.svelte';
+import { appStore, applySnapshot, BAR_LINGER_MS, runTask } from './app.svelte';
+import type { AppSnapshot, RtfScanResult } from '../types';
 
 /** 两条进度通道的清空态（store 里这两个字段的形状一致）。 */
 const blank = { status: '', value: 0, current: 0, total: 0 };
@@ -17,6 +18,8 @@ const snap = (replacing: boolean) => ({
   profiles: [], currentProfile: 'No Profile', groups: [], currentGroup: null,
   currentRtf: '', replacing, configXml: null, logPath: '',
 });
+/** 构造一个任意快照（applySnapshot 的入参）。 */
+const snapOf = (over: Partial<AppSnapshot> = {}): AppSnapshot => ({ ...snap(false), ...over });
 
 describe('runTask', () => {
   beforeEach(() => {
@@ -108,5 +111,67 @@ describe('runTask', () => {
     vi.advanceTimersByTime(BAR_LINGER_MS);
 
     expect(appStore.progress.value).toBe(66); // 替换进度没被抹掉
+  });
+});
+
+/** applySnapshot：作用域（当前档 / 当前组 / 名单）变化时复位「名单可读」标记。
+ *  后端在切档 / 切组 / 换名单时会清空名单缓存（commands.rs 的 clear_caches_if_scope_changed），
+ *  前端只能从快照的这三个量看出缓存已作废——不复位就会继续显示**上一个档 / 组的名单**。
+ *  改动这段、或改后端那个函数前先看这里。 */
+describe('applySnapshot', () => {
+  const roster = (): RtfScanResult => ({
+    total: 3, newgan: 0, detailed: false, format: 'rtf', formatCode: 'basic', language: 'en',
+  });
+
+  beforeEach(() => {
+    appStore.snapshot = null;
+    appStore.rosterReady = false;
+    appStore.lastRtfScan = null;
+    appStore.rosterVersion = 0;
+  });
+
+  it('切档：标记复位 + rosterVersion 递增（名单预览回到引导空态）', async () => {
+    appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/a.rtf' });
+    appStore.rosterReady = true;
+    appStore.lastRtfScan = roster();
+
+    await applySnapshot(snapOf({ currentProfile: '档B' }));
+
+    expect(appStore.rosterReady).toBe(false);
+    expect(appStore.lastRtfScan).toBeNull();
+    expect(appStore.rosterVersion).toBe(1);
+  });
+
+  it('切组 / 换名单：同样复位（名单是「当前档当前组的这份名单」）', async () => {
+    appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/a.rtf' });
+    appStore.rosterReady = true;
+    await applySnapshot(snapOf({ currentProfile: '档A', currentGroup: 'C:/other', currentRtf: '' }));
+    expect(appStore.rosterReady).toBe(false);
+
+    appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/a.rtf' });
+    appStore.rosterReady = true;
+    await applySnapshot(snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/b.rtf' }));
+    expect(appStore.rosterReady).toBe(false);
+  });
+
+  it('同档同组同名单（替换结束后的刷新）：不动标记，刚置上的可读态不被冲掉', async () => {
+    appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/a.rtf' });
+    appStore.rosterReady = true;
+    appStore.lastRtfScan = roster();
+
+    await applySnapshot(snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/a.rtf', replacing: true }));
+
+    expect(appStore.rosterReady).toBe(true);
+    expect(appStore.lastRtfScan).not.toBeNull();
+    expect(appStore.rosterVersion).toBe(0);
+  });
+
+  it('启动首次赋值（此前没有快照）：不比较、不复位', async () => {
+    appStore.rosterReady = true;
+
+    await applySnapshot(snapOf({ currentProfile: '档A' }));
+
+    expect(appStore.rosterReady).toBe(true);
+    expect(appStore.rosterVersion).toBe(0);
   });
 });

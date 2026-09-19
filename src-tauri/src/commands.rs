@@ -32,8 +32,8 @@ pub struct AppState {
     pub logger: Arc<Logger>,       // 日志门面（Arc 跨线程共享；写入走 log 门面，回查走内存缓冲）
     pub cancel: Arc<AtomicBool>,   // 请求取消标志
     pub running: Arc<AtomicBool>,  // 是否正在替换
-    pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>, // 最近一次解析的球员缓存
-    pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存
+    pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>, // 最近一次解析的球员缓存（作用域见 clear_caches_if_scope_changed）
+    pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存（同上；两者切档/切组/换名单一律清空）
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>, // 「扫描头像」的包索引缓存（替换可复用）
     pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
     pub data_dir: PathBuf, // 便携数据目录（标准规则 data/rules/ 在其下）
@@ -55,6 +55,33 @@ pub struct FaceIndex {
 pub struct SnapshotCache {
     pub xml_path: String,
     pub entries: Vec<MappingEntry>,
+}
+
+// ---------------- 跟着「当前档 / 当前组」走的内存缓存：作用域变更即作废 ----------------
+
+/// 「缓存作用域」：决定 `rtf_cache` / `mapping_cache` 归谁用的三个量——当前档、当前组、当前组的名单路径。
+/// 【为什么需要它】这两个缓存是「最近一次解析/生成的」语义，**没有路径键**（不像 `snapshot_cache`
+/// 按快照路径命中、`faces_cache` 按目录 + 目录签名），它们的归属完全由这三项决定。
+fn cache_scope(pm: &ProfileManager) -> (String, Option<String>, String) {
+    (pm.cur_prf.clone(), pm.cur_group.clone(), pm.get_cur_rtf())
+}
+
+/// 命令改完存档 / 组 / 名单之后调用：作用域变了就清掉那两个缓存（宁缺勿旧）。
+/// 【不清会怎样】它们会继续按「上一次」的内容作答：名单预览显示**上一个档/上一个组**的名单，
+/// 单人微调与单人预览拿**别档**的映射行展示抽图结果——两档共用同一头像包时尤其明显。
+/// 清空后前端据快照里的作用域变化把 `rosterReady` 复位，各预览回到引导空态，
+/// 等下一次「扫描RTF」或替换重新填充（替换必然重填，扫描按需）。
+fn clear_caches_if_scope_changed(
+    state: &State<'_, AppState>,
+    before: (String, Option<String>, String),
+) {
+    // 锁只在这一句里持有：先取出改后的作用域，随后的两把锁与 pm 无嵌套关系。
+    let after = cache_scope(&state.pm.lock().unwrap());
+    if after == before {
+        return; // 作用域没变（例如删的是别的组）：手上这份缓存仍然对应当前档当前组
+    }
+    state.rtf_cache.lock().unwrap().clear();
+    state.mapping_cache.lock().unwrap().clear();
 }
 
 // ---------------- 传给前端的类型（统一 camelCase） ----------------
@@ -293,7 +320,11 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppSnapshot {
 #[tauri::command]
 pub fn create_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let name = name.trim().to_string();
-    state.pm.lock().unwrap().create_profile(&name)?;
+    let mut pm = state.pm.lock().unwrap();
+    let before = cache_scope(&pm); // 新建即激活＝切档：改前记作用域，改完比对作废名单/映射缓存
+    pm.create_profile(&name)?;
+    drop(pm);
+    clear_caches_if_scope_changed(&state, before);
     state
         .logger
         .info("profile", format!("创建并激活 Profile: {name}"));
@@ -304,10 +335,21 @@ pub fn create_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
 #[tauri::command]
 pub fn delete_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
+    let before = cache_scope(&pm); // 删的是当前激活档时会连带切回 No Profile → 作用域变化
+    let was_current = pm.cur_prf == name; // 删的是当前激活档时，delete_profile 会自动切回 No Profile
     if !pm.delete_profile(&name)? {
         return Err("无法删除缺省档 No Profile".into());
     }
     drop(pm); // 显式释放锁（因为后面 snapshot() 会再次加锁，不先释放会死锁）
+    clear_caches_if_scope_changed(&state, before);
+    let suffix = if was_current {
+        "（当前激活档，已切回 No Profile）" // 删掉当前激活档会连带切档，这个状态变化在文案里点明
+    } else {
+        ""
+    };
+    state
+        .logger
+        .info("profile", format!("删除 Profile: {name}{suffix}"));
     Ok(snapshot(&state))
 }
 
@@ -315,10 +357,12 @@ pub fn delete_profile(state: State<'_, AppState>, name: String) -> Result<AppSna
 #[tauri::command]
 pub fn switch_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
+    let before = cache_scope(&pm); // 切档＝换了一套名单/映射：改前记下作用域，改完作废缓存
     pm.load_profile(&name)?;
     // 切档后把全局配置 profiles.json 也落盘（记住新的激活位）。
     crate::json_store::save(&pm.user_cfg_path().join("profiles.json"), &pm.config)?;
     drop(pm);
+    clear_caches_if_scope_changed(&state, before);
     state
         .logger
         .info("profile", format!("激活 Profile: {name}"));
@@ -335,8 +379,10 @@ pub fn select_image_directory(
     if pm.cur_prf == "No Profile" {
         return Err("请先创建并激活一个 Profile".into());
     }
+    let before = cache_scope(&pm); // 当前组会变（新组）
     pm.ensure_group(&path).ok_or("目录不可用")?; // ok_or 把 Option::None 转为 Err
     drop(pm);
+    clear_caches_if_scope_changed(&state, before);
     Ok(snapshot(&state))
 }
 
@@ -344,10 +390,12 @@ pub fn select_image_directory(
 #[tauri::command]
 pub fn set_current_rtf(state: State<'_, AppState>, path: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
+    let before = cache_scope(&pm); // 名单路径属作用域：换名单后旧解析结果不再对应当前组
     if !pm.set_cur_rtf(&path)? {
         return Err("请先选择头像包目录（当前无组）".into());
     }
     drop(pm);
+    clear_caches_if_scope_changed(&state, before);
     Ok(snapshot(&state))
 }
 
@@ -358,10 +406,12 @@ pub fn set_current_group(
     img_dir: String,
 ) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
+    let before = cache_scope(&pm); // 换组：名单/映射缓存都属上一个组
     if !pm.set_cur_group(&img_dir)? {
         return Err("组不存在".into());
     }
     drop(pm);
+    clear_caches_if_scope_changed(&state, before);
     Ok(snapshot(&state))
 }
 
@@ -369,10 +419,12 @@ pub fn set_current_group(
 #[tauri::command]
 pub fn delete_group(state: State<'_, AppState>, img_dir: String) -> Result<AppSnapshot, String> {
     let mut pm = state.pm.lock().unwrap();
+    let before = cache_scope(&pm); // 删的若是当前组，当前组会回退到剩下的组 → 作用域变化
     if !pm.delete_group(&img_dir)? {
         return Err("组不存在".into());
     }
     drop(pm);
+    clear_caches_if_scope_changed(&state, before);
     Ok(snapshot(&state))
 }
 
@@ -536,7 +588,11 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
         "scan",
         format!(
             "扫描 RTF 完成：{} 条（随机人 {}，{}，{}），耗时 {:.1?}",
-            summary.total, summary.newgan, summary.format, summary.language, t.elapsed()
+            summary.total,
+            summary.newgan,
+            summary.format,
+            summary.language,
+            t.elapsed()
         ),
     );
     progress.finish(); // 收尾 100%（空名单/无数据行时进度条也得走满）
@@ -630,6 +686,9 @@ pub fn start_replace(
         allow_duplicates: args.allow_duplicates,
         save_backup: args.save_backup,
         pre_scan: None, // 由后台线程按「缓存命中 + 目录签名」填，见下
+        // 保留/覆写的判据＝**本档本组的存档快照**（不是头像包里的 live config.xml）：
+        // live 是全档共享的一份，两档关联同一头像包时会残留别档内容（详见 ReplaceParams::source_xml）。
+        source_xml: snapshot_path.clone(),
         rule_config,
     };
     // 后台线程需要的句柄先 clone 出来（Arc::clone 只涨引用计数，不拷贝真实数据）。
@@ -652,10 +711,18 @@ pub fn start_replace(
             .filter(|c| c.img_dir == params.img_dir)
             .filter(|c| c.sig.is_some() && c.sig == want_sig)
             .map(|c| c.scan.clone());
-        logger.info("replace", format!(
-            "头像包索引缓存：{}，目录签名比对耗时 {:.1?}",
-            if reuse.is_some() { "命中（复用，不扫盘）" } else { "未命中（将现场扫盘）" },
-            t_sig.elapsed()));
+        logger.info(
+            "replace",
+            format!(
+                "头像包索引缓存：{}，目录签名比对耗时 {:.1?}",
+                if reuse.is_some() {
+                    "命中（复用，不扫盘）"
+                } else {
+                    "未命中（将现场扫盘）"
+                },
+                t_sig.elapsed()
+            ),
+        );
         params.pre_scan = reuse;
         let emit_app = app.clone();
         // 跑流水线；progress 回调里通过 emit 把进度发给前端（事件名 replace:progress）。
@@ -715,7 +782,13 @@ pub fn start_replace(
         //（已读过的那份仍然有效，所以这里只写不清）。
         if matches!(result.outcome, Outcome::Finished) {
             if let Some(snap_path) = snapshot_path.as_deref() {
-                sync_group_snapshot(snap_path, &params.img_dir, &mapping, &snapshot_cache, &*logger);
+                sync_group_snapshot(
+                    snap_path,
+                    &params.img_dir,
+                    &mapping,
+                    &snapshot_cache,
+                    &*logger,
+                );
             }
         }
         if matches!(result.outcome, Outcome::Finished) && mapping_empty {
@@ -766,6 +839,28 @@ pub fn replace_single_face(
     let Some((pack, image)) = xml_parser::parse_image_path_in_pack(&img_dir, &image_path) else {
         return Err("所选图片不在当前头像包内（或文件不存在），请从当前头像包目录或其子目录中选择图片".into());
     };
+    // 【先把 live 归位成「本档的档景」，再改】单人微调改的是全档共享的 live config.xml，而它的
+    // 归属靠切档 restore 维持——restore 有三条静默跳过分支（该档在此目录无快照／目录不可用／
+    // copy 失败），跳过时 live 里可能还是**别档**的内容。先按本档快照把 live 恢复一遍，这一行替换
+    // 才确实落在本档的现有映射上，随后写回快照也不会把别档的内容一并带进来。
+    // 【快照不存在＝本档在此目录还没有历史】此时 live 归谁无从判断，宁可不改：报错让用户先跑替换。
+    let snap = {
+        let pm = state.pm.lock().unwrap();
+        crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, &img_dir)
+    };
+    if !snap.is_file() {
+        state
+            .logger
+            .warn("viewer", "单人换脸已跳过：当前档在此头像包目录下还没有存档快照");
+        return Err("当前存档在此头像包目录下还没有存档快照，无法确定本档的现有映射。请先执行一次替换后再微调。".into());
+    }
+    if let Err(e) = std::fs::copy(&snap, Path::new(&img_dir).join("config.xml")) {
+        // 恢复失败不致命：退化为「在 live 现况上改」（与改造前一致），但必须留下痕迹。
+        state.logger.warn(
+            "viewer",
+            format!("单人换脸前恢复本档现有映射失败，将按头像包当前内容继续：{e}"),
+        );
+    }
     let hit =
         xml_parser::single_replacement(&uid, &pack, &image, Path::new(&img_dir), save_backup)?;
     if hit {
@@ -778,6 +873,11 @@ pub fn replace_single_face(
                 break;
             }
         }
+        drop(cache); // 下面要锁 snapshot_cache，先放开这把，避免无谓的嵌套持锁
+        // 【把微调写回本档快照】快照才是「本档本组的现有映射」，替换的保留/覆写判据取自它
+        // （见 FaceMapper::existing_xml）。不写回的话下一轮替换仍按微调前的快照判断 →
+        // 刚改的这行会被当成「新球员」重抽，静默覆盖用户的调整。
+        sync_live_to_snapshot(&state, &snap, &img_dir, &uid, &pack, &image);
     }
     state.logger.info(
         "viewer",
@@ -789,7 +889,43 @@ pub fn replace_single_face(
     Ok(hit) // 返回是否命中（未命中 = config.xml 里本来就没这个 UID）
 }
 
-/// 查询/预览（对等旧版 PlayerService 查询链）。按优先级从多个数据源拼出单人预览。
+/// 单人微调后，把刚写出的 live `config.xml` 同步到 `snap`（当前档该组的存档快照），
+/// 并就地更新快照预览缓存里那一条（缓存路径与 `snap` 一致才改）。
+/// 【路径键】`snap` 必须来自 `paths::group_xml_path`，与快照预览、收尾同步共用同一口径。
+fn sync_live_to_snapshot(
+    state: &State<'_, AppState>,
+    snap: &Path,
+    img_dir: &str,
+    uid: &str,
+    pack: &str,
+    image: &str,
+) {
+    match std::fs::copy(Path::new(img_dir).join("config.xml"), snap) {
+        Ok(_) => {
+            // 预览缓存按路径命中：路径一致时就地改这一条（条目顺序不变，其余字段原样）。
+            // 路径不符/缓存为空则不动——查询侧发现路径不匹配会按请求路径重读兜底，不会展示错数据。
+            let snap_str = snap.to_string_lossy().to_string();
+            let mut cache = state.snapshot_cache.lock().unwrap();
+            if let Some(c) = cache.as_mut() {
+                if c.xml_path == snap_str {
+                    if let Some(e) = c.entries.iter_mut().find(|e| e.uid == uid) {
+                        e.ethnicity = pack.to_string();
+                        e.image = image.to_string();
+                    }
+                }
+            }
+        }
+        Err(e) => state
+            .logger
+            .warn("viewer", format!("单人换脸同步存档快照失败：{e}")),
+    }
+}
+
+/// 查询/预览（对等旧版 PlayerService 查询链）。按优先级从多个数据源拼出单人预览：
+/// ① 最近一次替换的映射缓存 → ② 本档本组的存档快照（快照预览缓存命中同一路径时免整表解析）→
+/// ③ 按映射在头像包目录里解析实际图片文件 → ④ 名单缓存补球员资料。
+/// 【为什么是快照而不是 live config.xml】替换的保留/覆写判据已改读本档快照（见 ReplaceParams::source_xml），
+/// 显示侧同源才不会出现「按别档的映射显示本档抽图结果」。
 #[tauri::command]
 pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerPreview, String> {
     let uid = uid.trim().to_string();
@@ -801,11 +937,27 @@ pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerP
         cache.iter().find(|m| variants.contains(&m.uid)).cloned()
     };
     let pm = state.pm.lock().unwrap();
-    // 2) 缓存没命中，就读当前组的 config.xml 找。
+    // 2) 缓存没命中，就读「当前档该组的存档快照」找——与替换判据同一出处（ReplaceParams::source_xml）。
+    //    【为什么不读 img_dir/config.xml】那份 live 是全档共享的：两档关联同一头像包时它可能还留着
+    //    上一个档的内容（切档 restore 有静默跳过分支），显示侧按它取映射＝把别档的抽图结果显示成本档的。
+    //    快照不存在＝本档在此目录没有历史 → 不猜（保持 None，与替换的「按无历史处理」一致）。
     if mapping.is_none() {
         if let Some(g) = &pm.cur_group {
-            if let Ok(xml) = xml_parser::parse_xml(&Path::new(g).join("config.xml")) {
-                mapping = variants.iter().find_map(|u| xml.get(u).cloned());
+            let snap = crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, g);
+            let snap_str = snap.to_string_lossy().to_string();
+            // 快照预览缓存里正好是这份快照时直接查（路径命中）：大快照整表解析要 1 s 以上，
+            // 而本命令是同步命令、跑在主线程上，能省则省。路径不符/缓存为空时再读文件兜底。
+            mapping = {
+                let cache = state.snapshot_cache.lock().unwrap();
+                cache
+                    .as_ref()
+                    .filter(|c| c.xml_path == snap_str)
+                    .and_then(|c| c.entries.iter().find(|e| variants.contains(&e.uid)).cloned())
+            };
+            if mapping.is_none() && snap.is_file() {
+                if let Ok(xml) = xml_parser::parse_xml(&snap) {
+                    mapping = variants.iter().find_map(|u| xml.get(u).cloned());
+                }
             }
         }
     }

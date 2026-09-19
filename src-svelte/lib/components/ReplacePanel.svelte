@@ -24,13 +24,6 @@
   const busy = $derived(appStore.busy);
   const browseMode = $derived(appStore.browseMode);
   const ready = $derived(appStore.replaceReady);
-  // 进度里的「第 n 个 / 共 total 个」：只有可数阶段（逐球员抽图、逐行解析）才有；
-  // 纯阶段锚点（如「生成 config.xml…」）total 为 0，不显示计数（口径与底部状态栏一致）。
-  const counter = $derived(
-    appStore.progress.total > 0
-      ? `${appStore.progress.current}/${appStore.progress.total} · `
-      : "",
-  );
 
   /** 发起替换：先兜底校验目录完整性（识别三套标准），再调后端 start_replace。 */
   async function startReplace() {
@@ -113,24 +106,37 @@
       </label>
     </div>
   </div>
-  <!-- 开始/取消按钮：未就绪或忙碌时禁用开始；非忙碌时禁用取消。 -->
+  <!-- 开始/取消按钮：未就绪或忙碌时禁用开始；非忙碌时禁用取消。
+       实时进度直接画在按钮里：底是禁用态中性灰，绿色填充层按百分比从左往右铺，100% 即整颗全绿；
+       阶段文案与计数不再在此重复，底部状态栏是唯一出处。 -->
   <div class="cta-row">
     <button
       class="btn primary"
+      class:running={busy}
       onclick={startReplace}
       disabled={busy || browseMode || !ready}
       title={browseMode ? t.replace.browseDisabledHint : ""}
     >
-      {#if !busy}
-        <svg
-          width="15"
-          height="15"
-          viewBox="0 0 24 24"
-          fill="currentColor"
-          aria-hidden="true">{@html icons.play.body}</svg
-        >
+      <!-- 填充层：宽度绑定进度百分比；aria-hidden 避免被读屏当作内容 -->
+      {#if busy}
+        <span
+          class="btn-fill"
+          style="width:{appStore.progress.value}%"
+          aria-hidden="true"
+        ></span>
       {/if}
-      {busy ? t.replace.runningBtn : t.replace.startBtn}
+      <span class="btn-label">
+        {#if !busy}
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            aria-hidden="true">{@html icons.play.body}</svg
+          >
+        {/if}
+        {busy ? `${t.replace.runningBtn} ${appStore.progress.value}%` : t.replace.startBtn}
+      </span>
     </button>
     <button
       class="btn cancel"
@@ -138,20 +144,6 @@
       disabled={!busy}>{t.replace.cancelBtn}</button
     >
   </div>
-  <!-- 进度条：忙碌或有进度时显示；fill 宽度直接绑定百分比，右侧跟「计数 · 百分比 · 阶段文案」。 -->
-  {#if busy || appStore.progress.value > 0}
-    <div class="progress-line">
-      <div class="progress-track">
-        <div
-          class="progress-fill"
-          style="width:{appStore.progress.value}%"
-        ></div>
-      </div>
-      <span class="progress-text"
-        >{counter}{appStore.progress.value}% · {appStore.progress.status}</span
-      >
-    </div>
-  {/if}
 </div>
 
 <style>

@@ -257,6 +257,7 @@ pub fn run() {
             commands::read_snapshot,   // 读取快照：解析存档 XML 快照并缓存（快照预览数据源）
             commands::query_snapshot,  // 快照预览分页查询（UID 筛选 + 按页解析图片路径）
             commands::preview_player,  // 预览单个球员的映射与头像
+            commands::query_avatars,   // 名单预览头像列：按 UID 批量查快照/映射缓存里的头像路径
             commands::replace_single_face, // 单人换脸
             commands::read_image,      // 读取图片字节（前端转 blob 显示）
             commands::resolve_avatar,  // 解析名单「头像」列原文为包内图片路径

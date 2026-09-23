@@ -978,6 +978,89 @@ pub fn preview_player(state: State<'_, AppState>, uid: String) -> Result<PlayerP
     })
 }
 
+/// 名单预览「头像」列：按一页的 UID 批量取头像图片的绝对路径（一次 IPC，避免逐行往返）。
+/// 【出处与单人预览同源】复用 preview_player 的查找口径：映射缓存 → 本档本组的存档快照
+/// （快照预览缓存命中同一路径时免整表解析）→ 读快照文件兜底；再按当前组解析出实际图片文件。
+/// 【为什么是批量】RTF 名单里的「头像」列原文导出时恒为空（见 rtf_scanner 的 EXT_AVATAR_COL），
+/// 头像只能按 UID 反查映射；一页 8 行逐行调用要走 8 次 IPC，且缓存未命中时会把整表解析重复 8 遍
+/// （15 万行实测 1 s 以上）。这里把「读文件兜底」限制为整批最多解析一次。
+/// 映射缺失 / 图片不在包内 / 未选组 → 该 UID 对应 null（前端留白）。
+/// 【async】与三个扫描命令同款：未命中缓存时会读整表兜底（15 万行实测 1 s 以上），
+/// 同步命令跑在主线程上会把界面一起堵住。函数内不跨 await 持锁，future 仍是 Send。
+#[tauri::command]
+pub async fn query_avatars(
+    state: State<'_, AppState>,
+    uids: Vec<String>,
+) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+    // 先按「全部无头像」铺底；下面只覆盖命中的（未选组、没读过快照时就是这个结果）。
+    let mut out: std::collections::HashMap<String, Option<String>> =
+        uids.iter().map(|u| (u.clone(), None)).collect();
+    let Some(img_dir) = state.pm.lock().unwrap().cur_group.clone() else {
+        return Ok(out); // 未选组：没有头像包可解析
+    };
+    // 变体 → 原始 UID：同一球员在缓存里可能带 r- 也可能不带（与单人预览同一口径）。
+    let mut variants: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for uid in &uids {
+        for v in xml_parser::with_newgan_prefix_variants(uid.trim()) {
+            variants.entry(v).or_insert_with(|| uid.clone());
+        }
+    }
+    // 命中表：原始 UID → 映射（三级来源依次补，先到先得，与单人预览的优先级一致）。
+    let mut found: std::collections::HashMap<String, MappingEntry> = std::collections::HashMap::new();
+    // 1) 最近一次解析/替换的映射缓存（一趟扫完所有候选）。
+    {
+        let cache = state.mapping_cache.lock().unwrap();
+        for m in cache.iter() {
+            if let Some(orig) = variants.get(&m.uid) {
+                found.entry(orig.clone()).or_insert_with(|| m.clone());
+            }
+        }
+    }
+    if found.len() < uids.len() {
+        // 2) 本档本组的存档快照：快照预览缓存里正好是这份时直接查（路径命中，免解析）。
+        let snap = {
+            let pm = state.pm.lock().unwrap();
+            crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, &img_dir)
+        };
+        let snap_str = snap.to_string_lossy().to_string();
+        {
+            let cache = state.snapshot_cache.lock().unwrap();
+            if let Some(c) = cache.as_ref().filter(|c| c.xml_path == snap_str) {
+                for m in c.entries.iter() {
+                    if let Some(orig) = variants.get(&m.uid) {
+                        found.entry(orig.clone()).or_insert_with(|| m.clone());
+                    }
+                }
+            }
+        }
+        // 3) 仍未命中且快照文件在：读一次整表兜底（整批最多解析一次，绝不按 UID 重复解析）。
+        if found.len() < uids.len() && snap.is_file() {
+            if let Ok(xml) = xml_parser::parse_xml(&snap) {
+                for uid in &uids {
+                    if found.contains_key(uid) {
+                        continue;
+                    }
+                    if let Some(m) = xml_parser::with_newgan_prefix_variants(uid.trim())
+                        .iter()
+                        .find_map(|v| xml.get(v))
+                    {
+                        found.insert(uid.clone(), m.clone());
+                    }
+                }
+            }
+        }
+    }
+    // 4) 命中的映射 → 头像包内的实际图片文件（只对当前页这几条探测扩展名）。
+    let root = Path::new(&img_dir);
+    for (uid, entry) in found {
+        out.insert(
+            uid,
+            xml_parser::resolve_image_file(root, &entry.ethnicity, &entry.image),
+        );
+    }
+    Ok(out)
+}
+
 /// RTF 名单分页查询（大名单预览；数据留 Rust，IPC 只传当前页）。
 /// 名单可能上万条，一次全传会卡顿，所以只传当前页。筛选/排序/分页逻辑在 rtf_scanner::query_page，
 /// 命令层只负责取出缓存（整体 clone 避免长时间持锁）并转交。

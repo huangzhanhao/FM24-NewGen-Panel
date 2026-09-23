@@ -15,7 +15,7 @@
 <!-- 头像预览气泡（名单预览/快照预览共用）：
      悬停/聚焦触发按钮 → 按钮上方弹 186×186 气泡（带「加载中…」），移到气泡上不关、移出延迟 160ms 关；
      点击 → 钉住（右上角 ×，点气泡外任意处 / Esc / 再点同一按钮关闭）。
-     解析结果按 key 缓存（反复悬停不重复读盘）；groupKey 变化（切组）整体失效并释放 blob。
+     解析结果按 key 缓存（反复悬停不重复读盘）；groupKey 变化（切组）或组件卸载时整体失效并释放 blob。
      两处取图途径不同（名单预览问后端要路径、快照预览行内自带路径），resolve 由父组件注入；
      气泡状态机/缓存/定位/样式在本组件单点维护。 -->
 <script lang="ts">
@@ -45,18 +45,28 @@
   let popToken = 0; // 每次打开自增，快速来回悬停时丢弃过期的异步回填
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // groupKey 变化（切组）后旧头像包的解析结果全部失效：释放 blob、清缓存、关气泡。
-  // 这里直接置空 pop 而不经 close()——close 会读 pop，把「气泡开关」变成 effect 依赖，
-  // 开气泡就会立刻被本 effect 关掉（读依赖 → 重跑 → 关闭的循环）。
-  $effect(() => {
-    void groupKey;
+  /** 释放缓存里的全部 blob 并清空（blob URL 不随组件消失而回收，切组与卸载都得做）。 */
+  function releaseCache() {
     for (const e of cache.values()) {
       if (e.url) URL.revokeObjectURL(e.url);
     }
     cache.clear();
+  }
+
+  // groupKey 变化（切组）后旧头像包的解析结果全部失效：释放 blob、清缓存、关气泡。
+  // 这里直接置空 pop 而不经 close()——close 会读 pop，把「气泡开关」变成 effect 依赖，
+  // 开气泡就会立刻被本 effect 关掉（读依赖 → 重跑 → 关闭的循环）。
+  // 清理函数里再释放一次：组件被销毁（如 AvatarThumb 的 {#key path} 重建）时缓存里的 blob
+  // 也得回收，它不会自己消失。
+  $effect(() => {
+    void groupKey;
+    releaseCache();
     clearTimeout(hoverTimer);
     pop = null;
-    return () => clearTimeout(hoverTimer);
+    return () => {
+      clearTimeout(hoverTimer);
+      releaseCache();
+    };
   });
 
   /** 气泡固定定位：优先按钮上方居中显示，上方空间不足翻下方，横向夹到视口内。 */

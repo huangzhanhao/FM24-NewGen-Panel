@@ -348,6 +348,9 @@ fn map_stage(
                 }
                 map_item(&mut *progress, step, done, total);
             },
+            // 映射内部的处置（现有映射读取结果、保留模式补漏人数、没抽到图的球员）由 face_mapper
+            // 自己以 facemap 模块名记录；这里只管流水线阶段的计时与成败。
+            logger,
         )
         .ok_or_else(|| if is_cancelled(cancel) { cancelled() } else { failed("映射失败") })?;
     // 抽图耗时 = 首个 Players 锚点 → 映射结束；读现有映射耗时 = 两者差额

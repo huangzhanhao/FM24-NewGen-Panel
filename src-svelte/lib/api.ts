@@ -51,6 +51,9 @@ export const api = {
   cancelReplace: () => invoke<void>('cancel_replace'),
   queryPlayers: (query: PlayerQuery) => invoke<PageResult<PlayerRecord>>('query_players', { query }),
   previewPlayer: (uid: string) => invoke<PlayerPreview>('preview_player', { uid }),
+  // queryAvatars：名单预览头像列按 UID 批量取头像绝对路径（一次拉一页；null = 无映射或图片不在包内）。
+  queryAvatars: (uids: string[]) =>
+    invoke<Record<string, string | null>>('query_avatars', { uids }),
   replaceSingleFace: (uid: string, imagePath: string, saveBackup: boolean) =>
     invoke<boolean>('replace_single_face', { uid, imagePath, saveBackup }),
   // readImage 返回 ArrayBuffer（二进制图片字节），前端再转成 blob URL 显示。

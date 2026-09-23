@@ -3,6 +3,12 @@
 //! config.xml 是 FM 认的「头像映射表」，每行形如：
 //!   <record from="种族目录/图片名" to="graphics/pictures/person/<UID>/portrait"/>
 //! 即「把某张图片用于某个 UID 的球员头像」。本模块负责全量生成、整体解析、单行替换与滚动备份。
+//!
+//! 【日志】本模块全是无状态的纯函数，不自带 Logger，故经全局 log 门面直接记录（模块名 xml，
+//! 由官方插件分发给 stdout / 滚动文件 / 内存缓冲 → 前端日志面板）。
+//! 口径与 face_mapper 一致：**只记上层看不到的内部信息**，不与调用方的阶段日志重复
+//! （「写入 N 条映射」「读取快照完成 N 条」等已由 replace_flow / commands 记录，此处不再复述）——
+//! 于是这里只留三类线索：畸形映射行的丢弃数、备份的创建与轮转清理、单人替换落空的具体原因。
 use crate::assets::CONFIG_TEMPLATE;
 use crate::paging::PageResult;
 use crate::rtf_scanner::NEWGAN_UID_PREFIX;
@@ -85,6 +91,18 @@ pub fn parse_xml_entries_progress(
             image: img.to_string(),
         });
     }
+    // 【分母 vs 实得】RECORD_MARK 是 RECORD_RE 里的字面片段，故恒有 total ≥ entries.len()；差值就是
+    // 「行首形似映射行、却没被正则接受」的行（to 不是 person/<UID>/portrait、UID 不足 4 位、缺右引号等），
+    // 它们被静默跳过。上层只拿到「N 条映射」这个数字，看不出文件里混着不合法内容——
+    // 这条 WARNING 是唯一线索，用户可据此定位并手工修正 config.xml（而非「少了几个头像」无从下手）。
+    // 等于时不记：那才是正常文件（否则「读取快照完成：N 条」刚打完又来一条，纯噪声）。
+    if total > entries.len() {
+        log::warn!(
+            target: "xml",
+            "config.xml 有 {} 行行首是 <record from=\" 但未匹配到头像映射格式（共 {} 行候选），已跳过：{}",
+            total - entries.len(), total, path.display()
+        );
+    }
     Ok(entries)
 }
 
@@ -143,6 +161,13 @@ pub fn single_replacement(
 ) -> Result<bool, String> {
     let config_path = img_dir.join("config.xml");
     if !config_path.is_file() {
+        // 上层拿到的只有 false，与「UID 不存在」同形；把「文件压根没有」这个不同原因单独留痕，
+        // 否则用户只看到「单人微调没反应」，而命令层那条 INFO 日志会误报成「换脸成功」。
+        log::warn!(
+            target: "xml",
+            "单人替换跳过：头像包内没有 config.xml，无从改起（{}）",
+            config_path.display()
+        );
         return Ok(false); // 没有 config.xml，无从替换，返回未命中
     }
     if save_backup {
@@ -167,6 +192,15 @@ pub fn single_replacement(
         }
     }
     fs::write(&config_path, out.join("\n") + "\n").map_err(|e| e.to_string())?;
+    if !replaced {
+        // 文件在、但整表没有该 UID 的映射行（多为 UID 填错，或该球员本就不在本次映射里）。
+        // 命令层无论如何都会打一条「单人换脸 {uid} → …」的 INFO，此处补齐「其实没改成」的反证。
+        log::warn!(
+            target: "xml",
+            "单人替换未命中：config.xml 中没有 UID {uid} 的映射行，文件内容未改动（{}）",
+            config_path.display()
+        );
+    }
     Ok(replaced)
 }
 
@@ -176,6 +210,13 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let backup = img_dir.join(format!("config_backup_{ts}.xml"));
     fs::copy(config_path, &backup).map_err(|e| e.to_string())?;
+    // 【上层只看到「写前备份=是」】具体落在哪个文件、又清理了哪些旧备份，都只有这里知道；
+    // 用户复查「上次替换前那份 config.xml」时全靠这条日志给出确切的文件名。
+    log::info!(
+        target: "xml",
+        "已备份现有 config.xml → {}",
+        backup.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    );
     // 列出目录下所有历史备份。
     let mut backups: Vec<_> = fs::read_dir(img_dir)
         .map_err(|e| e.to_string())?
@@ -189,9 +230,17 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
     backups.sort(); // 文件名含时间戳，字典序 = 时间序
                     // 超过 10 份就删除最旧的（切片 [..len-10] 是前面的旧备份）。
     if backups.len() > BACKUP_KEEP {
+        // 被清理的是「第 n 份更早的备份」，用户发现某份历史备份不见了时，这条日志能解释是轮转删的
+        // （而不是杀软/同步盘动的）。删除失败只 `let _ =` 吞掉（旧备份留着不影响正确性），故不逐份记名。
+        let pruned = backups.len() - BACKUP_KEEP;
         for old in &backups[..backups.len() - BACKUP_KEEP] {
             let _ = fs::remove_file(old);
         }
+        log::info!(
+            target: "xml",
+            "备份已超过 {} 份，清理最旧的 {} 份（现有备份 {} 份）",
+            BACKUP_KEEP, pruned, BACKUP_KEEP
+        );
     }
     Ok(())
 }

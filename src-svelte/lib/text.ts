@@ -186,7 +186,7 @@ export const t = {
     colCa: '能力',
     colPa: '潜力',
     colRca: 'R.C.A',
-    /** 头像列「预览」小按钮 + 悬停/点击气泡的状态文案。 */
+    /** 头像列缩略图 + 悬停/点击气泡的状态文案。 */
     avatarBtn: '预览',
     avatarAria: '预览该球员的头像图片',
     avatarLoading: '加载中…',

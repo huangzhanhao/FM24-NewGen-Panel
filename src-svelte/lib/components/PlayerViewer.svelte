@@ -1,21 +1,25 @@
 <!-- 单人预览/替换：输入 UID 查看其头像与资料，或选一张新图单独替换。
      外观为「球员卡」：左列头像 + 映射路径，右列 UID 输入框 + 姓名 + 信息胶囊 + 替换行。
      信息区统一为胶囊，按名单格式动态组合：Basic 只有基础 7 字段；ExtPlayer/ExtStaff
-     追加详细字段（球员取「所在地」，职员取「偏好工作」），空值字段不渲染。 -->
+     追加详细字段（球员取「所在地」，职员取「偏好工作」），空值字段不渲染。
+     头像图的「读字节 → 建 blob → 回收」走三个标签页共用的 createAvatarBlobs
+     （换人自动换代、卸载自动回收）。 -->
 <script lang="ts">
   import { open, message } from "@tauri-apps/plugin-dialog";
   import { api } from "../api";
+  import { createAvatarBlobs } from "../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
   import { showError } from "../dialog";
-  import { loadImageBlobUrl } from "../images";
   import { t } from "../text"; // 全局文案常量
   import { appStore } from "../stores/app.svelte";
   import { icons } from "../icons";
   import type { PlayerPreview } from "../types";
 
+  const FACE = "face"; // 单人只有一张图：加载器里的固定 key
+
   let uid = $state(""); // 输入的 UID
   let preview = $state<PlayerPreview | null>(null); // 预览数据（资料+映射+图片路径）
   let imgPathInput = $state(""); // 用户选的替换图片路径
-  let blobUrl = $state(""); // 图片的 blob URL（供 <img src> 使用）
+  const face = createAvatarBlobs(); // 头像图的 blob 账（复用名单预览/快照预览的同一实现）
 
   const snap = $derived(appStore.snapshot);
 
@@ -29,15 +33,9 @@
       // 两者都空 = 没命中任何数据源，保持用户输入不动。
       const matched = preview?.record?.uid ?? preview?.mapping?.uid;
       if (matched) uid = matched;
-      // 加载图片为 blob URL（read_image 返回原始字节）。
+      // 加载图片为可显示的 blob URL（read_image 返回原始字节；换人时旧图由加载器自动回收）。
       // 【为何用 blob】WebView 不能直接用本地磁盘路径作为 <img src>，需把字节包成浏览器可识别的 blob URL。
-      if (blobUrl) {
-        URL.revokeObjectURL(blobUrl);
-        blobUrl = "";
-      } // 先释放上一次的 blob，避免内存泄漏
-      if (preview?.imagePath) {
-        blobUrl = await loadImageBlobUrl(preview.imagePath);
-      }
+      await face.load(preview?.imagePath ? { [FACE]: preview.imagePath } : {});
     } catch (e) {
       // 搜索失败（UID 无数据/后端报错）走统一错误弹窗，与批量替换失败同一反馈口径。
       await showError(e);
@@ -179,8 +177,8 @@
   <!-- 左列：圆角头像 + 映射路径（有映射时小圆点着青绿）。 -->
   <div class="face-col">
     <!-- 有 blob URL 就显示图片，否则显示虚线占位。 -->
-    {#if blobUrl}
-      <img src={blobUrl} alt={t.viewer.title} class="face" />
+    {#if face.urls[FACE]}
+      <img src={face.urls[FACE]} alt={t.viewer.title} class="face" />
     {:else}
       <div class="face-empty">{t.viewer.noImage}</div>
     {/if}

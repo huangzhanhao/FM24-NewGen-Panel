@@ -260,14 +260,40 @@ impl RtfScanner {
     /// 识别成功后 `parse_roster` 才能调用。出错信息直接展示给用户（前端原样弹窗），同时写入
     /// Error 日志备份：表头问题会精确到「表头第 N 列」，数据行问题会定位到「第 N 行「字段」」。
     pub fn detect_format(&mut self, path: &Path, logger: &impl LogSink) -> Result<(), String> {
+        // 扫描启动：Trace 级执行细节（函数入口）。Info 级摘要由调用方与「解析完成」行给出，
+        // 扫描器自身不再逐阶段记 Info，避免同一状态重复刷屏。
+        logger.trace("rtf", format!("开始识别 RTF 格式：{}", path.display()));
         self.is_valid = false;
         self.language = "Unknown".into();
         self.format = RtfFormat::default();
-        let text = read_head(path, HEAD_BYTES)?;
-        self.detect(&text).map_err(|e| {
-            logger.write(log::Level::Error, "rtf", e.clone());
+        // 文件读取失败也要留痕：此前这里的 Err 直接返回、没有日志，用户只看到弹窗。
+        let text = read_head(path, HEAD_BYTES).map_err(|e| {
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("RTF 格式识别失败（读取文件 {}）：{e}", path.display()),
+            );
             e
-        })
+        })?;
+        self.detect(&text).map_err(|e| {
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("RTF 格式识别失败（{}）：{e}", path.display()),
+            );
+            e
+        })?;
+        // 匹配结果：识别成功后的列结构与语言（Debug 级）。这份状态已并入「解析完成」汇总行，
+        // 单独记 Info 只会让一次扫描出现两条内容相近的日志。
+        logger.debug(
+            "rtf",
+            format!(
+                "RTF 格式识别完成：{}（语言 {}）",
+                self.format.label(),
+                self.language
+            ),
+        );
+        Ok(())
     }
 
     /// 判断格式的主流程：先做表头判断，再抽查数据行（至少 1 条合法，并顺便判断语言）。
@@ -347,12 +373,37 @@ impl RtfScanner {
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<PlayerRecord>, String> {
         if !self.is_valid {
-            return Err("RTF 格式无效，请先执行格式识别".into());
+            let err = "RTF 格式无效，请先执行格式识别".to_string();
+            // 入口校验失败：属于调用方顺序错误，记 Error 便于定位（返回文案不变）。
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("解析 RTF 被拒绝（{}）：{err}", path.display()),
+            );
+            return Err(err);
         }
-        let text = fs::read_to_string(path).map_err(|e| format!("读取 RTF 失败: {e}"))?;
+        // 文件解析入口：记录目标文件、判定出的格式与过滤口径（Debug 级，默认不输出）。
+        logger.debug(
+            "rtf",
+            format!(
+                "开始解析 RTF 名单：{}（格式 {}，仅随机人={keep_only_newgen}）",
+                path.display(),
+                self.format.label()
+            ),
+        );
+        let text = fs::read_to_string(path).map_err(|e| {
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("读取 RTF 失败（{}）：{e}", path.display()),
+            );
+            format!("读取 RTF 失败: {e}")
+        })?;
         let total = table_rows(&text).count(); // 数据行总数（进度分母）
+        logger.debug("rtf", format!("名单数据行总数：{total}"));
         let mut data = Vec::new();
         let mut dropped = 0usize;
+        let mut filtered = 0usize;
         let mut done = 0usize;
         for (row_no, cells) in table_rows(&text) {
             done += 1;
@@ -366,6 +417,13 @@ impl RtfScanner {
                     // 过滤只看 uid：带 r- 前缀的就是随机人。
                     if record.uid.starts_with(NEWGAN_UID_PREFIX) || !keep_only_newgen {
                         data.push(record);
+                    } else {
+                        // 追踪执行细节：逐行说明为何被过滤（Trace 级别默认被全局阈值挡住，不影响正常日志）。
+                        filtered += 1;
+                        logger.trace(
+                            "rtf",
+                            format!("第 {row_no} 行非随机人，已按「仅随机人」过滤"),
+                        );
                     }
                 }
                 RowVerdict::NotDataRow => {}
@@ -389,6 +447,18 @@ impl RtfScanner {
                 format!("另有 {} 行不合法，已跳过", dropped - DROP_LOG_MAX),
             );
         }
+        // 扫描完成：并入格式/语言，作为本模块唯一的汇总行，用 Debug 输出。
+        // 【为何不记 Info】「扫描RTF」命令与替换流水线都会各记一条 Info 级摘要（总量/格式/语言），
+        // 扫描器再记一条就重复了；这里保留完整口径供排查时开 Debug 查看，关键状态由调用方的 Info 承载。
+        logger.debug(
+            "rtf",
+            format!(
+                "RTF 名单解析完成：{}（语言 {}），保留 {} 条（过滤非随机人 {filtered} 条，跳过不合法 {dropped} 行），共 {total} 行",
+                self.format.label(),
+                self.language,
+                data.len()
+            ),
+        );
         Ok(data)
     }
 }

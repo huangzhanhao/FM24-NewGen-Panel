@@ -123,14 +123,28 @@ impl ProfileManager {
     /// 后置注入让 `new` 的签名与既有调用点（8 处测试）保持不变。
     pub fn set_logger(&mut self, logger: Arc<dyn LogSinkDyn>) {
         self.logger = Some(logger);
+        // 注入后即可记录：确认后续存档/组操作都会被日志覆盖（含当前档与组数）。
+        self.log(
+            log::Level::Debug,
+            format!(
+                "存档模块日志出口已就绪：当前档 {}，组 {} 个",
+                self.cur_prf,
+                self.prf_cfg.groups.len()
+            ),
+        );
     }
 
-    /// 记一条 WARNING（未注入 logger 时静默）。模块名用 profile，与命令层的建档/切档日志同源，
+    /// 记一条日志（未注入 logger 时静默）。模块名用 profile，与命令层的建档/切档日志同源，
     /// 方便在日志抽屉里按模块串起来看。
-    fn warn(&self, msg: String) {
+    fn log(&self, level: log::Level, msg: String) {
         if let Some(l) = &self.logger {
-            l.write(log::Level::Warn, "profile", msg);
+            l.write(level, "profile", msg);
         }
+    }
+
+    /// 记一条 WARNING（未注入 logger 时静默）。转发给 `log`，保留给既有的告警调用点。
+    fn warn(&self, msg: String) {
+        self.log(log::Level::Warn, msg);
     }
 
     /// 选定当前组：优先用配置里记录的 cur_group（且它仍存在），否则回退到第一个组。
@@ -246,27 +260,40 @@ impl ProfileManager {
     pub fn create_profile(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
+            self.log(log::Level::Warn, "新建存档被拒绝：Profile 名不能为空".into());
             return Err("Profile 名不能为空".into());
         }
         // 重名保护：已存在则报错，避免覆写别人的存档。
         if self.config.profile.contains_key(name) {
+            self.log(
+                log::Level::Warn,
+                format!("新建存档被拒绝：Profile「{name}」已存在"),
+            );
             return Err(format!("Profile「{name}」已存在"));
         }
+        self.log(log::Level::Debug, format!("开始新建存档：{name}"));
         self.config.profile.insert(name.to_string(), true); // 加入全局配置
         json_store::save(&Self::global_cfg_path(&self.user_dir), &self.config)?; // 落盘全局配置
         // 建空档文件（存档子目录下，与 XML 快照同目录）。
         let dir = self.user_dir.join(crate::paths::sanitize(name));
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         json_store::save(&Self::prf_path(&self.user_dir, name), &PrfCfg::default())?;
-        self.load_profile(name) // 立即切到新档
+        self.load_profile(name)?; // 立即切到新档
+        self.log(log::Level::Info, format!("存档已新建并激活：{name}"));
+        Ok(())
     }
 
     /// 删除档。'No Profile' 不可删（返回 false）；删除「当前激活档」时自动切回 'No Profile'，
     /// 删除未激活档不影响当前档（浏览态下可安全删除下拉选中的存档）。
     pub fn delete_profile(&mut self, name: &str) -> Result<bool, String> {
         if name == "No Profile" || !self.config.profile.contains_key(name) {
+            self.log(
+                log::Level::Debug,
+                format!("删除存档跳过：默认档或不存在（{name}）"),
+            );
             return Ok(false);
         }
+        self.log(log::Level::Debug, format!("开始删除存档：{name}"));
         let was_current = self.cur_prf == name;
         self.config.profile.remove(name); // 从全局配置移除
         let _ = fs::remove_file(Self::prf_path(&self.user_dir, name)); // 删档配置文件（新位置）
@@ -286,6 +313,10 @@ impl ProfileManager {
         if was_current {
             self.load_profile("No Profile")?; // 只在删除当前激活档时回到默认档
         }
+        self.log(
+            log::Level::Info,
+            format!("存档已删除：{name}（原为当前档={was_current}）"),
+        );
         Ok(true)
     }
 
@@ -293,6 +324,8 @@ impl ProfileManager {
     /// 【核心】这就是「快照交换」：离开时存下、进入时取回，保证每个档看到自己的 config.xml。
     pub fn load_profile(&mut self, name: &str) -> Result<(), String> {
         let old = self.cur_prf.clone();
+        // 函数入口：Debug 级（默认不输出）。切档方向并入下面的「完成」汇总行，避免一次切档记两条 Info。
+        self.log(log::Level::Debug, format!("开始切换存档：{old} → {name}"));
         // 1) 把旧档每个组的 config.xml 备份到快照目录。
         //（先 collect 成 Vec 再遍历，避免遍历中修改 groups 导致借用冲突）
         for img_dir in self.prf_cfg.groups.keys().cloned().collect::<Vec<_>>() {
@@ -300,6 +333,10 @@ impl ProfileManager {
         }
         // 2) 加载新档的组配置。
         self.prf_cfg = Self::load_profile_cfg(&self.user_dir, name)?;
+        self.log(
+            log::Level::Debug,
+            format!("已加载存档「{name}」配置：{} 个组", self.prf_cfg.groups.len()),
+        );
         // 3) 把新档每个组的快照恢复回头像包目录。
         for img_dir in self.prf_cfg.groups.keys().cloned().collect::<Vec<_>>() {
             self.restore_group_xml(name, &img_dir);
@@ -314,6 +351,16 @@ impl ProfileManager {
         json_store::save(&Self::global_cfg_path(&self.user_dir), &self.config)?;
         self.cur_prf = name.to_string();
         self.cur_group = Self::pick_cur_group(&self.prf_cfg);
+        // 切档完成：一次切档只记这一条 Info（合并了入口的切档方向），承载关键运行状态
+        // （当前档 / 当前组 / 组数），后续排查串档问题只看它即可。
+        self.log(
+            log::Level::Info,
+            format!(
+                "存档已切换：{old} → {name}，当前组 {}（{} 个组）",
+                self.cur_group.as_deref().unwrap_or("无"),
+                self.prf_cfg.groups.len()
+            ),
+        );
         Ok(())
     }
 
@@ -323,6 +370,10 @@ impl ProfileManager {
     fn save_group_xml(&self, profile: &str, img_dir: &str) {
         let src = Path::new(img_dir).join("config.xml");
         if !src.is_file() {
+            self.log(
+                log::Level::Trace,
+                format!("保存档景跳过：{img_dir} 下没有 config.xml（尚未换脸）"),
+            );
             return; // 目录里没有 config.xml（还没换过脸），无需备份
         }
         let dst = group_xml_path(&self.user_dir, profile, img_dir);
@@ -339,6 +390,11 @@ impl ProfileManager {
             self.warn(format!(
                 "保存档景失败：{e}。{profile} 在 {img_dir} 的档景未更新（仍为上一次的内容）"
             ));
+        } else {
+            self.log(
+                log::Level::Debug,
+                format!("保存档景完成：{profile} @ {img_dir}"),
+            );
         }
     }
 
@@ -356,8 +412,13 @@ impl ProfileManager {
             if dst.is_file() {
                 self.warn(format!(
                     "恢复档景：{profile} 在 {img_dir} 还没有快照，目录里的 config.xml 保持原样\
-                     （它可能属于其他存档）；本档首次替换将按「无历史」处理"
+                    （它可能属于其他存档）；本档首次替换将按「无历史」处理"
                 ));
+            } else {
+                self.log(
+                    log::Level::Trace,
+                    format!("恢复档景跳过：{profile} 在 {img_dir} 无快照，目录里也没有 config.xml"),
+                );
             }
             return;
         }
@@ -373,6 +434,11 @@ impl ProfileManager {
             self.warn(format!(
                 "恢复档景失败：{e}。{img_dir} 里的 config.xml 可能仍是上一个存档的内容"
             ));
+        } else {
+            self.log(
+                log::Level::Debug,
+                format!("恢复档景完成：{profile} @ {img_dir}"),
+            );
         }
     }
 
@@ -381,11 +447,18 @@ impl ProfileManager {
     pub fn ensure_group(&mut self, img_dir: &str) -> Option<String> {
         let dir = norm_dir(img_dir); // 先归一化，保证同一目录只建一个组
         if dir.is_empty() {
+            self.log(
+                log::Level::Debug,
+                format!("建组跳过：目录为空（{img_dir}）"),
+            );
             return None;
         }
         // 组不存在就新建一个空配置；已存在则不动（保留原有 RTF）。
-        if !self.prf_cfg.groups.contains_key(&dir) {
+        if self.prf_cfg.groups.contains_key(&dir) {
+            self.log(log::Level::Debug, format!("组已存在，直接复用：{dir}"));
+        } else {
             self.prf_cfg.groups.insert(dir.clone(), GroupCfg::default());
+            self.log(log::Level::Debug, format!("新建组：{dir}"));
         }
         self.set_cur_group(&dir).ok()?; // 设为当前组；.ok()? 把失败转为 None
         Some(dir)
@@ -395,11 +468,22 @@ impl ProfileManager {
     pub fn set_cur_group(&mut self, img_dir: &str) -> Result<bool, String> {
         let dir = norm_dir(img_dir);
         if !self.prf_cfg.groups.contains_key(&dir) {
+            self.log(
+                log::Level::Debug,
+                format!("切换当前组跳过：组不存在（{dir}）"),
+            );
             return Ok(false); // 组不存在
         }
         self.cur_group = Some(dir.clone());
         self.prf_cfg.cur_group = Some(dir);
         self.persist_prf()?; // 把当前档配置写回文件
+        self.log(
+            log::Level::Debug,
+            format!(
+                "当前组已切换：{}",
+                self.cur_group.as_deref().unwrap_or("无")
+            ),
+        );
         Ok(true)
     }
 
@@ -407,6 +491,10 @@ impl ProfileManager {
     pub fn delete_group(&mut self, img_dir: &str) -> Result<bool, String> {
         let dir = norm_dir(img_dir);
         if self.prf_cfg.groups.remove(&dir).is_none() {
+            self.log(
+                log::Level::Debug,
+                format!("删除组跳过：组不存在（{dir}）"),
+            );
             return Ok(false); // 组不存在
         }
         let snap = group_xml_path(&self.user_dir, &self.cur_prf, &dir);
@@ -426,6 +514,10 @@ impl ProfileManager {
             self.prf_cfg.cur_group = self.cur_group.clone();
         }
         self.persist_prf()?;
+        self.log(
+            log::Level::Info,
+            format!("组已删除：{dir}（剩余 {} 个组）", self.prf_cfg.groups.len()),
+        );
         Ok(true)
     }
 
@@ -433,31 +525,61 @@ impl ProfileManager {
     /// 供前端「下拉浏览存档」使用；加载过程可能触发旧布局迁移/默认配置创建（幂等、无破坏）。
     pub fn preview_cfg(&self, name: &str) -> Result<(PrfCfg, Option<String>), String> {
         if !self.config.profile.contains_key(name) {
+            self.log(
+                log::Level::Warn,
+                format!("预览存档失败：存档「{name}」不存在"),
+            );
             return Err(format!("存档「{name}」不存在"));
         }
         let prf_cfg = Self::load_profile_cfg(&self.user_dir, name)?;
         let cur_group = Self::pick_cur_group(&prf_cfg);
+        self.log(
+            log::Level::Debug,
+            format!(
+                "查询存档「{name}」配置用于预览：{} 个组，当前组 {}",
+                prf_cfg.groups.len(),
+                cur_group.as_deref().unwrap_or("无")
+            ),
+        );
         Ok((prf_cfg, cur_group))
     }
 
     /// 取当前组的 RTF 路径（链式安全取值，任何一环为 None 都回退空串）。
     pub fn get_cur_rtf(&self) -> String {
-        self.cur_group
+        let rtf = self
+            .cur_group
             .as_ref()
             .and_then(|g| self.prf_cfg.groups.get(g))
             .map(|g| g.rtf.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // 查询：记录当前组与取到的 RTF（Trace 级别，仅用于追踪调用链）。
+        self.log(
+            log::Level::Trace,
+            format!(
+                "查询当前组 RTF：{} → {rtf}",
+                self.cur_group.as_deref().unwrap_or("无")
+            ),
+        );
+        rtf
     }
 
     /// 设置当前组的 RTF 路径，并落盘。无当前组时返回 false。
     pub fn set_cur_rtf(&mut self, rtf: &str) -> Result<bool, String> {
         let Some(g) = self.cur_group.clone() else {
+            self.log(
+                log::Level::Debug,
+                "设置 RTF 跳过：当前没有选中的组".into(),
+            );
             return Ok(false);
         };
         if let Some(cfg) = self.prf_cfg.groups.get_mut(&g) {
             cfg.rtf = rtf.to_string();
         }
         self.persist_prf()?;
+        self.log(
+            log::Level::Debug,
+            format!("当前组 RTF 已更新：{g} → {rtf}"),
+        );
         Ok(true)
     }
 
@@ -468,7 +590,19 @@ impl ProfileManager {
 
     /// 把当前档的配置写回 .user/<当前档>.json（多处修改后统一落盘）。
     fn persist_prf(&self) -> Result<(), String> {
-        json_store::save(&Self::prf_path(&self.user_dir, &self.cur_prf), &self.prf_cfg)
+        // 持久化入口：追踪写盘目标；失败必须留痕（配置未落盘＝重启后丢失本次修改）。
+        self.log(
+            log::Level::Trace,
+            format!("落盘当前档配置：{}", self.cur_prf),
+        );
+        let result = json_store::save(&Self::prf_path(&self.user_dir, &self.cur_prf), &self.prf_cfg);
+        if let Err(e) = &result {
+            self.log(
+                log::Level::Error,
+                format!("当前档配置落盘失败（{}）：{e}", self.cur_prf),
+            );
+        }
+        result
     }
 }
 
@@ -478,11 +612,12 @@ mod tests {
     use crate::logger::ChannelLogger;
 
     /// 取出注入的日志出口收到的全部告警正文（模块名固定 profile）。
+    /// 只挑 WARNING：正常流程也会记 INFO/DEBUG/TRACE，本辅助函数只关心告警。
     fn warns_of(rx: &std::sync::mpsc::Receiver<crate::logger::LogLine>) -> Vec<String> {
         rx.try_iter()
+            .filter(|l| l.level == "WARNING")
             .map(|l| {
                 assert_eq!(l.module, "profile");
-                assert_eq!(l.level, "WARNING");
                 l.message
             })
             .collect()

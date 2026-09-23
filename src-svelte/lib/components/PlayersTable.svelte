@@ -4,14 +4,11 @@
 <script lang="ts">
   import { api } from "../api";
   import { appStore } from "../stores/app.svelte";
-  import { loadImageBlobUrl } from "../images";
+  import { createAvatarBlobs } from "../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
   import { t } from "../text"; // 全局文案常量
   import { icons } from "../icons";
   import TablePager from "./TablePager.svelte"; // 分页器（与快照预览共用）
-  import AvatarPopover, {
-    type AvatarEntry,
-    type AvatarPopoverApi,
-  } from "./AvatarPopover.svelte"; // 头像预览气泡（与快照预览共用）
+  import AvatarThumb from "./AvatarThumb.svelte"; // 头像缩略图 + 放大气泡（与快照预览共用）
   import type { PageResult, PlayerRecord } from "../types";
 
   const PAGE_SIZE = 8; // 每页条数（单页最多 8 行）
@@ -52,6 +49,7 @@
       sortDesc,
       newgan: newganQuery === "any" ? null : newganQuery === "yes",
     });
+    void loadAvatars(); // 本页头像另走一次批量查询（路径出处是后端快照/映射缓存）
   }
   // 名单版本变化（「扫描RTF」成功 / 替换结束）：回到第 1 页并清空搜索、排序、随机人筛选。
   // 与 SnapshotPreview 同款口径——新名单从头看，旧页码/旧筛选不残留；下方加载 effect
@@ -64,10 +62,15 @@
     sortKey = "uid";
     sortDesc = false;
     newganFilter = "any";
+    blobs.clear(); // 旧名单的缩略图一并回收（新名单的图在 load() 后重取）
+    avatarPaths = {};
+    avatarToken++; // 使仍在途的旧名单路径响应作废（不能只靠 clear，它在途完成还会回写）
   });
 
   // 参数变化自动刷新：显式读取依赖以建立追踪，请求做 300ms 防抖。
   // rosterVersion：名单缓存被填充/清空时 +1（「扫描RTF」成功、替换结束），据此重载当前页。
+  // snapshotVersion：快照缓存被填充时 +1（「读取快照」成功、替换收尾同步），头像列据此重取
+  // ——它按 UID 查的就是快照缓存，读完快照后头像要能自己补上，不必等用户翻页。
   $effect(() => {
     void page;
     void search;
@@ -75,6 +78,7 @@
     void sortDesc;
     void newganQuery;
     void appStore.rosterVersion;
+    void appStore.snapshotVersion;
     clearTimeout(searchTimer); // 取消上一次未触发的请求
     searchTimer = setTimeout(load, 300); // 300ms 后才真正请求（防抖：避免边输入边频繁请求）
     return () => clearTimeout(searchTimer); // 清理函数：依赖变化/组件销毁时取消定时器
@@ -121,16 +125,45 @@
   const basedValue = (r: PlayerRecord) =>
     (isStaffRoster ? r.detailed?.preferredJob : r.detailed?.based) ?? "";
 
-  // ---------------- 头像列：悬停/点击「预览」气泡（气泡本体在 AvatarPopover 共用组件内） ----------------
-  /** 气泡取头像：问后端要磁盘路径，再读字节包成 blob URL（取不到/出错由组件侧统一兜成 err 文案）。 */
-  async function resolveAvatarEntry(name: string): Promise<AvatarEntry> {
-    const path = await api.resolveAvatar(name);
-    if (!path) return { url: null, err: t.table.avatarNotFound };
-    return { url: await loadImageBlobUrl(path), err: "" };
-  }
+  // ---------------- 头像列：按球员 UID 从后端快照/映射缓存取头像图 ----------------
+  // 【为什么按 UID 查】RTF 名单的「头像」列原文导出时恒为空（见 rtf_scanner 的 EXT_AVATAR_COL），
+  // 头像只能按球员 UID 反查映射；解析（映射缓存 → 存档快照 → 快照文件）由命令层 query_avatars
+  // 完成，出处与单人预览同源。
+  // 【分工】本组件只负责「查这一页的路径」；读字节/建 blob/回收交共用的 createAvatarBlobs，
+  // 缩略图与放大气泡交共用的 AvatarThumb（两处能力都与快照预览同一份实现）。
+  let avatarPaths = $state<Record<string, string | null>>({}); // uid → 头像图片绝对路径（null = 无头像）
+  let avatarToken = 0; // 路径查询令牌：翻页/换名单后使在途的旧响应作废
+  const blobs = createAvatarBlobs(); // 本页缩略图的 blob 账（翻页换代、卸载回收都在其内部）
 
-  // 头像气泡实例（bind:this）：行内触发按钮把鼠标/键盘事件接到它的 open/scheduleClose/close 上。
-  let avatarPop = $state<AvatarPopoverApi | null>(null);
+  /** 取当前页头像：批量问后端要路径，再交给 blob 加载器读成可显示的缩略图。 */
+  async function loadAvatars() {
+    const token = ++avatarToken;
+    const items = result?.items ?? [];
+    // 空页或基础名单（非拓展格式，表格不渲染头像列）：只回收上一批，不必往返。
+    if (items.length === 0 || !items.some((r) => r.detailed)) {
+      avatarPaths = {};
+      blobs.clear();
+      return;
+    }
+    let paths: Record<string, string | null>;
+    try {
+      paths = await api.queryAvatars(items.map((r) => r.uid));
+    } catch {
+      // 头像列是辅助展示：取数失败就留白（也不弹窗），但不留上一批的旧图。
+      avatarPaths = {};
+      blobs.clear();
+      return;
+    }
+    if (token !== avatarToken) return; // 期间已翻页/换名单：过期结果直接丢弃，不建 URL
+    avatarPaths = paths;
+    // 只有确实找到图的条目才交给加载器；无映射/图片不在包内的留在占位。
+    const wanted: Record<string, string> = {};
+    for (const it of items) {
+      const p = paths[it.uid];
+      if (p) wanted[it.uid] = p;
+    }
+    void blobs.load(wanted);
+  }
 </script>
 
 {#snippet sortIcon(key: string)}
@@ -305,28 +338,19 @@
               <td class="c">{r.hairLength}</td>
               <td class="c">{r.hairColor}</td>
               <td class="c">{r.ethnicityCode}</td>
-              <!-- 详细列：空值显示 —；头像列有值才出现「预览」小按钮，无值留空（不放占位符）。 -->
+              <!-- 详细列：空值显示 —。头像列按 UID 从后端快照/映射缓存取图：有图显示缩略图
+                   （本身即触发器），无映射或图片不在包内则显示 —。 -->
               {#if hasDetailed}
                 {@const d = r.detailed}
                 <td class="c">{d?.skinCode || "—"}</td>
-                <td class="c">
-                  {#if d?.avatar}
-                    <button
-                      type="button"
-                      class="avatar-btn"
-                      aria-label={t.table.avatarAria}
-                      onmouseenter={(e) =>
-                        avatarPop?.open(d.avatar, e.currentTarget, false)}
-                      onmouseleave={avatarPop?.scheduleClose}
-                      onfocus={(e) =>
-                        avatarPop?.open(d.avatar, e.currentTarget, false)}
-                      onblur={avatarPop?.scheduleClose}
-                      onclick={(e) =>
-                        avatarPop?.open(d.avatar, e.currentTarget, true)}
-                    >
-                      {t.table.avatarBtn}
-                    </button>
-                  {/if}
+                <td class="c imgcell">
+                  <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里，这里只交路径与图片 URL。 -->
+                  <AvatarThumb
+                    itemKey={r.uid}
+                    url={blobs.urls[r.uid]}
+                    path={avatarPaths[r.uid] ?? undefined}
+                    groupKey={appStore.snapshot?.currentGroup}
+                  />
                 </td>
                 <td class="c">
                   {#if d?.isNewgan}
@@ -360,13 +384,6 @@
       <p>{search ? t.table.noMatchHint : t.table.emptyHint}</p>
     </div>
   {/if}
-
-  <!-- 头像预览气泡（共用组件）：缓存/钉住/延迟关闭/Esc 都在组件内；groupKey=当前组，切组自动失效。 -->
-  <AvatarPopover
-    bind:this={avatarPop}
-    resolve={resolveAvatarEntry}
-    groupKey={appStore.snapshot?.currentGroup}
-  />
 </div>
 
 <style>
@@ -434,23 +451,10 @@
     text-align: center;
   }
 
-  /* 头像列「预览」小按钮：胶囊样式，悬停描边变实色 */
-  .avatar-btn {
-    appearance: none;
-    cursor: pointer;
-    border: 1px solid transparent;
-    border-radius: 99px;
-    padding: 2px 12px;
-    font-size: 11.5px;
-    line-height: 1.6;
-    font-family: inherit;
-    color: var(--accent);
-    background: var(--accent-soft);
-    transition:
-      border-color 120ms ease,
-      background-color 120ms ease;
-  }
-  .avatar-btn:hover {
-    border-color: var(--accent);
+  /* 头像格（AvatarThumb）：去掉上下内边距后 30px 的缩略图不超过文本格的盒子（约 32px），
+     行高因此始终与其余文本行一致，不会因图片被撑高（与快照预览同款）。 */
+  td.imgcell {
+    padding-top: 0;
+    padding-bottom: 0;
   }
 </style>

@@ -73,11 +73,16 @@ export interface ProgressPayload { status: string; value: number; current: numbe
  *  读取快照」四个按钮的进度。value 由 current/total 折算而来，状态栏另显示「n/total」原始口径。 */
 export interface TaskProgressPayload { status: string; value: number; current: number; total: number; }
 
-/** 发起替换的参数（对应 Rust 的 ReplaceArgs）；mode 用字面量联合限定三个合法值（协议值）。 */
+/** 发起替换的参数（对应 Rust 的 ReplaceArgs）；mode 用字面量联合限定三个合法值（协议值）。
+ *  allowBlank：本轮已在预检里确认过「可能把本档既有映射清空」，由前端在确认框点「是」后置 true，
+ *  界面上没有对应的勾选项——它是确认的凭据，不是给用户关的守卫。 */
 export interface ReplaceArgs {
   mode: 'Preserve' | 'Overwrite' | 'Generate';
-  filterNewgan: boolean; allowDuplicates: boolean; saveBackup: boolean;
+  filterNewgan: boolean; allowDuplicates: boolean; saveBackup: boolean; allowBlank: boolean;
 }
+
+/** 「发起前预检」返回（对应 Rust 的 PreflightResult）：是否需要先弹确认，以及本档档景现有条数。 */
+export interface PreflightResult { needsConfirm: boolean; existing: number; }
 
 /** 名单分页查询参数（对应 Rust 的 PlayerQuery）。
  * newgan：随机人筛选（null=任意，true=仅随机人，false=仅真实球员）。 */

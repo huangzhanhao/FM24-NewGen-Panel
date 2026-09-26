@@ -80,7 +80,7 @@ impl RuleConfig {
 
     /// 所有参与目录判定的标准 (标准号, FolderList)，按标准号升序登记。
     /// 【这张表的顺序就是判定的唯一真源】`facepack_scanner::classify` 两轮都是先命中先赢，
-    /// 因此任意两份清单不能互相包含（由 `validate_registry` 守卫）。
+    /// 因此任意两份清单不能有共同目录名（交集为空，由 `validate_registry` 守卫）。
     pub fn folder_lists(&self) -> Vec<(u8, &Vec<String>)> {
         vec![(2, &self.standard2.folder_list), (3, &self.standard3.folder_list)]
     }
@@ -112,9 +112,12 @@ impl RuleConfig {
     }
 }
 
-/// 标准之间的登记冲突守卫：任意两份 FolderList 不得互相包含（A ⊆ B 或 B ⊆ A）。
-/// 一旦包含，`classify` 的超集轮/子集轮就会先命中先赢，出现「62 目录的包被判成标准三、
-/// 其实该是标准五」这类静默错判。空清单跳过（空集是任何集合的子集，属退化情形）。
+/// 标准之间的登记冲突守卫：任意两份 FolderList **不得有任何共同目录名**（交集为空）。
+/// 【为什么是交集而不是「互不包含」】`classify` 的两轮判定都是先命中先赢（见 facepack_scanner），
+/// 只要两份清单共享一个目录名，「只用这几个共享目录的包」就会被判给登记在前的那个标准——
+/// 互不包含拦不住这种**部分交叉**，而它恰恰是用户按文档新增「标准四」时最容易踩中的：
+/// 整包用错抽图模型，且全程没有任何报错。设计文档（标准二.md §5）本来就要求两清单交集为 0。
+/// 空清单跳过（空集是任何集合的子集，属退化情形，也不可能与谁重合）。
 pub fn validate_registry(cfg: &RuleConfig) -> Result<(), String> {
     let lists = cfg.folder_lists();
     for i in 0..lists.len() {
@@ -124,13 +127,15 @@ pub fn validate_registry(cfg: &RuleConfig) -> Result<(), String> {
             if fa.is_empty() || fb.is_empty() { continue; }
             let a: BTreeSet<&str> = fa.iter().map(String::as_str).collect();
             let b: BTreeSet<&str> = fb.iter().map(String::as_str).collect();
-            if a.is_subset(&b) || b.is_subset(&a) {
-                let shared: Vec<&str> = a.intersection(&b).copied().collect();
+            let shared: Vec<&str> = a.intersection(&b).copied().collect();
+            if !shared.is_empty() {
                 let head: Vec<&str> = shared.iter().copied().take(5).collect();
                 return Err(format!(
-                    "标准{na} 与 标准{nb} 的目录清单互相包含（重合 {} 项，如 {}），\
-                     头像包判定会先命中先赢；请调整其中一份清单，让两者互不包含",
-                    shared.len(), head.join(", ")
+                    "标准{na} 与 标准{nb} 的目录清单有 {n} 个共同目录（如 {eg}），\
+                     只用这些目录的包会被判给登记在前的那个标准；请改 data/rules 下的 \
+                     standard{na}.json / standard{nb}.json，让两份 FolderList 交集为 0",
+                    n = shared.len(),
+                    eg = head.join(", "),
                 ));
             }
         }
@@ -423,15 +428,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_registry_rejects_nested_folder_lists() {
-        // 现状两份清单互不包含 → 通过。
+    fn validate_registry_rejects_overlapping_folder_lists() {
+        // 出厂两份清单交集为 0 → 通过（标准二 14 目录、标准三 62 目录，实测无一名重合）。
         validate_registry(&RuleConfig::builtin()).unwrap();
-        // 人为构造包含关系（标准二清单 ⊂ 标准三清单）→ 报错并指名两个标准号。
+        // 包含关系（标准二清单 ⊂ 标准三清单）→ 报错并指名两个标准号。
         let mut cfg = RuleConfig::builtin();
         cfg.standard2.folder_list = vec!["China".into(), "Japan".into()];
         let err = validate_registry(&cfg).unwrap_err();
         assert!(err.contains("标准2") && err.contains("标准3"), "应指名冲突标准: {err}");
         assert!(err.contains("China"), "应给出重合目录名: {err}");
+        // 部分交叉（旧守卫放行的正是这一种）：两份清单互相都不包含，但共享一个目录名。
+        // 只用「Sudan」这一个目录的包会被 classify 判给登记在前的标准2，整包用错抽图模型。
+        let mut cfg = RuleConfig::builtin();
+        cfg.standard2.folder_list = vec!["Sudan".into(), "标准二独有".into()];
+        cfg.standard3.folder_list = vec!["Sudan".into(), "标准三独有".into()];
+        let err = validate_registry(&cfg).unwrap_err();
+        assert!(err.contains("Sudan") && err.contains("交集为 0"), "部分交叉必须被拒: {err}");
         // 空清单不参与判定（否则空集恒为子集，误报）。
         let mut cfg = RuleConfig::builtin();
         cfg.standard2.folder_list = Vec::new();

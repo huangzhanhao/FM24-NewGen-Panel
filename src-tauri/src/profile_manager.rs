@@ -263,6 +263,18 @@ impl ProfileManager {
             self.log(log::Level::Warn, "新建存档被拒绝：Profile 名不能为空".into());
             return Err("Profile 名不能为空".into());
         }
+        // 【目录名闸门】存档名会直接当作 <user_dir> 下的子目录名用（档配置与档景快照都存在里面），
+        // 所以 `..` 这类名字必须拒在入口：若放过去，删除该存档时会拿 user_dir/.. 去 remove_dir_all，
+        // 整个便携数据目录（全部存档、快照、规则、日志）一次清光且不可恢复。
+        if !crate::paths::is_safe_profile_name(name) {
+            self.log(
+                log::Level::Warn,
+                format!("新建存档被拒绝：Profile 名「{name}」不能用作目录名"),
+            );
+            return Err(
+                "存档名不能全部由点号组成，也不能以点号或空格结尾（Windows 目录名限制）".into(),
+            );
+        }
         // 重名保护：已存在则报错，避免覆写别人的存档。
         if self.config.profile.contains_key(name) {
             self.log(
@@ -301,7 +313,21 @@ impl ProfileManager {
         // 删快照目录（含 XML 与 json）。删不掉要留痕：同名存档日后重建时，残留的旧快照会被
         // 当成它的现有映射（判据是快照），等于把已删档的脸悄悄带回新档。
         let snap_dir = self.user_dir.join(crate::paths::sanitize(name));
-        if snap_dir.exists() {
+        // 【remove_dir_all 前的两道闸】这一步不可逆，所以不信任来路：
+        // ① 畸形名一律不碰文件系统。老版本的 profiles.json 里可能已经存着 `..`（当时入口没校验），
+        //    sanitize 会把这类名字收敛成 "default"，照它去删就等于误删另一个存档的目录。
+        // ② 解析结果必须正好落在 user_dir 的下一层，任何越界都拒绝删除并留痕。
+        if !crate::paths::is_safe_profile_name(name) {
+            self.warn(format!(
+                "删除存档 {name}：名字不适合用作目录名，已只从配置中移除、未删除 {}（可手动清理）",
+                snap_dir.display()
+            ));
+        } else if snap_dir.parent() != Some(self.user_dir.as_path()) {
+            self.warn(format!(
+                "删除存档 {name}：快照目录不在存档根目录下（{}），已跳过删除以免波及上层目录",
+                snap_dir.display()
+            ));
+        } else if snap_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&snap_dir) {
                 self.warn(format!(
                     "删除存档 {name}：快照目录删除失败（{e}）：{}。同名存档重建时会沿用这份旧档景",
@@ -386,7 +412,10 @@ impl ProfileManager {
                 return;
             }
         }
-        if let Err(e) = fs::copy(&src, &dst) {
+        // 【原子写 + 写前备份】两处拷贝都不走截断覆写：档景是替换判据源、恢复目标又是用户的
+        // config.xml。覆盖档景之前先把盘上那一份轮转备份到同目录（见 overwrite_snapshot）——
+        // 一次误替换或一次被跳过的 restore 就能把它改成别档的内容，而它原来是唯一的记录。
+        if let Err(e) = crate::xml_parser::overwrite_snapshot(&src, &dst) {
             self.warn(format!(
                 "保存档景失败：{e}。{profile} 在 {img_dir} 的档景未更新（仍为上一次的内容）"
             ));
@@ -430,7 +459,7 @@ impl ProfileManager {
             return;
         }
         // 分支③ 拷贝失败：此时 live 里可能仍是上一个档的内容。
-        if let Err(e) = fs::copy(&src, &dst) {
+        if let Err(e) = json_store::copy_atomic(&src, &dst) {
             self.warn(format!(
                 "恢复档景失败：{e}。{img_dir} 里的 config.xml 可能仍是上一个存档的内容"
             ));
@@ -442,10 +471,47 @@ impl ProfileManager {
         }
     }
 
+    /// 删掉某个快照的轮转备份（`<快照词干>_backup_*.xml`，与快照同目录）。
+    /// 【为什么删组时要一起删】这些备份是覆盖档景前由我们自己产出来的（最多 10 份、单份可达
+    /// 数 MB）；组都没了还留着，等于在用户的数据目录里永久堆孤儿文件，且没有任何入口能清它们。
+    /// 匹配前缀足够特定（含该组快照的完整词干 + 哈希），不会碰到别的组或用户自己的文件。
+    fn drop_snapshot_backups(&self, snapshot_path: &Path) {
+        let Some(stem) = snapshot_path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+            return;
+        };
+        let prefix = format!("{stem}_backup_");
+        let Some(dir) = snapshot_path.parent() else { return };
+        let Ok(entries) = fs::read_dir(dir) else { return }; // 目录都读不到，谈不上清理
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&prefix) || !name.ends_with(".xml") {
+                continue;
+            }
+            if let Err(e) = fs::remove_file(entry.path()) {
+                self.warn(format!("删除组：旧档景备份清理失败（{name}）：{e}"));
+            }
+        }
+    }
+
     // ---------------- 组管理 ----------------
+    /// 把用户给的头像包目录对上**已登记**的组键：等价写法（大小写、正/反斜杠、尾斜杠）复用同一个键。
+    /// 【为什么要这一步】组键只经 `norm_dir` 归一，`C:\FM\NG` 与 `C:\fm\ng` 会记成两个组，
+    /// 而快照名是按 Windows 语义折过大小写的——两个组于是共用一份档景，
+    /// 正是「一份 live config.xml 对两份档景」换个入口复发。
+    /// 没有等价组时返回 `norm_dir(img_dir)`（新组的键）。
+    fn match_group(&self, img_dir: &str) -> String {
+        let key = norm_dir(img_dir);
+        self.prf_cfg
+            .groups
+            .keys()
+            .find(|g| crate::paths::same_dir(g, &key))
+            .cloned()
+            .unwrap_or(key)
+    }
+
     /// 新头像包目录自动建组并设为当前组（对等旧版 ensure_group）。返回归一化后的目录名。
     pub fn ensure_group(&mut self, img_dir: &str) -> Option<String> {
-        let dir = norm_dir(img_dir); // 先归一化，保证同一目录只建一个组
+        let dir = self.match_group(img_dir); // 等价写法先落到已登记的那个键上
         if dir.is_empty() {
             self.log(
                 log::Level::Debug,
@@ -466,7 +532,7 @@ impl ProfileManager {
 
     /// 切换当前组（必须已存在），并落盘。
     pub fn set_cur_group(&mut self, img_dir: &str) -> Result<bool, String> {
-        let dir = norm_dir(img_dir);
+        let dir = self.match_group(img_dir);
         if !self.prf_cfg.groups.contains_key(&dir) {
             self.log(
                 log::Level::Debug,
@@ -489,7 +555,7 @@ impl ProfileManager {
 
     /// 删除组（连同其快照）；若删的是当前组，自动回退到剩下的组。
     pub fn delete_group(&mut self, img_dir: &str) -> Result<bool, String> {
-        let dir = norm_dir(img_dir);
+        let dir = self.match_group(img_dir);
         if self.prf_cfg.groups.remove(&dir).is_none() {
             self.log(
                 log::Level::Debug,
@@ -497,16 +563,17 @@ impl ProfileManager {
             );
             return Ok(false); // 组不存在
         }
+        // 删快照及其轮转备份。删不掉要留痕：组配置已移除、快照却还在，日后重新关联同一目录时，
+        // 这份「该删的备份」会被当成该档的现有映射（替换的保留/覆写判据取自快照）。
         let snap = group_xml_path(&self.user_dir, &self.cur_prf, &dir);
         if snap.is_file() {
-            // 删不掉要留痕：组配置已移除、快照却还在，日后重新关联同一目录时，
-            // 这份「该删的备份」会被当成该档的现有映射（替换的保留/覆写判据取自快照）。
             if let Err(e) = fs::remove_file(&snap) {
                 self.warn(format!(
                     "删除组：快照文件删除失败（{e}）：{}。若以后重新关联该目录，这份旧档景会被当成现有映射",
                     snap.display()
                 ));
             }
+            self.drop_snapshot_backups(&snap);
         }
         // 若删的正好是当前组，重新选一个当前组。
         if self.cur_group.as_deref() == Some(dir.as_str()) {
@@ -774,6 +841,47 @@ mod tests {
     }
 
     #[test]
+    fn dot_profile_name_never_wipes_the_data_dir() {
+        // 【CRITICAL 回归】存档名要当作 <user_dir> 下的子目录名用，`..` 一度让「删除存档」拿着
+        // user_dir/.. 去 remove_dir_all，整个便携数据目录（全部存档、快照、规则、日志）一次清光。
+        let dir = data_dir();
+        let user = dir.path().join(".user");
+        fs::create_dir_all(&user).unwrap();
+        // 老版本入口无校验，profiles.json 里可能已经存着这种名字——本用例走的就是这条来路。
+        fs::write(user.join("profiles.json"), r#"{"Profile": {"..": true}}"#).unwrap();
+        fs::write(dir.path().join("keepme.txt"), "x").unwrap(); // 数据目录里的「受害者」
+        // sanitize 会把 `..` 收敛成 "default"，所以还要盯住同名无辜档的目录不被顺手删掉。
+        fs::create_dir_all(user.join("default")).unwrap();
+        fs::write(user.join("default").join("graphics_a_snapshot.xml"), "档景").unwrap();
+
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        assert!(pm.delete_profile("..").unwrap(), "畸形档应被摘掉名字并返回已删除");
+
+        assert!(dir.path().exists());
+        assert!(dir.path().join("keepme.txt").is_file(), "删除 .. 档把数据目录一起删了");
+        assert!(
+            user.join("default").join("graphics_a_snapshot.xml").is_file(),
+            "畸形名收敛成的 default 误伤了另一个存档的目录"
+        );
+        assert!(!pm.config.profile.contains_key(".."));
+    }
+
+    #[test]
+    fn create_profile_rejects_names_usable_as_directories() {
+        // 畸形名必须在入口就报错，不能靠 sanitize 静默改写（改写后会与别的存档撞同一个目录）。
+        let dir = data_dir();
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        for bad in ["..", ".", "...", "档A."] {
+            let e = pm.create_profile(bad).unwrap_err();
+            assert!(e.contains("存档名"), "{bad} 的报错文案不符：{e}");
+        }
+        // 正常名不受影响：中间的点号是合法目录名。
+        pm.create_profile("FM24.0").unwrap();
+        assert!(pm.config.profile.contains_key("FM24.0"));
+        assert!(dir.path().join(".user").join("FM24.0").is_dir());
+    }
+
+    #[test]
     fn legacy_single_group_profile_upgraded() {
         let dir = data_dir();
         let user = dir.path().join(".user");
@@ -868,5 +976,22 @@ mod tests {
         assert!(warns[0].contains("目录不可用"), "{}", warns[0]);
         // 快照必须保留（目录恢复后还要用它）
         assert!(group_xml_path(&dir.path().join(".user"), "档A", &norm_dir(img.to_str().unwrap())).is_file());
+    }
+
+    #[test]
+    fn same_dir_in_another_spelling_reuses_the_group() {
+        // 同一个目录换种写法（大小写、尾斜杠）不能登记成第二个组：快照名按 Windows 语义
+        // 折过大小写，两个组于是共用一份档景——「一份 live 对两份档景」换个入口复发。
+        let dir = data_dir();
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        pm.create_profile("档A").unwrap();
+        let pack = r"C:\fm\graphics\NG";
+        assert_eq!(pm.ensure_group(pack), Some(norm_dir(pack)));
+        assert_eq!(
+            pm.ensure_group(r"C:\FM\Graphics\ng\"),
+            Some(norm_dir(pack)),
+            "等价写法没有复用已登记的组键"
+        );
+        assert_eq!(pm.prf_cfg.groups.len(), 1, "同一个目录被登记成了两个组");
     }
 }

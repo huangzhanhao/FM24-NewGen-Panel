@@ -13,8 +13,8 @@
  * 【须在组件初始化期调用】内部使用 $state / $effect，只能由组件（或其它 effect 根）调用，
  * 且一个实例对应一处「同时只展示一批图」的位点（如一个表格当前页）。
  */
-import { api } from './api';
-import { bytesToBlobUrl } from './images';
+import { api } from './services/api';
+import { bytesToBlobUrl } from './services/images';
 
 /** 加载器对外接口（语义见 createAvatarBlobs）。 */
 export interface AvatarBlobs {

@@ -49,6 +49,7 @@ use crate::paging::PageResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 随机人 UID 的固定前缀。Replace 流程和前端都靠它区分随机人记录和原生记录，修改这个前缀会造成
 /// 不兼容的破坏性变更。
@@ -183,6 +184,35 @@ impl RosterSummary {
             format_code: scanner.format,
             language: scanner.language.clone(),
         }
+    }
+}
+
+/// 一次名单解析的行数账目（只供日志用，不进前端摘要）。
+/// 【为什么单独成类型】本工具的职责就是「N 个人 → N 张脸」，所以「多少行没变成记录」必须和
+/// 「多少条记录」一样可见。此前这些计数只活在 debug 行里，而生产阈值是 Info（lib.rs 的
+/// `LevelFilter::Info`），于是 1600 行名单丢了 500 行，用户看到的仍是「解析完成：1100 条」。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RosterCounts {
+    /// 表行总数（进度分母；含表头行，不含杂行/分隔线，口径同 `table_rows`）。
+    pub rows: usize,
+    /// 解析成功且通过过滤、最终存活的记录条数。
+    pub kept: usize,
+    /// 按「仅随机人」口径过滤掉的行数（不是错误，是筛选）。
+    pub filtered: usize,
+    /// 校验失败被跳过的行数（多为国籍不在翻译表里，逐行有 Warn）。
+    pub dropped: usize,
+    /// 表头之后「编号列根本不是纯数字」而被整行忽略的行数（历史上既无计数也无日志）。
+    pub stray: usize,
+}
+
+impl RosterCounts {
+    /// 日志尾注：`（名单 1600 行：保留 1100，过滤 0，跳过 480，非数据行 20）`。
+    /// 四个计数与 rows 的关系由调用方日志承载，这里只负责口径统一（「扫描RTF」与替换流水线同一条）。
+    pub fn log_tail(&self) -> String {
+        format!(
+            "（名单 {} 行：保留 {}、按仅随机人过滤 {}、跳过不合法 {}、编号列非数字 {}）",
+            self.rows, self.kept, self.filtered, self.dropped, self.stray
+        )
     }
 }
 
@@ -359,7 +389,15 @@ impl RtfScanner {
         keep_only_newgen: bool,
         logger: &impl LogSink,
     ) -> Result<Vec<PlayerRecord>, String> {
-        self.parse_roster_progress(path, keep_only_newgen, logger, &mut |_, _| {})
+        // 测试不关心行数账目，也不关心进度：取消标志给一个恒为 false 的临时值。
+        self.parse_roster_progress(
+            path,
+            keep_only_newgen,
+            logger,
+            &AtomicBool::new(false),
+            &mut |_, _| {},
+        )
+        .map(|(data, _)| data)
     }
 
     /// 同 `parse_roster`，额外把「已解析第 n 条 / 共 total 条」上报给进度回调（「扫描RTF」状态栏进度用）。
@@ -370,8 +408,9 @@ impl RtfScanner {
         path: &Path,
         keep_only_newgen: bool,
         logger: &impl LogSink,
+        cancel: &AtomicBool,
         progress: &mut dyn FnMut(usize, usize),
-    ) -> Result<Vec<PlayerRecord>, String> {
+    ) -> Result<(Vec<PlayerRecord>, RosterCounts), String> {
         if !self.is_valid {
             let err = "RTF 格式无效，请先执行格式识别".to_string();
             // 入口校验失败：属于调用方顺序错误，记 Error 便于定位（返回文案不变）。
@@ -402,12 +441,17 @@ impl RtfScanner {
         let total = table_rows(&text).count(); // 数据行总数（进度分母）
         logger.debug("rtf", format!("名单数据行总数：{total}"));
         let mut data = Vec::new();
-        let mut dropped = 0usize;
-        let mut filtered = 0usize;
+        let mut counts = RosterCounts { rows: total, ..Default::default() };
         let mut done = 0usize;
         for (row_no, cells) in table_rows(&text) {
             done += 1;
             progress(done, total); // 逐行上报（订阅方按百分比去重后才 emit，不会刷爆 IPC）
+            // 【逐行取消检查点】万行名单解析要跑几秒，而这一段在替换流水线的「取消」生效区间之内：
+            // 原来这里没有检查点，取消后仍要把整份解析跑完才停（用户判定程序假死 → 强杀 → 正好写坏）。
+            if cancel.load(Ordering::Relaxed) {
+                logger.warn("rtf", format!("名单解析已取消（停在第 {row_no} / {total} 行）"));
+                return Err("名单解析被取消".into());
+            }
             match classify_row(&cells, self.format) {
                 RowVerdict::Data => {
                     let record = match self.format {
@@ -419,18 +463,31 @@ impl RtfScanner {
                         data.push(record);
                     } else {
                         // 追踪执行细节：逐行说明为何被过滤（Trace 级别默认被全局阈值挡住，不影响正常日志）。
-                        filtered += 1;
+                        counts.filtered += 1;
                         logger.trace(
                             "rtf",
                             format!("第 {row_no} 行非随机人，已按「仅随机人」过滤"),
                         );
                     }
                 }
-                RowVerdict::NotDataRow => {}
+                // 表头行（第 0 行）必然落在这里——它的编号列是「UID」这样的文字，本来就不是数据。
+                // 它之后的行还走到这里，就是编号格里混进了 `*`、零宽变体或整行说明文字：
+                // 这类行原来既不进任何计数也不记日志（整行 100% 静默消失），现在逐行留痕并入摘要。
+                RowVerdict::NotDataRow => {
+                    if row_no > 0 {
+                        counts.stray += 1;
+                        if counts.stray <= DROP_LOG_MAX {
+                            logger.warn(
+                                "rtf",
+                                format!("第 {row_no} 行编号列不是数字，不是名单数据行，已忽略该行"),
+                            );
+                        }
+                    }
+                }
                 RowVerdict::Rejected { field, detail } => {
                     // 逐行记日志（上限 DROP_LOG_MAX 条，超出合并汇总）；国籍查不到时可据此补表。
-                    dropped += 1;
-                    if dropped <= DROP_LOG_MAX {
+                    counts.dropped += 1;
+                    if counts.dropped <= DROP_LOG_MAX {
                         logger.write(
                             log::Level::Warn,
                             "rtf",
@@ -440,26 +497,27 @@ impl RtfScanner {
                 }
             }
         }
-        if dropped > DROP_LOG_MAX {
-            logger.write(
-                log::Level::Warn,
-                "rtf",
-                format!("另有 {} 行不合法，已跳过", dropped - DROP_LOG_MAX),
-            );
+        if counts.dropped > DROP_LOG_MAX {
+            logger.warn("rtf", format!("另有 {} 行不合法，已跳过", counts.dropped - DROP_LOG_MAX));
         }
+        if counts.stray > DROP_LOG_MAX {
+            logger.warn("rtf", format!("另有 {} 行编号列非数字，已忽略", counts.stray - DROP_LOG_MAX));
+        }
+        counts.kept = data.len();
         // 扫描完成：并入格式/语言，作为本模块唯一的汇总行，用 Debug 输出。
-        // 【为何不记 Info】「扫描RTF」命令与替换流水线都会各记一条 Info 级摘要（总量/格式/语言），
-        // 扫描器再记一条就重复了；这里保留完整口径供排查时开 Debug 查看，关键状态由调用方的 Info 承载。
+        // 【为何不记 Info】「扫描RTF」命令与替换流水线都会各记一条 Info 级摘要，行数账目现在
+        // 由那两条一并承载（见 RosterCounts::log_tail）；这里保留同一口径供排查时开 Debug 查看。
         logger.debug(
             "rtf",
             format!(
-                "RTF 名单解析完成：{}（语言 {}），保留 {} 条（过滤非随机人 {filtered} 条，跳过不合法 {dropped} 行），共 {total} 行",
+                "RTF 名单解析完成：{}（语言 {}），保留 {} 条{}",
                 self.format.label(),
                 self.language,
-                data.len()
+                data.len(),
+                counts.log_tail(),
             ),
         );
-        Ok(data)
+        Ok((data, counts))
     }
 }
 
@@ -492,14 +550,21 @@ fn strip_zero_width_chars(line: &str) -> String {
 fn table_rows(text: &str) -> impl Iterator<Item = (usize, Vec<String>)> + '_ {
     let mut row_no = 0usize;
     text.lines().filter_map(move |line| {
-        let mut cells: Vec<String> = strip_zero_width_chars(line)
+        let line = strip_zero_width_chars(line);
+        let ends_with_bar = line.trim_end().ends_with('|');
+        let mut cells: Vec<String> = line
             .split('|')
             .map(|c| c.trim().to_string())
             .collect();
         if cells.len() < 2 {
             return None; // 无竖线的杂行不是表行
         }
-        cells.pop(); // 行以 | 结尾，尾段是切分产物
+        // 只在行确实以 `|` 收尾时丢掉那个切分产物。机器导出的名单每行都有结尾管道符，
+        // 但手改/截断过的没有——原来这里是无条件 pop，于是那种行会连带丢掉**最后一个真实数据列**：
+        // 拓展名单仍够列数 → 静默少一列自定义值；基础名单则 7 变 6 → 整行被拒，还给出一条误导的诊断。
+        if ends_with_bar {
+            cells.pop();
+        }
         if cells[1..]
             .iter()
             .all(|c| c.is_empty() || c.bytes().all(|b| b == b'-'))
@@ -1062,6 +1127,36 @@ mod tests {
         let data = s.parse_roster(&path, true, &logger).unwrap();
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].uid, "r-2001234567");
+        // 同一份名单的行数账目必须对得上：4 个表行里 1 行编号列非数字（stray）、
+        // 1 行种族码越界（dropped）。这两类过去只会让记录静默变少（stray 连一行日志都没有）。
+        let (_, counts) = s
+            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {})
+            .unwrap();
+        assert_eq!(
+            (counts.rows, counts.kept, counts.dropped, counts.stray),
+            (4, 1, 1, 1),
+            "行数账目不对：{counts:?}"
+        );
+        assert!(counts.log_tail().contains("编号列非数字 1"), "{}", counts.log_tail());
+    }
+
+    #[test]
+    fn row_without_trailing_bar_keeps_its_last_column() {
+        // 手改/截断过的名单不一定以 `|` 收尾。原来 table_rows 无条件 pop 掉那个切分产物，
+        // 于是这种行连带丢掉最后一个真实数据列：基础名单 7 列变 6 列 → 整行被拒。
+        let sample = "\
+| UID       | Nat  | 2nd Nat | Name          |    |    |   |
+| 2001234567| ESP  |         | Ok Player     | 1  | 12 | 1
+";
+        let path = write_rtf(sample);
+        let logger = ChannelLogger::channel().0;
+        let mut s = RtfScanner::new();
+        s.detect_format(&path, &logger).unwrap();
+        let (data, counts) = s
+            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {})
+            .unwrap();
+        assert_eq!(data.len(), 1, "结尾没有管道符的行被整行拒了");
+        assert_eq!((counts.dropped, counts.stray), (0, 0), "行数账目不对：{counts:?}");
     }
 
     #[test]

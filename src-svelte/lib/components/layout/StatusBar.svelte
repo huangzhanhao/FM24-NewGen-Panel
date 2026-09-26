@@ -1,9 +1,9 @@
 <!-- 底部状态栏：显示运行状态、进度条、错误数徽章，并提供“日志”按钮开关抽屉。 -->
 <script lang="ts">
-  import { appStore } from '../stores/app.svelte';
-  import { filterLines, logStore } from '../stores/log.svelte';
-  import { ui } from '../stores/ui.svelte';
-  import { t } from '../text'; // 全局文案常量
+  import { appStore } from '../../stores/app.svelte';
+  import { filterLines, logStore } from '../../stores/log.svelte';
+  import { ui } from '../../stores/ui.svelte';
+  import { t } from '../../text'; // 全局文案常量
 
   const snap = $derived(appStore.snapshot); // 当前全局快照（可能为 null）
   // 错误条数：把日志按 ERROR 阈值过滤后取长度（snap/logStore.lines 变化时自动重算）。

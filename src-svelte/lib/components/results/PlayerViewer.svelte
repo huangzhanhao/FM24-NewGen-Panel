@@ -6,39 +6,58 @@
      （换人自动换代、卸载自动回收）。 -->
 <script lang="ts">
   import { open, message } from "@tauri-apps/plugin-dialog";
-  import { api } from "../api";
-  import { createAvatarBlobs } from "../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
-  import { showError } from "../dialog";
-  import { t } from "../text"; // 全局文案常量
-  import { appStore } from "../stores/app.svelte";
-  import { icons } from "../icons";
-  import type { PlayerPreview } from "../types";
+  import { api } from "../../services/api";
+  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
+  import { showError } from "../../ui/dialog";
+  import { t } from "../../text"; // 全局文案常量
+  import { appStore } from "../../stores/app.svelte";
+  import { icons } from "../../ui/icons";
+  import type { PlayerPreview } from "../../types";
 
   const FACE = "face"; // 单人只有一张图：加载器里的固定 key
 
   let uid = $state(""); // 输入的 UID
   let preview = $state<PlayerPreview | null>(null); // 预览数据（资料+映射+图片路径）
   let imgPathInput = $state(""); // 用户选的替换图片路径
+  // 卡片当前显示的是哪一名球员（数据源里的原始 UID，已补全 r- 前缀）；'' = 还没预览过。
+  let previewedUid = $state("");
   const face = createAvatarBlobs(); // 头像图的 blob 账（复用名单预览/快照预览的同一实现）
 
   const snap = $derived(appStore.snapshot);
+  const busy = $derived(appStore.busy);
 
-  /** 根据 UID 拉取预览，并把图片加载为 blob URL。 */
-  async function showPreview() {
-    if (!uid.trim()) return;
+  // 【请求令牌】preview_player 是同步命令，缓存未命中时要重解析整份档景（15 万行量级、秒级），
+  // 响应先后完全不可控。旧写法把 await 的结果直接写回用户正在输入的 uid：
+  // 「输 A 回车 → 立刻改成 B 回车」时，A 的后到响应会把输入框改回 A，用户接着点替换
+  // 就改了 A 那一行，而弹窗回显的也是 A —— 静默改错人，事后无从发现。
+  let previewToken = 0;
+
+  /** 根据 UID 拉取预览，并把图片加载为 blob URL。
+   *  返回是否成功命中并刷新了卡片：true=卡片已对齐到本次输入；false=输入为空/请求被更新者作废/后端报错
+   *  （报错时错误弹窗已在此处弹出）。调用方据此决定是否继续落笔，避免预览失败仍拿旧 UID 写档。 */
+  async function showPreview(): Promise<boolean> {
+    const want = uid.trim();
+    if (!want) return false;
+    const token = ++previewToken;
     try {
-      preview = await api.previewPlayer(uid);
+      const got = await api.previewPlayer(want);
+      if (token !== previewToken) return false; // 已有更新的请求发出 → 这份结果整份作废
+      preview = got;
       // 回显命中的完整 UID：输入带不带 r- 前缀都能命中，展示以数据源里的原始形态为准
       // （输入 2000472008 命中随机人 r-2000472008 时，输入框补全前缀）。名单资料优先于映射表；
       // 两者都空 = 没命中任何数据源，保持用户输入不动。
-      const matched = preview?.record?.uid ?? preview?.mapping?.uid;
-      if (matched) uid = matched;
+      const matched = got?.record?.uid ?? got?.mapping?.uid ?? want;
+      previewedUid = matched;
+      if (uid === want) uid = matched; // 用户没再改过输入框，才安全地补全前缀
       // 加载图片为可显示的 blob URL（read_image 返回原始字节；换人时旧图由加载器自动回收）。
       // 【为何用 blob】WebView 不能直接用本地磁盘路径作为 <img src>，需把字节包成浏览器可识别的 blob URL。
-      await face.load(preview?.imagePath ? { [FACE]: preview.imagePath } : {});
+      await face.load(got?.imagePath ? { [FACE]: got.imagePath } : {});
+      return true;
     } catch (e) {
+      if (token !== previewToken) return false; // 迟到的失败同样不该覆盖新请求已经呈现的界面
       // 搜索失败（UID 无数据/后端报错）走统一错误弹窗，与批量替换失败同一反馈口径。
       await showError(e);
+      return false;
     }
   }
 
@@ -57,20 +76,28 @@
 
   /** 执行单人替换：校验输入 → 调后端 → 弹窗告知结果 → 刷新预览。 */
   async function replaceIt() {
-    if (!uid.trim() || !imgPathInput.trim()) {
+    const target = uid.trim();
+    if (!target || !imgPathInput.trim()) {
       await message(t.viewer.missingInput, { title: t.dialog.error });
       return;
     }
+    // 【写前对齐】用户可能改了输入框却没回车，此刻卡片显示的还是别人。先把卡片刷成 target，
+    // 让「屏幕上正在看的球员」与「config.xml 里要被改掉的那一行」确定是同一名，再落笔。
+    // 刷新失败（后端报错/请求被作废）时立即中止：否则 previewedUid 仍是上一次成功预览的旧球员，
+    // 会静默改错人（错误弹窗已由 showPreview 弹出，这里不再重复提示）。
+    if (previewedUid !== target && !(await showPreview())) return;
+    // 写入目标取自预览结果（数据源里的原始 UID），不再读那个随时可能被用户改动的输入框。
+    const writeUid = previewedUid;
     try {
       // 备份开关读「替换执行」面板的同一共享值：关掉后单人微调也不备份。
       const hit = await api.replaceSingleFace(
-        uid,
+        writeUid,
         imgPathInput,
         appStore.saveBackup,
       );
       // hit=true 表示命中并替换；false 表示 config.xml 里本来就没这个 UID，未做修改。
       await message(
-        hit ? t.viewer.replacedOk(uid) : t.viewer.mappingNotFound(uid),
+        hit ? t.viewer.replacedOk(writeUid) : t.viewer.mappingNotFound(writeUid),
         { title: hit ? t.dialog.info : t.dialog.warning },
       );
       await showPreview(); // 刷新预览
@@ -275,13 +302,15 @@
           aria-label={t.viewer.imgPathAria}
         />
       </div>
-      <button class="btn" onclick={browseImage} disabled={!snap?.currentGroup}
+      <!-- 批量替换进行中禁用这两个按钮：本标签页是 keep-alive 常驻挂载的，切过去就能在替换跑着时
+           操作；后端也已加同样的拒绝（见 replace_single_face），这里先挡一层免得用户撞错误框。 -->
+      <button class="btn" onclick={browseImage} disabled={!snap?.currentGroup || busy}
         >{t.viewer.browseBtn}</button
       >
       <button
         class="btn primary"
         onclick={replaceIt}
-        disabled={!uid.trim() || !imgPathInput.trim()}
+        disabled={!uid.trim() || !imgPathInput.trim() || busy}
         >{t.viewer.replaceBtn}</button
       >
     </div>

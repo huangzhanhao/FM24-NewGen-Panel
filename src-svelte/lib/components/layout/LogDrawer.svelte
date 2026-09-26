@@ -3,17 +3,17 @@
   import { VList } from "virtua/svelte"; // 虚拟滚动列表组件（只渲染视口内的行，提升大数据量性能）
   import type { VListHandle } from "virtua/svelte";
   import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener"; // 用系统默认程序打开本地文件；失败时降级为资源管理器定位
-  import { appStore, reloadLogs } from "../stores/app.svelte";
+  import { appStore, reloadLogs } from "../../stores/app.svelte";
   import {
     clearDisplay,
     filterLines,
     LEVELS,
     logStore,
-  } from "../stores/log.svelte";
-  import { ui } from "../stores/ui.svelte";
-  import { t } from "../text"; // 全局文案常量
-  import { icons } from "../icons";
-  import type { LogLine } from "../types";
+  } from "../../stores/log.svelte";
+  import { ui } from "../../stores/ui.svelte";
+  import { t } from "../../text"; // 全局文案常量
+  import { icons } from "../../ui/icons";
+  import type { LogLine } from "../../types";
 
   // 抽屉打开期间，过滤条件变化 → 从 Rust 环形缓冲重查（前端缓冲仅承接事件增量）。
   // 【为何不把「打开抽屉」也当触发点】reloadLogs 是「清空 + 全量回填」：若重开抽屉时重查，

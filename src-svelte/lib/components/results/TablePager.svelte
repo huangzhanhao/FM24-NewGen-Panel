@@ -2,8 +2,8 @@
      细分隔线后是「前往 [输入框] 页 [跳转]」快速跳页。两处共用同一组件保证样式与行为一致；
      page 从 0 计数、双向绑定；文案复用 t.table.* 的分页文案。 -->
 <script lang="ts">
-  import { t } from "../text"; // 全局文案常量
-  import { icons } from "../icons";
+  import { t } from "../../text"; // 全局文案常量
+  import { icons } from "../../ui/icons";
 
   // page：当前页码（从 0 开始，双向绑定）；totalPages：总页数（至少 1，由父组件按总条数算出）。
   let { page = $bindable(0), totalPages = 1 }: { page: number; totalPages?: number } = $props();

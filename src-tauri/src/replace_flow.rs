@@ -1,8 +1,8 @@
-//! Replace Faces 流水线（自旧版 services/replace_service.py 移植）：
+//! Replace Faces 流水线：
 //! 「识别并解析 RTF → 布局判定与拦截 → 逐球员抽图 → 写 config.xml」四阶段串行编排。
 //!
 //! 【约定】进度经 progress 回调上报：阶段锚点与阶段占比**全部由下方 STAGE_* 常量定义**
-//! （0 起步，解析 20→30、索引 30→70、读映射 70→74、抽图 74→92、写盘 92、元数据 96、完成 100），
+//! （0 起步，解析 0→10、索引 10→20、读映射 20→30、抽图 30→90、写盘 92、元数据 96、完成 100），
 //! 阶段内部再按「第 n 个 / 共 total 个」线性折算进该阶段占用的百分比区间（见 item()），
 //! 于是状态栏既有总进度条、又能显示「映射球员头像… 3500/30000 · 51%」。取消经 AtomicBool
 //! 在阶段之间与映射循环内部逐项生效；关键步骤经 LogSink 记 INFO（模块 replace）——
@@ -11,12 +11,12 @@
 use crate::face_mapper::{FaceMapper, MapStep, Mode};
 use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::LogSink;
-use crate::templates::{IMPLEMENTED_STANDARDS, RuleConfig};
 use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner};
+use crate::templates::{RuleConfig, IMPLEMENTED_STANDARDS};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// 进度回调：status = 阶段文案；value = 总进度百分比；current/total = 阶段内的
@@ -27,20 +27,19 @@ pub type ProgressFn<'a> = &'a mut dyn FnMut(&str, u8, usize, usize);
 /// 阶段内的逐项上报用 item() 把 done/total 折算进这个区间，所以区间必须相邻不重叠，
 /// 否则后一阶段的 0% 会把进度条从前面拉回来。
 ///
-/// 【区间按实测量级分，不按阶段序号均分】重排依据是 2026-09-17 的实测：同一头像包
+/// 【区间按实测量级分，不按阶段序号均分】2026-09-17 的实测：同一头像包
 /// NG_Regens（标准三/28 万图），**优化前**冷启动是「索引 14.6–39 s ▸ 读现有映射 1.5 s ▸
 /// 抽图 0.24 s ▸ 解析 0.02 s」——索引独占 70–94% 的时长，而旧分配只给它 6%（40→46），
-/// 用户在那几十秒里看到进度条几乎不动；只花 0.02 s 的解析反倒占了 20%。
+/// 用户在那几十秒里看到进度条几乎不动；那次重排一度把大头区间给了索引（30→70）。
 ///
-/// 【优化后这套权重偏保守，但故意不再动】并行扫盘 + `file_type()` 把索引压到 0.13 s，
-/// 同一场景的耗时大头换成了「读现有映射」1.2 s（整包 1.4 s），此时索引区间偏宽、读映射区间偏窄。
-/// 但整条流水线已进 1.5 s 量级，分配误差用户感知不到；而真正需要重调的场景（超大包 + 冷盘 +
-/// 首次替换）恰恰又是索引占大头——现状在两种极端之间更稳。实测明细见
-/// `docs/替换流程-优化空间详析.md` §8。
-const STAGE_RTF: (u8, u8) = (20, 30); // 阶段2：解析 RTF 数据行（实测量级最小，区间同步收窄）
-const STAGE_INDEX: (u8, u8) = (30, 70); // 阶段3a：读头像包索引（扫盘或复用缓存）——冷启动的真正大头
-const STAGE_XML: (u8, u8) = (70, 74); // 阶段3b：读现有 config.xml（Preserve/Overwrite）
-const STAGE_PLAYERS: (u8, u8) = (74, 92); // 阶段3c：逐球员抽图（大名单时占两成上下）
+/// 【2026-09-26 再按优化后的耗时结构重排】并行扫盘 + `file_type()` 把索引压到 0.13 s，
+/// 同一场景整包仅 1.4 s、读现有映射约 1.2 s，常态下索引已不再是大头；于是把最宽的区间
+/// （30→90）留给逐球员抽图，让大名单替换时主计数阶段的进度条平滑推进，索引 / 读映射 /
+/// 解析各收窄为 10 个百分点；写盘、元数据、完成三个尾部锚点（92/96/100）维持不动。
+const STAGE_RTF: (u8, u8) = (0, 10); // 阶段2：解析 RTF 数据行（实测量级最小）
+const STAGE_INDEX: (u8, u8) = (10, 20); // 阶段3a：读头像包索引（扫盘或复用缓存）
+const STAGE_XML: (u8, u8) = (20, 30); // 阶段3b：读现有 config.xml（Preserve/Overwrite）
+const STAGE_PLAYERS: (u8, u8) = (30, 90); // 阶段3c：逐球员抽图（大名单替换的主计数阶段，区间最宽）
 
 /// 阶段4（写 config.xml）与阶段5（存档元数据 / 完成）的锚点。
 /// 【为何提成常量】它们原本是散在 write_stage / run_body 里的字面量 80/90/100；
@@ -71,6 +70,9 @@ pub struct ReplaceParams {
     pub filter_newgen: bool,    // 是否只处理随机人
     pub allow_duplicates: bool, // 是否允许图片复用
     pub save_backup: bool,      // 写入前是否备份
+    /// 用户已在发起前确认「本次可能把本档既有映射清空」（见 commands::preflight_replace）。
+    /// true 时下面 run_body 的写前拦截改为记 WARN 后照写——那是「我就是要清空」在应用内唯一的通路。
+    pub allow_blank: bool,
     /// 「扫描头像」命令缓存的包索引（按 img_dir 命中即复用，避免重复扫盘）。
     /// Arc 共享缓存里的同一份——克隆只涨引用计数，不复制数万图片名表；None = 现场新扫描。
     pub pre_scan: Option<Arc<crate::facepack_scanner::PackScan>>,
@@ -125,10 +127,16 @@ pub fn run(
     logger: &impl LogSink,
 ) -> RunResult {
     // 开始日志：把本次任务的关键参数与两个输入路径落进日志，事后可完整复盘当时跑的是什么。
-    logger.info("replace", format!(
-        "开始替换：模式「{}」｜仅随机人={}｜允许复用={}｜写前备份={}",
-        mode_label(&params.mode), yes_no(params.filter_newgen),
-        yes_no(params.allow_duplicates), yes_no(params.save_backup)));
+    logger.info(
+        "replace",
+        format!(
+            "开始替换：模式「{}」｜仅随机人={}｜允许复用={}｜写前备份={}",
+            mode_label(&params.mode),
+            yes_no(params.filter_newgen),
+            yes_no(params.allow_duplicates),
+            yes_no(params.save_backup)
+        ),
+    );
     logger.info("replace", format!("头像包：{}", params.img_dir));
     logger.info("replace", format!("RTF 名单：{}", params.rtf_path));
     // 【判据来源写进日志】保留/覆写读的是**本档本组的存档快照**（见 ReplaceParams::source_xml）。
@@ -142,7 +150,10 @@ pub fn run(
             ),
             Some(p) => logger.info(
                 "replace",
-                format!("现有映射来源：本档在此目录尚无快照（{}），按无历史处理", p.display()),
+                format!(
+                    "现有映射来源：本档在此目录尚无快照（{}），按无历史处理",
+                    p.display()
+                ),
             ),
             None => logger.info("replace", "现有映射来源：无（未取到当前组，按无历史处理）"),
         }
@@ -174,10 +185,18 @@ pub fn run(
     // 失败的具体原因由命令层记 ERROR，这里只补一条带耗时的 INFO 收尾行（错误信息不重复两遍）。
     let elapsed = started.elapsed();
     match &result.outcome {
-        Outcome::Finished => logger.info("replace", format!(
-            "替换完成：共 {} 条映射，总耗时 {:.1?}", result.mapping.len(), elapsed)),
+        Outcome::Finished => logger.info(
+            "replace",
+            format!(
+                "替换完成：共 {} 条映射，总耗时 {:.1?}",
+                result.mapping.len(),
+                elapsed
+            ),
+        ),
         Outcome::Cancelled => logger.info("replace", format!("替换已取消，总耗时 {:.1?}", elapsed)),
-        Outcome::Failed(_) => logger.info("replace", format!("替换失败中止，总耗时 {:.1?}", elapsed)),
+        Outcome::Failed(_) => {
+            logger.info("replace", format!("替换失败中止，总耗时 {:.1?}", elapsed))
+        }
     }
     result
 }
@@ -190,7 +209,7 @@ fn run_body(
     cancel: &AtomicBool,
     logger: &impl LogSink,
 ) -> RunResult {
-    // 阶段1+2：校验并解析 RTF（0 → 20%），得到结构化球员列表与名单摘要（内部会做中文国籍翻译）。
+    // 阶段1+2：校验并解析 RTF（0 → 10%），得到结构化球员列表与名单摘要（内部会做中文国籍翻译）。
     let (rtf_data, roster) = match parse_stage(params, progress, cancel, logger) {
         Ok(d) => d,
         Err(r) => return r,
@@ -202,6 +221,52 @@ fn run_body(
     };
     if is_cancelled(cancel) {
         return cancelled();
+    }
+    // 【Generate 的写前预检】Generate 从空表起算、不携带既有条目，而 write_stage 是无条件整体重写：
+    // 名单被筛空、UID 对不上时映射为 0 条也照写，原先只有一条事后 WARNING；紧接着命令层会把
+    // 这份退化文件同步到档景——档景是 Preserve/Overwrite 的判据源，也是「本档原来有哪些映射」的
+    // 唯一记录。所以：本档档景非空而本次映射为空 → 中止，config.xml 与档景都不动。
+    // 【条数减少但没有减到 0 的情况（名单只覆盖了一部分人）不中止】那是正常用法，拦不住也不该拦；
+    // 兜底靠档景的写前轮转备份（见 xml_parser::overwrite_snapshot），旧档景仍在 .user/<存档>/ 里。
+    // 【allow_blank：中止之外的另一条路】发起前的预检（commands::preflight_replace）已把「本档有
+    // 多少条会被覆盖」摆在用户面前，点了确认的这一轮就是要清空——此时中止等于把他的意图堵死
+    // （原先只剩手工删档景文件绕过这条守卫），改为记 WARN 留下现场后照写。
+    if matches!(params.mode, Mode::Generate) && mapping.is_empty() {
+        // 只在「本次一条也没有」这条可疑路径上才付这次解析的开销，正常替换不受影响。
+        // 判据＝本档档景。这里要分清三态，绝不能把「档景存在但读不出」塌缩成 existing=0：
+        // 否则损坏/无权限的档景会让这条写前守卫形同虚设（读不出 → 当成 0 条 → 放行照写）。
+        // 口径与发起前预检（commands::preflight_replace 解析失败即 Err）一致：说不清就按可疑处理。
+        let existing = params
+            .source_xml
+            .as_deref()
+            .filter(|p| p.is_file())
+            .map(|p| xml_parser::parse_xml_entries(p).map(|m| m.len()));
+        // None＝根本没有档景文件，Some(Ok(0))＝档景本就是空表：两者都无东西可被清空，放行。
+        // Some(Ok(n>0))＝会清掉 n 条；Some(Err)＝读不出、无从确认会清掉多少。都属可疑路径。
+        if !matches!(&existing, None | Some(Ok(0))) {
+            // allow_blank＝用户在预检里已确认「就是要清空」→ 记 WARN 留下现场后照写；
+            // 未确认则中止，config.xml 与档景都不动。文案区分「能读出条数」与「读不出」。
+            if params.allow_blank {
+                let what = match &existing {
+                    Some(Ok(n)) => format!("本档现有 {n} 条将被覆盖清空"),
+                    _ => "本档档景读不出、无法确认会被清空多少条".to_string(),
+                };
+                logger.warn(
+                    "replace",
+                    format!(
+                    "已按你的确认继续：本次写出 0 条映射，{what}（档景会先轮转备份，可从中找回）"),
+                );
+            } else {
+                return failed(&match &existing {
+                    Some(Ok(n)) => format!(
+                        "本次会把本档现有 {n} 条映射替换为 0 条（「生成」模式不携带既有条目），已中止：\
+                         config.xml 与档景均未改动。多为名单被筛空或头像包内没有图片所致，\
+                         请核对名单、UID 与「仅随机人」筛选后重试"),
+                    _ => "本次会把本档档景替换为 0 条映射，但档景读不出、无法确认会清空多少条，已中止：\
+                          config.xml 与档景均未改动。请先用「读取快照」核对档景是否损坏后重试".to_string(),
+                });
+            }
+        }
     }
     // 阶段4：写 config.xml。把映射结果一次性写入头像包目录。
     if let Err(r) = write_stage(params, &mapping, progress, logger) {
@@ -220,7 +285,7 @@ fn run_body(
     }
 }
 
-/// 阶段1+2：识别 RTF 格式并解析出结构化名单（0 → 20%），连同名单摘要一并返回。
+/// 阶段1+2：识别 RTF 格式并解析出结构化名单（0 → 10%），连同名单摘要一并返回。
 /// 格式识别失败 → failed("RTF 格式不合法：…")（带首个不合法字段定位，前端弹窗展示）。
 fn parse_stage(
     params: &ReplaceParams,
@@ -239,26 +304,42 @@ fn parse_stage(
     if is_cancelled(cancel) {
         return Err(cancelled());
     }
-    progress("解析 RTF 文件…", 20, 0, 0);
+    progress("解析 RTF 文件…", STAGE_RTF.0, 0, 0);
     let t = Instant::now(); // 计时只覆盖解析（识别在上一步，另行计时）
-    // 逐行上报（大名单上万行；订阅方按百分比去重后才 emit，不会刷爆 IPC），
-    // 百分比落在 STAGE_RTF 区间上，计数用原始行数（含表头行，与「扫描RTF」同口径）。
-    let rtf_data = scanner
+                            // 逐行上报（大名单上万行；订阅方按百分比去重后才 emit，不会刷爆 IPC），
+                            // 百分比落在 STAGE_RTF 区间上，计数用原始行数（含表头行，与「扫描RTF」同口径）。
+    let (rtf_data, counts) = scanner
         .parse_roster_progress(
             Path::new(&params.rtf_path),
             params.filter_newgen,
             logger,
+            cancel,
             &mut |done, total| item(&mut *progress, "解析 RTF 文件…", STAGE_RTF, done, total),
         )
-        .map_err(|e| failed(&e))?;
+        // 取消检查点在解析循环内部，中止时抛出的是 Err：按标志把它同真正的失败分开（真实失败保留原文）。
+        .map_err(|e| {
+            if is_cancelled(cancel) {
+                cancelled()
+            } else {
+                failed(&e)
+            }
+        })?;
     // 解析完立即检查取消（原版口径）：不等头像包扫描跑完才停，大包扫描可能耗时很久。
     if is_cancelled(cancel) {
         return Err(cancelled());
     }
     let parse_elapsed = t.elapsed();
-    logger.info("replace", format!(
-        "解析名单完成：{} 名球员，耗时 {:.1?}（识别 {:.1?} + 解析 {:.1?}）",
-        rtf_data.len(), detect_elapsed + parse_elapsed, detect_elapsed, parse_elapsed));
+    logger.info(
+        "replace",
+        format!(
+            "解析名单完成：{} 名球员{}，耗时 {:.1?}（识别 {:.1?} + 解析 {:.1?}）",
+            rtf_data.len(),
+            counts.log_tail(),
+            detect_elapsed + parse_elapsed,
+            detect_elapsed,
+            parse_elapsed
+        ),
+    );
     // 摘要就地从扫描器状态 + 记录列表汇总（趁 rtf_data 交出去之前），随结果回传前端。
     let summary = RosterSummary::from_records(&scanner, &rtf_data);
     Ok((rtf_data, summary))
@@ -279,7 +360,7 @@ fn map_item(progress: ProgressFn, step: MapStep, done: usize, total: usize) {
     }
 }
 
-/// 阶段3：识别头像包布局 → 拦截未实现标准 → 逐球员抽图（30% → 92%）。
+/// 阶段3：识别头像包布局 → 拦截未实现标准 → 逐球员抽图（10% → 90%）。
 /// 返回 (映射, 本轮现场扫盘得到的索引)：后者交给命令层回填「扫描头像」缓存，
 /// 命中缓存时是 None（缓存里已经是同一份，不必重写）。
 fn map_stage(
@@ -308,23 +389,46 @@ fn map_stage(
             None,
         ),
         None => {
-            let scan = facepack_scanner::scan_pack_progress(&params.img_dir, &mut |done, total| {
-                item(&mut *progress, "读取头像包索引…", STAGE_INDEX, done, total)
-            })
-            .map_err(|e| failed(&e))?;
-            let mapper = FaceMapper::from_scan(&scan, &params.rule_config, params.source_xml.clone())
-                .map_err(|e| failed(&e))?;
+            let scan = facepack_scanner::scan_pack_progress(
+                &params.img_dir,
+                &mut |done, total| {
+                    item(&mut *progress, "读取头像包索引…", STAGE_INDEX, done, total)
+                },
+                cancel,
+            )
+            // 扫盘中途取消 → Err：同样按标志与真正的读盘失败分开（后者要把原文给用户看）。
+            .map_err(|e| {
+                if is_cancelled(cancel) {
+                    cancelled()
+                } else {
+                    failed(&e)
+                }
+            })?;
+            let mapper =
+                FaceMapper::from_scan(&scan, &params.rule_config, params.source_xml.clone())
+                    .map_err(|e| failed(&e))?;
             (mapper, Some(Arc::new(scan)))
         }
     };
-    logger.info("replace", format!(
-        "头像包索引完成：{}，耗时 {:.1?}（{}）",
-        layout_label(&mapper.layout), t_index.elapsed(),
-        if cached_index { "命中「扫描头像」缓存，未扫盘" } else { "现场扫盘" }));
+    logger.info(
+        "replace",
+        format!(
+            "头像包索引完成：{}，耗时 {:.1?}（{}）",
+            layout_label(&mapper.layout),
+            t_index.elapsed(),
+            if cached_index {
+                "命中「扫描头像」缓存，未扫盘"
+            } else {
+                "现场扫盘"
+            }
+        ),
+    );
     // 泛化拦截：标准规则清单外（尚未实现抽图规则）的标准明确报错（如未来的标准四/五/六）。
     if let PackLayout::Standard { standard, .. } = mapper.layout {
         if !IMPLEMENTED_STANDARDS.contains(&standard) {
-            return Err(failed(&format!("标准{standard}的抽图规则暂未实现，请检查标准规则配置")));
+            return Err(failed(&format!(
+                "标准{standard}的抽图规则暂未实现，请检查标准规则配置"
+            )));
         }
     }
     // 索引到此为止；下面这段「读现有映射 + 逐球员抽图」另起一个计时器。
@@ -352,15 +456,28 @@ fn map_stage(
             // 自己以 facemap 模块名记录；这里只管流水线阶段的计时与成败。
             logger,
         )
-        .ok_or_else(|| if is_cancelled(cancel) { cancelled() } else { failed("映射失败") })?;
+        .ok_or_else(|| {
+            if is_cancelled(cancel) {
+                cancelled()
+            } else {
+                failed("映射失败")
+            }
+        })?;
     // 抽图耗时 = 首个 Players 锚点 → 映射结束；读现有映射耗时 = 两者差额
     //（Generate 模式没有读 XML 这一步，差额≈0，正好自证口径）。
     let map_elapsed = t_map.elapsed();
     let players_elapsed = t_players.map(|p| p.elapsed()).unwrap_or_default();
-    logger.info("replace", format!(
-        "映射完成：{} 条（模式「{}」），读现有映射 {:.1?}｜逐球员抽图 {:.1?}｜小计 {:.1?}",
-        mapping.len(), mode_label(&params.mode),
-        map_elapsed.saturating_sub(players_elapsed), players_elapsed, map_elapsed));
+    logger.info(
+        "replace",
+        format!(
+            "映射完成：{} 条（模式「{}」），读现有映射 {:.1?}｜逐球员抽图 {:.1?}｜小计 {:.1?}",
+            mapping.len(),
+            mode_label(&params.mode),
+            map_elapsed.saturating_sub(players_elapsed),
+            players_elapsed,
+            map_elapsed
+        ),
+    );
     Ok((mapping, fresh_scan))
 }
 
@@ -375,9 +492,15 @@ fn write_stage(
     let t = Instant::now();
     xml_parser::write_xml(mapping, Path::new(&params.img_dir), params.save_backup)
         .map_err(|e| failed(&e))?;
-    logger.info("replace", format!(
-        "写入 config.xml：{} 条映射，写前备份={}，耗时 {:.1?}",
-        mapping.len(), yes_no(params.save_backup), t.elapsed()));
+    logger.info(
+        "replace",
+        format!(
+            "写入 config.xml：{} 条映射，写前备份={}，耗时 {:.1?}",
+            mapping.len(),
+            yes_no(params.save_backup),
+            t.elapsed()
+        ),
+    );
     Ok(())
 }
 
@@ -404,14 +527,25 @@ fn layout_label(layout: &PackLayout) -> String {
         PackLayout::Empty => "空包（无子目录且无图片）".into(),
         PackLayout::Standard { standard, complete } => format!(
             "标准{standard}，{}",
-            if *complete { "配置目录齐全" } else { "配置目录不全" }),
-        PackLayout::Unknown => "无法识别标准：子目录与 FolderList 均不匹配，将递归全池随机抽图".into(),
+            if *complete {
+                "配置目录齐全"
+            } else {
+                "配置目录不全"
+            }
+        ),
+        PackLayout::Unknown => {
+            "无法识别标准：子目录与 FolderList 均不匹配，将递归全池随机抽图".into()
+        }
     }
 }
 
 /// 布尔值的中文（日志用）。
 fn yes_no(v: bool) -> &'static str {
-    if v { "是" } else { "否" }
+    if v {
+        "是"
+    } else {
+        "否"
+    }
 }
 
 fn failed(msg: &str) -> RunResult {
@@ -444,7 +578,13 @@ mod tests {
     fn setup() -> (tempfile::TempDir, String, String) {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("pack");
-        for eth in ["SpanMed", "Caucasian", "Central European", "African", "MENA"] {
+        for eth in [
+            "SpanMed",
+            "Caucasian",
+            "Central European",
+            "African",
+            "MENA",
+        ] {
             fs::create_dir_all(img.join(eth)).unwrap();
             for i in 0..2 {
                 fs::write(img.join(eth).join(format!("e{i}.png")), b"png").unwrap();
@@ -456,16 +596,26 @@ mod tests {
             "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
              | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
              | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n",
-        ).unwrap();
-        (dir, rtf.to_string_lossy().to_string(), img.to_string_lossy().to_string())
+        )
+        .unwrap();
+        (
+            dir,
+            rtf.to_string_lossy().to_string(),
+            img.to_string_lossy().to_string(),
+        )
     }
 
     #[test]
     fn happy_path_writes_config_xml() {
         let (_dir, rtf, img) = setup();
         let params = ReplaceParams {
-            rtf_path: rtf, img_dir: img, mode: Mode::Generate,
-            filter_newgen: true, allow_duplicates: true, save_backup: false,
+            rtf_path: rtf,
+            img_dir: img,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -473,30 +623,201 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
         let (logger, log_rx) = ChannelLogger::channel();
-        let result = run(&params, &mut |s, v, _, _| steps.push((s.to_string(), v)), &cancel, &logger);
+        let result = run(
+            &params,
+            &mut |s, v, _, _| steps.push((s.to_string(), v)),
+            &cancel,
+            &logger,
+        );
         assert_eq!(result.outcome, Outcome::Finished);
         assert_eq!(result.rtf_data.len(), 2);
         assert_eq!(result.mapping.len(), 2);
         // 进度值单调且终值 100
         assert_eq!(steps.last().unwrap().1, 100);
         // 产物可用 xml_parser 解析回来
-        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        let xml =
+            xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
         assert!(xml.contains_key("r-2000472008"));
-        // 关键步骤日志全部发出（同序在通道里，前端经 log:batch 实时回显）；末条应为完成行。
+        // 关键步骤日志全部发出（同序在通道里，前端经 log:batch 实时回显）。
+        // 一次替换的日志天然跨模块：rtf（解析）、facemap（抽图）、replace（编排）共用同一个出口，
+        // 所以按 replace 主线校关键步骤与完成行，跨模块行改由「不得出现 ERROR」兜底。
         let logs: Vec<LogLine> = log_rx.try_iter().collect();
-        assert!(logs.len() >= 5, "关键步骤日志缺失：{logs:?}");
-        assert!(logs.iter().all(|l| l.module == "replace"));
-        assert!(logs.last().unwrap().message.contains("替换完成"), "末条日志应为完成行：{logs:?}");
+        let replace_logs: Vec<&LogLine> = logs.iter().filter(|l| l.module == "replace").collect();
+        assert!(replace_logs.len() >= 5, "关键步骤日志缺失：{logs:?}");
+        assert!(
+            replace_logs.last().unwrap().message.contains("替换完成"),
+            "replace 主线末条应为完成行：{logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.level == "ERROR"),
+            "happy path 不应有 ERROR 级日志：{logs:?}"
+        );
+    }
+
+    /// 「生成」模式本轮抽不出任何映射的现场：名单正常，但包里一张图也没有。
+    /// 返回 (临时目录, 头像包目录, 档景路径)——档景里已有 1 条映射，正是「会被清空」的那部分。
+    /// 中止与「确认后照写」两个用例共用这套布置，两者只差 allow_blank 一个字段。
+    fn blanking_setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("pack");
+        for eth in ["SpanMed", "Caucasian"] {
+            fs::create_dir_all(img.join(eth)).unwrap(); // 目录都在、没有图片 → 映射必为 0 条
+        }
+        fs::write(
+            dir.path().join("list.rtf"),
+            "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
+             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n",
+        )
+        .unwrap();
+        let snap = dir.path().join("snap.xml");
+        fs::write(
+            &snap,
+            "<records>\n<record from=\"SpanMed/e0\" to=\"graphics/pictures/person/2000472008/portrait\"/>\n</records>\n",
+        )
+        .unwrap();
+        (dir, img, snap)
+    }
+
+    /// 上面那套布置的入参（Generate + 空映射 + 非空档景），allow_blank 由用例决定。
+    fn blanking_params(img: &Path, snap: &Path, allow_blank: bool) -> ReplaceParams {
+        let dir = img.parent().unwrap();
+        ReplaceParams {
+            rtf_path: dir.join("list.rtf").to_string_lossy().to_string(),
+            img_dir: img.to_string_lossy().to_string(),
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank,
+            pre_scan: None,
+            source_xml: Some(snap.to_path_buf()),
+            rule_config: RuleConfig::builtin(),
+        }
+    }
+
+    #[test]
+    fn generate_aborts_before_wiping_a_non_empty_snapshot() {
+        // 「生成」模式不携带既有条目：名单解析出 0 条时映射也是 0 条，照写就把本档的映射表清空；
+        // 而收尾同步还会把这份空表覆盖到档景——它是 Preserve/Overwrite 的判据源，也是「本档原来
+        // 有哪些映射」的唯一记录。所以未经确认时这一轮必须在写之前停下。
+        let (_dir, img, snap) = blanking_setup();
+        let params = blanking_params(&img, &snap, false);
+        let cancel = AtomicBool::new(false);
+        let (logger, _rx) = ChannelLogger::channel();
+        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
+        let Outcome::Failed(msg) = &result.outcome else {
+            panic!("应中止而不是照常写完：{:?}", result.outcome);
+        };
+        assert!(
+            msg.contains("已中止") && msg.contains("1 条"),
+            "消息要说明拦下了什么：{msg}"
+        );
+        assert!(
+            !img.join("config.xml").exists(),
+            "中止后 config.xml 不该被写出来"
+        );
+        assert_eq!(
+            fs::read_to_string(&snap)
+                .unwrap()
+                .matches("<record from=")
+                .count(),
+            1,
+            "档景不该被动过"
+        );
+    }
+
+    #[test]
+    fn confirmed_generate_writes_the_empty_mapping() {
+        // 同一套现场，唯一的区别是这一轮带 allow_blank＝用户在发起前的预检里确认过「知道会清空、
+        // 就是要清空」。此时必须照写：中止只把这个意图堵回应用之外（原先只剩手工删档景文件绕过守卫）。
+        let (_dir, img, snap) = blanking_setup();
+        let params = blanking_params(&img, &snap, true);
+        let cancel = AtomicBool::new(false);
+        let (logger, log_rx) = ChannelLogger::channel();
+        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
+        assert_eq!(result.outcome, Outcome::Finished);
+        assert_eq!(result.mapping.len(), 0);
+        // 空表真的落了盘（模板骨架在、0 条映射行）。
+        let written = fs::read_to_string(img.join("config.xml")).unwrap();
+        assert_eq!(
+            written.matches("<record from=").count(),
+            0,
+            "确认后就该写出空映射表：{written}"
+        );
+        let logs: Vec<LogLine> = log_rx.try_iter().collect();
+        assert!(
+            logs.iter()
+                .any(|l| l.level == "WARNING" && l.message.contains("已按你的确认继续")),
+            "清空这一步要在日志里留痕：{logs:?}"
+        );
+        // 档景由命令层收尾同步（run 之外），这里只确认流水线本身没把它当成判据偷偷改回去。
+        assert_eq!(
+            fs::read_to_string(&snap)
+                .unwrap()
+                .matches("<record from=")
+                .count(),
+            1,
+            "run() 不改档景（同步在命令层）"
+        );
+    }
+
+    #[test]
+    fn unreadable_snapshot_aborts_instead_of_being_treated_as_empty() {
+        // 档景文件在、但读不出（这里用非法 UTF-8 字节模拟损坏/无权限）：与「档景本就 0 条」是两回事。
+        // 读不出就当成「无可清空」放行，等于让确认守卫在档景损坏时形同虚设——口径必须与预检一致：
+        // 说不清会清掉多少条，未经确认就中止，config.xml 与档景都不动。
+        let (_dir, img, snap) = blanking_setup();
+        fs::write(&snap, [0xff, 0xfe, 0x00, 0xff]).unwrap(); // read_to_string 必失败，但 is_file() 仍为真
+        let params = blanking_params(&img, &snap, false);
+        let cancel = AtomicBool::new(false);
+        let (logger, _rx) = ChannelLogger::channel();
+        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
+        let Outcome::Failed(msg) = &result.outcome else {
+            panic!("档景读不出时应中止而不是照写：{:?}", result.outcome);
+        };
+        assert!(
+            msg.contains("已中止") && msg.contains("读不出"),
+            "消息要说明是读不出而非 0 条：{msg}"
+        );
+        assert!(
+            !img.join("config.xml").exists(),
+            "中止后 config.xml 不该被写出来"
+        );
+    }
+
+    #[test]
+    fn confirmed_generate_proceeds_even_with_unreadable_snapshot() {
+        // 同一份损坏档景，但用户已在预检里确认过「就是要清空」（allow_blank）：此时照写，
+        // 并记一条 WARN 留痕——读不出条数不该把已确认的清空意图堵死。
+        let (_dir, img, snap) = blanking_setup();
+        fs::write(&snap, [0xff, 0xfe, 0x00, 0xff]).unwrap();
+        let params = blanking_params(&img, &snap, true);
+        let cancel = AtomicBool::new(false);
+        let (logger, log_rx) = ChannelLogger::channel();
+        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
+        assert_eq!(result.outcome, Outcome::Finished);
+        assert_eq!(result.mapping.len(), 0);
+        assert!(img.join("config.xml").exists(), "确认后空表应落盘");
+        let logs: Vec<LogLine> = log_rx.try_iter().collect();
+        assert!(
+            logs.iter()
+                .any(|l| l.level == "WARNING" && l.message.contains("已按你的确认继续")),
+            "清空这一步要在日志里留痕：{logs:?}"
+        );
     }
 
     #[test]
     fn progress_carries_item_counts_and_never_goes_backwards() {
-        // 阶段内逐项上报：解析名单要带「第 n 行 / 共 total 行」，逐球员抽图要带「第 n 个 / 共 total 个」。
-        // 两段窗口（解析 20→30、抽图 74→92）分开，正是为了抽图不会从 0% 起算把进度条拉回去。
+        // 两段窗口（解析 0→10、抽图 30→90）分开，正是为了抽图不会从 0% 起算把进度条拉回去。
         let (_dir, rtf, img) = setup();
         let params = ReplaceParams {
-            rtf_path: rtf, img_dir: img, mode: Mode::Generate,
-            filter_newgen: true, allow_duplicates: true, save_backup: false,
+            rtf_path: rtf,
+            img_dir: img,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -504,37 +825,58 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
         let mut steps: Vec<(String, u8, usize, usize)> = Vec::new();
-        let result = run(&params, &mut |s, v, c, t| steps.push((s.to_string(), v, c, t)), &cancel, &logger);
+        let result = run(
+            &params,
+            &mut |s, v, c, t| steps.push((s.to_string(), v, c, t)),
+            &cancel,
+            &logger,
+        );
         assert_eq!(result.outcome, Outcome::Finished);
 
         // 总百分比单调不减，终值 100
-        assert!(steps.windows(2).all(|w| w[0].1 <= w[1].1), "进度出现回退：{steps:?}");
+        assert!(
+            steps.windows(2).all(|w| w[0].1 <= w[1].1),
+            "进度出现回退：{steps:?}"
+        );
         assert_eq!(steps.last().unwrap().1, 100);
 
         // 解析阶段：带行数计数，且最后一条走满（done == total）
-        let parse: Vec<_> = steps.iter().filter(|s| s.0.starts_with("解析 RTF 文件")).collect();
+        let parse: Vec<_> = steps
+            .iter()
+            .filter(|s| s.0.starts_with("解析 RTF 文件"))
+            .collect();
         let last_parse = parse.last().expect("解析阶段应上报逐行进度");
         assert!(last_parse.3 > 0, "解析阶段应带总行数：{steps:?}");
         assert_eq!(last_parse.2, last_parse.3, "解析进度应走满：{steps:?}");
 
         // 抽图阶段：Generate 模式没有「读现有映射」那一步，计数就是名单人数
-        let players: Vec<_> = steps.iter().filter(|s| s.0.starts_with("映射球员头像")).collect();
+        let players: Vec<_> = steps
+            .iter()
+            .filter(|s| s.0.starts_with("映射球员头像"))
+            .collect();
         let last_players = players.last().expect("抽图阶段应上报逐球员进度");
         assert_eq!(last_players.3, 2, "总人数应为名单条数：{steps:?}");
         assert_eq!(last_players.2, 2, "抽图进度应走满：{steps:?}");
-        assert!(!steps.iter().any(|s| s.0.starts_with("读取现有映射")), "Generate 模式不该报读映射阶段：{steps:?}");
+        assert!(
+            !steps.iter().any(|s| s.0.starts_with("读取现有映射")),
+            "Generate 模式不该报读映射阶段：{steps:?}"
+        );
     }
 
     #[test]
     fn cancel_after_parse_skips_pack_scan() {
-        // 在 progress(20)（解析名单中）置位取消：应在解析完成后立即停，
+        // 在 progress(0)（解析名单中）置位取消：应在解析完成后立即停，
         // 不进入头像包扫描。img_dir 故意指向不存在的目录——若取消检查失效，
         // 流程会走到扫描并以 Failed（目录不存在）收场，用结果状态区分两条路径。
         let (dir, rtf, _img) = setup();
         let params = ReplaceParams {
             rtf_path: rtf,
             img_dir: dir.path().join("nonexistent").to_string_lossy().to_string(),
-            mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -546,9 +888,13 @@ mod tests {
         let result = run(
             &params,
             &mut |s, _, _, _| {
-                if s.starts_with("解析 RTF 文件") { cancel.store(true, Ordering::Relaxed); }
+                if s.starts_with("解析 RTF 文件") {
+                    cancel.store(true, Ordering::Relaxed);
+                }
             },
-            &cancel, &logger);
+            &cancel,
+            &logger,
+        );
         assert_eq!(result.outcome, Outcome::Cancelled);
     }
 
@@ -560,7 +906,11 @@ mod tests {
         let params = ReplaceParams {
             rtf_path: bad.to_string_lossy().to_string(),
             img_dir: dir.path().to_string_lossy().to_string(),
-            mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -575,8 +925,13 @@ mod tests {
     fn cancel_before_write_leaves_no_config() {
         let (_dir, rtf, img) = setup();
         let params = ReplaceParams {
-            rtf_path: rtf, img_dir: img, mode: Mode::Generate,
-            filter_newgen: true, allow_duplicates: true, save_backup: false,
+            rtf_path: rtf,
+            img_dir: img,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -588,9 +943,13 @@ mod tests {
         let result = run(
             &params,
             &mut |s, _, _, _| {
-                if s.starts_with("读取头像包索引") { cancel.store(true, Ordering::Relaxed); }
+                if s.starts_with("读取头像包索引") {
+                    cancel.store(true, Ordering::Relaxed);
+                }
             },
-            &cancel, &logger);
+            &cancel,
+            &logger,
+        );
         assert_eq!(result.outcome, Outcome::Cancelled);
         assert!(!Path::new(&params.img_dir).join("config.xml").exists());
     }
@@ -619,11 +978,16 @@ mod tests {
              | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
              | 2000472009| JAM  |         | John   | 1  | 12 | 1 |\n\
              | 2000472010| USA  |         | Jack   | 1  | 12 | 0 |\n",
-        ).unwrap();
+        )
+        .unwrap();
         let params = ReplaceParams {
             rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
-            mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // Generate 模式不读判据
             rule_config,
@@ -642,11 +1006,20 @@ mod tests {
         assert_eq!(by_uid("r-2000472009").ethnicity, "Mestizo");
         // 目标目录为空 → 回退链末端 Fallback=random，仍产出可定位的真实文件。
         let usa = by_uid("r-2000472010");
-        assert!(["Spain", "Mestizo", "France"].contains(&usa.ethnicity.as_str()),
-                "兜底只应在有图的目录里抽，实际：{}", usa.ethnicity);
-        assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), &usa.ethnicity, &usa.image).is_some());
+        assert!(
+            ["Spain", "Mestizo", "France"].contains(&usa.ethnicity.as_str()),
+            "兜底只应在有图的目录里抽，实际：{}",
+            usa.ethnicity
+        );
+        assert!(xml_parser::resolve_image_file(
+            Path::new(&params.img_dir),
+            &usa.ethnicity,
+            &usa.image
+        )
+        .is_some());
         // config.xml 解析回目录相对路径口径。
-        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        let xml =
+            xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
         assert_eq!(xml["r-2000472008"].ethnicity, "Spain");
         assert_eq!(xml["r-2000472009"].ethnicity, "Mestizo");
     }
@@ -668,11 +1041,16 @@ mod tests {
              | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
              | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n\
              | 2000472010| FRA  |         | Pierre | 1  | 12 | 3 |\n",
-        ).unwrap();
+        )
+        .unwrap();
         let params = ReplaceParams {
             rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
-            mode: Mode::Generate, filter_newgen: true, allow_duplicates: true, save_backup: false,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -684,15 +1062,21 @@ mod tests {
         assert_eq!(result.mapping.len(), 3);
         for m in &result.mapping {
             assert!(m.ethnicity.is_empty()); // 平铺种族为空串
-            // 每条映射的图名都能在包根命中真实文件（file_stem 规则贯通）。
-            assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), "", &m.image).is_some());
+                                             // 每条映射的图名都能在包根命中真实文件（file_stem 规则贯通）。
+            assert!(
+                xml_parser::resolve_image_file(Path::new(&params.img_dir), "", &m.image).is_some()
+            );
         }
         // 全程未创建任何子目录。
-        let subdirs = fs::read_dir(&params.img_dir).unwrap()
-            .filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count();
+        let subdirs = fs::read_dir(&params.img_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .count();
         assert_eq!(subdirs, 0);
         // 写出的 config.xml 每行 from="图名"，解析回 ethnicity==""。
-        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        let xml =
+            xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
         assert_eq!(xml.len(), 3);
         assert!(xml.values().all(|e| e.ethnicity.is_empty()));
     }
@@ -714,12 +1098,17 @@ mod tests {
              | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
              | 2000472009| USA  |         | John   | 1  | 12 | 0 |\n\
              | 2000472010| FRA  |         | Pierre | 1  | 12 | 3 |\n",
-        ).unwrap();
+        )
+        .unwrap();
         let params = ReplaceParams {
             rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
             // 禁重复：池恰好 3 张、名单 3 人 → from 全集必等于递归池全集（确定性断言）。
-            mode: Mode::Generate, filter_newgen: true, allow_duplicates: false, save_backup: false,
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: false,
+            save_backup: false,
+            allow_blank: false,
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
@@ -730,16 +1119,30 @@ mod tests {
         assert_eq!(result.outcome, Outcome::Finished);
         assert_eq!(result.mapping.len(), 3);
         // 禁重复 + 池恰好 3 张 → from 全集 = 递归池全集（根/子/孙全部进入结果）。
-        let froms: BTreeSet<String> = result.mapping.iter()
-            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image)).collect();
-        assert_eq!(froms, BTreeSet::from([
-            "r".to_string(), "weirdA/i".to_string(), "weirdA/sub/j".to_string()
-        ]));
+        let froms: BTreeSet<String> = result
+            .mapping
+            .iter()
+            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image))
+            .collect();
+        assert_eq!(
+            froms,
+            BTreeSet::from([
+                "r".to_string(),
+                "weirdA/i".to_string(),
+                "weirdA/sub/j".to_string()
+            ])
+        );
         // config.xml 解析回 (相对目录, 词干)，且 resolve 能按同口径命中真实文件。
-        let xml = xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
+        let xml =
+            xml_parser::parse_xml(Path::new(&params.img_dir).join("config.xml").as_path()).unwrap();
         assert_eq!(xml.len(), 3);
         for e in xml.values() {
-            assert!(xml_parser::resolve_image_file(Path::new(&params.img_dir), &e.ethnicity, &e.image).is_some());
+            assert!(xml_parser::resolve_image_file(
+                Path::new(&params.img_dir),
+                &e.ethnicity,
+                &e.image
+            )
+            .is_some());
         }
     }
 }

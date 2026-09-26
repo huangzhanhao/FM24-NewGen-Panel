@@ -1,11 +1,11 @@
 <!-- “替换执行”面板：选择模式与选项、发起/取消替换、显示进度条。 -->
 <script lang="ts">
   import { ask } from "@tauri-apps/plugin-dialog";
-  import { api } from "../api";
-  import { showError } from "../dialog";
-  import { t } from "../text"; // 全局文案常量
-  import { appStore, refreshSnapshot, runTask } from "../stores/app.svelte";
-  import { icons } from "../icons";
+  import { api } from "../../services/api";
+  import { showError } from "../../ui/dialog";
+  import { t } from "../../text"; // 全局文案常量
+  import { appStore, refreshSnapshot, runTask } from "../../stores/app.svelte";
+  import { icons } from "../../ui/icons";
 
   // 三个模式的取值/标签/说明统一在 text.ts 的 t.replace.modes 维护；
   // value 发往后端（协议值），label 显示在模式按钮上，desc 显示在选中模式旁。
@@ -25,7 +25,7 @@
   const browseMode = $derived(appStore.browseMode);
   const ready = $derived(appStore.replaceReady);
 
-  /** 发起替换：先兜底校验目录完整性（识别三套标准），再调后端 start_replace。 */
+  /** 发起替换：兜底校验目录完整性 → 既有映射预检（必要时确认）→ 调后端 start_replace。 */
   async function startReplace() {
     if (!snap?.currentGroup) return;
     // 取到局部变量：闭包里 TS 的判空收窄会失效（runTask 包的正是一条闭包）。
@@ -51,16 +51,46 @@
         });
         if (!ok) return;
       } // complete（标准目录齐全，含多出未配置目录）→ 静默继续
+      // 发起前预检：本次会不会把本档既有映射清空（只有「生成」+ 档景非空才要求确认）。
+      // 点过确认的这一轮带 allowBlank 发起，流水线里那条写前拦截才会放行而不是中止——
+      // 「就是要清空」由此有了应用内通路，不必再去手工删档景文件绕开守卫。
+      const pre = await runTask(t.replace.preflightTask, () =>
+        api.preflightReplace(mode),
+      );
+      let allowBlank = false;
+      if (pre.needsConfirm) {
+        const ok = await ask(t.replace.blankConfirm(pre.existing), {
+          title: t.replace.blankTitle,
+        });
+        if (!ok) return;
+        allowBlank = true;
+      }
       // 调后端启动替换（异步后台线程），随后刷新快照：replacing 变 true → 全局禁用。
       await api.startReplace({
         mode,
         filterNewgan,
         allowDuplicates,
         saveBackup: appStore.saveBackup,
+        allowBlank,
       });
       await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效
     } catch (e) {
       await showError(e);
+    }
+  }
+
+  /** 请求取消替换。原来是不 await、不 catch 的浮空 promise：30k 替换中按取消若失败，
+      界面毫无反馈，用户只会以为按钮坏了。 */
+  let cancelling = $state(false);
+  async function cancelReplace() {
+    if (cancelling) return; // 一次请求在途就不重发（失败弹一次窗就够，别叠一层）
+    cancelling = true;
+    try {
+      await api.cancelReplace();
+    } catch (e) {
+      await showError(e);
+    } finally {
+      cancelling = false;
     }
   }
 </script>
@@ -140,8 +170,8 @@
     </button>
     <button
       class="btn cancel"
-      onclick={() => api.cancelReplace()}
-      disabled={!busy}>{t.replace.cancelBtn}</button
+      onclick={cancelReplace}
+      disabled={!busy || cancelling}>{t.replace.cancelBtn}</button
     >
   </div>
 </div>

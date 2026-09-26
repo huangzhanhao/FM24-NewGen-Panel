@@ -149,10 +149,8 @@ pub trait LogSink: Send + Sync {
     /// 唯一实现点：把「一条消息 + 级别 + 模块名」发出去（生产转发全局 log 门面，测试进通道）。
     fn write(&self, level: log::Level, module: &str, msg: String);
     // 五个级别快捷方法：全部转发给 write，级别语义由 log::Level 承载（调用点写法与旧固有方法一致）。
-    // trace/debug 当前无调用点，且全局阈值为 Info 会被过滤；保留为 API 完整性，故 allow(dead_code)。
-    #[allow(dead_code)]
+    // 注意生产阈值为 Info（见 lib.rs），trace/debug（现用于 rtf_scanner 的逐行/统计细节）默认不落盘、不进前端。
     fn trace(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Trace, module, msg.into()) }
-    #[allow(dead_code)]
     fn debug(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Debug, module, msg.into()) }
     fn info(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Info, module, msg.into()) }
     fn warn(&self, module: &str, msg: impl Into<String>) { self.write(log::Level::Warn, module, msg.into()) }
@@ -196,6 +194,8 @@ impl ChannelLogger {
 #[cfg(test)]
 impl LogSink for ChannelLogger {
     fn write(&self, level: log::Level, module: &str, msg: String) {
+        // 【刻意不按级别过滤】rtf_scanner / profile_manager 的一批测试就是靠断言 debug 行来校
+        // 「丢了多少行、为什么丢」这类诊断是否真的发出；生产侧的 Info 阈值在 log 门面上，不在这儿。
         let _ = self.0.send(LogLine {
             ts: chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             level: level_label(level).into(),

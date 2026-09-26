@@ -1,13 +1,13 @@
 <!-- “当前任务”卡片：展示当前头像包与 RTF 路径，提供完整性检查与一键修复。 -->
 <script lang="ts">
   import { open, ask } from "@tauri-apps/plugin-dialog"; // open=文件/目录选择框；ask=确认框
-  import { api } from "../api";
-  import { showError } from "../dialog";
-  import { t } from "../text"; // 全局文案常量
-  import { pinScrollEnd } from "../actions"; // 把长路径钉到最右的 action
-  import { icons } from "../icons";
-  import { appStore, applySnapshot, runTask } from "../stores/app.svelte";
-  import type { IntegrityResult } from "../types";
+  import { api } from "../../services/api";
+  import { showError } from "../../ui/dialog";
+  import { t } from "../../text"; // 全局文案常量
+  import { pinScrollEnd } from "../../ui/actions"; // 把长路径钉到最右的 action
+  import { icons } from "../../ui/icons";
+  import { appStore, applySnapshot, runTask } from "../../stores/app.svelte";
+  import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
 
   let integrity = $state<IntegrityResult | null>(null); // null = 未检查
@@ -62,8 +62,14 @@
     try {
       // runTask(任务名, 命令)：命令执行期间由底部状态栏接管进度条（后端 task:progress 事件实时驱动），
       // 传任务名让状态栏在第一条事件到达前就显示正确的名字，不残留上一个任务。
-      integrity = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
+      const got = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
+      // 【为什么要比对 currentGroup】检查一个 28 目录的大包要好几秒，期间用户可能已经换成另一个
+      // 头像包：那份结论属于旧包，据此点「创建缺失目录」会在新包里凭空建出旧包的目录，
+      // 还会把新包报成「完整」。
+      if (snap?.currentGroup !== imgDir) return;
+      integrity = got;
     } catch (e) {
+      if (snap?.currentGroup !== imgDir) return; // 已经换包：这条错误不再打扰用户
       await showError(e);
     }
   }

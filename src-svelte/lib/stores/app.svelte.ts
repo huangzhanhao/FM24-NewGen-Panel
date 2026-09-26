@@ -6,7 +6,7 @@
  * 事件订阅是进程级副作用，initListeners 由 App 挂载时调用一次（内部用 inited 防重复）。
  */
 import { listen } from '@tauri-apps/api/event';
-import { api } from '../api';
+import { api } from '../services/api';
 import type { AppSnapshot, ProgressPayload, RtfScanResult, TaskProgressPayload } from '../types';
 import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 
@@ -190,14 +190,15 @@ export async function initListeners(onFinished: (r: ReplaceResult) => Promise<vo
     'replace:finished',
     async (e) => {
       appStore.lastResult = e.payload.result;
-      // 名单摘要随事件回传（后端替换时已经解析过名单）：前端不必再点一次「扫描RTF」就知道
-      // 名单格式；失败/取消时为 null——后端已把名单缓存写回空表，摘要一并清掉。
-      appStore.lastRtfScan = e.payload.roster;
-      // 替换流程结束也会写后端名单缓存（见 commands.rs 的 start_replace）：
-      // 成功 = 填上这份名单 → 名单预览可读；失败/取消 = 写回空表 → 回到引导空态。
-      // 这两个标记必须在 refreshSnapshot 之前置好：名单预览要立刻按新缓存重载一次。
-      appStore.rosterReady = e.payload.result === 'finished';
-      appStore.rosterVersion++; // 触发名单预览重载（替换前的查询结果已过期）
+      // 名单状态只在**替换成功**时重置：成功 = 后端把这份名单写进缓存（见 commands.rs 的收尾），
+      // 摘要随事件回传，前端不必再点一次「扫描RTF」就知道名单格式。
+      // 失败/取消 = 后端不再把缓存写回空表（作用域此刻并没有变化），前端因此一并保留替换前的
+      // 名单摘要与预览——这里若照旧清成引导空态，用户就得重扫一遍，白丢筛选、排序和页码。
+      if (e.payload.result === 'finished') {
+        appStore.lastRtfScan = e.payload.roster;
+        appStore.rosterReady = true;
+        appStore.rosterVersion++; // 触发名单预览重载（替换前的查询结果已过期）
+      }
       await refreshSnapshot();
       // 快照预览同样有两条写缓存路径（「读取快照」按钮 / 替换收尾的自动同步）：
       // 替换成功时后端已把新 config.xml 同步到该档快照位置并刷新快照缓存，

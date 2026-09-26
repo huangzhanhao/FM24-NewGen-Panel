@@ -8,8 +8,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, ImageScanResult, IntegrityResult, LogLine, PageResult, PlayerPreview,
-  PlayerQuery, PlayerRecord, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery,
-} from './types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
+  PlayerQuery, PlayerRecord, PreflightResult, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery,
+} from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
 export const api = {
@@ -47,6 +47,9 @@ export const api = {
   createMissingDirs: (imgDir: string, names: string[]) =>
     invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。
+  // 发起前先问一次预检：只有后端判定 needsConfirm（「生成」+ 本档档景非空）时才弹确认，
+  // 确认过的这一轮把 allowBlank 带上，流水线的写前拦截才会放行。
+  preflightReplace: (mode: ReplaceArgs['mode']) => invoke<PreflightResult>('preflight_replace', { mode }),
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
   cancelReplace: () => invoke<void>('cancel_replace'),
   queryPlayers: (query: PlayerQuery) => invoke<PageResult<PlayerRecord>>('query_players', { query }),

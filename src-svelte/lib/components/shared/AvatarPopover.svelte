@@ -19,8 +19,8 @@
      两处取图途径不同（名单预览问后端要路径、快照预览行内自带路径），resolve 由父组件注入；
      气泡状态机/缓存/定位/样式在本组件单点维护。 -->
 <script lang="ts">
-  import { t } from "../text"; // 全局文案常量
-  import { icons } from "../icons";
+  import { t } from "../../text"; // 全局文案常量
+  import { icons } from "../../ui/icons";
 
   let {
     resolve,

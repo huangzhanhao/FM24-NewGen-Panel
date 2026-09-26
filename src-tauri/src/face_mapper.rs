@@ -88,7 +88,7 @@ impl FaceMapper {
         config: &RuleConfig,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Self, String> {
-        let scan = crate::facepack_scanner::scan_pack_progress(img_dir, progress)?;
+        let scan = crate::facepack_scanner::scan_pack_progress(img_dir, progress, &AtomicBool::new(false))?;
         // 测试沿用「判据 = 头像包里的 config.xml」的老口径：fixture 把旧映射直接写在包目录里，
         // 于是这些用例不必为快照另造一份文件。生产由 commands 层传当前档的快照路径。
         let existing = Some(PathBuf::from(img_dir).join("config.xml"));
@@ -683,7 +683,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let (logger, log_rx) = ChannelLogger::channel(); // 这一段要断言「带来了几条旧映射」的日志
         // 每次生成映射都会改动规则内部状态（禁重复的池），所以每轮都重新扫包建 mapper。
-        let scan_pack = || crate::facepack_scanner::scan_pack_progress(&img, &mut |_, _| {}).unwrap();
+        let scan_pack = || crate::facepack_scanner::scan_pack(&img).unwrap();
 
         for mode in [Mode::Preserve, Mode::Overwrite] {
             let scan = scan_pack();
@@ -734,7 +734,7 @@ mod tests {
         //   ③ Generate 要明确写出「现有映射不作判据、其名单外条目会被丢弃」这条副作用。
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
-        let scan = crate::facepack_scanner::scan_pack_progress(&img, &mut |_, _| {}).unwrap();
+        let scan = crate::facepack_scanner::scan_pack(&img).unwrap();
         let cancel = AtomicBool::new(false);
         let (logger, log_rx) = ChannelLogger::channel();
         // ① 快照存在但读不出来（非 UTF-8）→ WARN + 按空表继续（球员仍被正常映射）。

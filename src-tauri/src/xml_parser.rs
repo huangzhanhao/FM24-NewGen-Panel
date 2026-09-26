@@ -10,13 +10,14 @@
 //! （「写入 N 条映射」「读取快照完成 N 条」等已由 replace_flow / commands 记录，此处不再复述）——
 //! 于是这里只留三类线索：畸形映射行的丢弃数、备份的创建与轮转清理、单人替换落空的具体原因。
 use crate::assets::CONFIG_TEMPLATE;
+use crate::json_store::write_atomic;
 use crate::paging::PageResult;
 use crate::rtf_scanner::NEWGAN_UID_PREFIX;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// 一条映射：某 UID 的球员 → 某种族目录下的某张图片。同样 camelCase 序列化给前端。
@@ -146,7 +147,10 @@ pub fn write_xml(data: &[MappingEntry], img_dir: &Path, save_backup: bool) -> Re
         .collect();
     // 与 v1 输出逐字节一致：行间 16 空格缩进。把模板里的 [players] 占位符换成所有行。
     let xml = CONFIG_TEMPLATE.replace("[players]", &lines.join("\n                "));
-    fs::write(&config_path, xml).map_err(|e| format!("写入 config.xml 失败: {e}"))?;
+    // 【原子写】config.xml 是头像包里唯一的映射表，`fs::write` 的截断覆写一旦被中断
+    // （关窗、崩溃、磁盘满）就是半截文件，FM 读不到 → 整包球员全员无脸；能否救回只看
+    // 用户有没有开「写前备份」。走全项目统一的 tmp+rename（见 json_store::write_atomic）。
+    write_atomic(&config_path, xml).map_err(|e| format!("写入 config.xml 失败: {e}"))?;
     Ok(())
 }
 
@@ -170,9 +174,6 @@ pub fn single_replacement(
         );
         return Ok(false); // 没有 config.xml，无从替换，返回未命中
     }
-    if save_backup {
-        backup_rotation(&config_path, img_dir)?;
-    }
     let text = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
     // target 是要定位的片段（根据 UID 拼出）；new_line 是替换后的完整行（record_from 兼容平铺 pack=""）。
     let target = format!(r#"to="graphics/pictures/person/{uid}/portrait""#);
@@ -180,55 +181,66 @@ pub fn single_replacement(
         r#"<record from="{}" to="graphics/pictures/person/{uid}/portrait"/>"#,
         record_from(pack, image),
     );
+    // 【逐行原样复制，只换命中的那一行】不能用 `text.lines()` + `join("\n")`：lines() 会把 CRLF
+    // 里的 \r 剥掉，重排时整份文件就从 CRLF 变成 LF——那是一次与「换一张脸」毫无关系的全文改写。
+    // split_inclusive 连行尾一起吃下来，未命中的行按原始字节回填，末行没有换行符也照旧。
     let mut replaced = false;
-    let mut out: Vec<String> = Vec::new();
-    // 逐行扫：命中目标且尚未替换过，就换成新行（只换第一条）；其余行原样保留。
-    for line in text.lines() {
+    let mut out = String::with_capacity(text.len());
+    for raw in text.split_inclusive('\n') {
+        let line = raw.trim_end_matches(['\r', '\n']);
         if !replaced && line.contains(&target) {
-            out.push(new_line.clone());
+            out.push_str(&new_line);
+            out.push_str(&raw[line.len()..]); // 沿用这一行原本的换行风格（\r\n / \n / 行尾无换行）
             replaced = true;
         } else {
-            out.push(line.to_string());
+            out.push_str(raw);
         }
     }
-    fs::write(&config_path, out.join("\n") + "\n").map_err(|e| e.to_string())?;
     if !replaced {
         // 文件在、但整表没有该 UID 的映射行（多为 UID 填错，或该球员本就不在本次映射里）。
-        // 命令层无论如何都会打一条「单人换脸 {uid} → …」的 INFO，此处补齐「其实没改成」的反证。
+        // 不改文件、也不打备份：原来这条路径会照样重写整份文件，还白占一个 10 份轮转槽位，
+        // 同时命令层那条「单人换脸 X → Y」的 INFO 会误报成改成了。
         log::warn!(
             target: "xml",
-            "单人替换未命中：config.xml 中没有 UID {uid} 的映射行，文件内容未改动（{}）",
+            "单人替换未命中：config.xml 中没有 UID {uid} 的映射行，文件未改动（{}）",
             config_path.display()
         );
+        return Ok(false);
     }
-    Ok(replaced)
+    if save_backup {
+        backup_rotation(&config_path, img_dir)?;
+    }
+    write_atomic(&config_path, out).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
-/// 备份为 config备份_YYYYMMDD-HHMMSS.xml，仅保留最近 10 份。
-fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
-    // 用当前时间戳生成唯一备份名，先拷贝一份。
+/// 写前备份：`<前缀>_YYYYMMDD-HHMMSS.xml`，同一目录内仅保留最近 `BACKUP_KEEP` 份。
+/// 前缀用 ASCII 而非中文：FM 与各类脚本/同步盘处理非 ASCII 文件名更容易出岔子。
+/// config.xml 用前缀 `config_backup`；档景快照用 `<快照词干>_backup`（见 commands::sync_group_snapshot）。
+pub fn rotate_backup(src: &Path, dir: &Path, prefix: &str) -> Result<PathBuf, String> {
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let backup = img_dir.join(format!("config_backup_{ts}.xml"));
-    fs::copy(config_path, &backup).map_err(|e| e.to_string())?;
+    let backup = dir.join(format!("{prefix}_{ts}.xml"));
+    fs::copy(src, &backup).map_err(|e| e.to_string())?;
     // 【上层只看到「写前备份=是」】具体落在哪个文件、又清理了哪些旧备份，都只有这里知道；
     // 用户复查「上次替换前那份 config.xml」时全靠这条日志给出确切的文件名。
     log::info!(
         target: "xml",
-        "已备份现有 config.xml → {}",
+        "已备份 {} → {}",
+        src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
         backup.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
     );
     // 列出目录下所有历史备份。
-    let mut backups: Vec<_> = fs::read_dir(img_dir)
+    let mut backups: Vec<_> = fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let n = e.file_name().to_string_lossy().to_string();
-            n.starts_with("config_backup_") && n.ends_with(".xml")
+            n.starts_with(prefix) && n.ends_with(".xml")
         })
         .map(|e| e.path())
         .collect();
     backups.sort(); // 文件名含时间戳，字典序 = 时间序
-                    // 超过 10 份就删除最旧的（切片 [..len-10] 是前面的旧备份）。
+                    // 超过 BACKUP_KEEP 份就删除最旧的（切片 [..len-KEEP] 是前面的旧备份）。
     if backups.len() > BACKUP_KEEP {
         // 被清理的是「第 n 份更早的备份」，用户发现某份历史备份不见了时，这条日志能解释是轮转删的
         // （而不是杀软/同步盘动的）。删除失败只 `let _ =` 吞掉（旧备份留着不影响正确性），故不逐份记名。
@@ -242,7 +254,33 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
             BACKUP_KEEP, pruned, BACKUP_KEEP
         );
     }
-    Ok(())
+    Ok(backup)
+}
+
+/// config.xml 的写前备份（前缀 `config_backup`，落在头像包目录内）。
+fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
+    rotate_backup(config_path, img_dir, "config_backup").map(|_| ())
+}
+
+/// 用 `src` 覆盖写档景快照 `snapshot_path`，覆盖前先把盘上的旧快照轮转备份到同目录。
+/// 三处覆盖点全部走这里（切档备份、替换收尾同步、单人微调回写）。
+/// 【为什么档景也要备份】它是 Preserve/Overwrite 的判据源，也是「本档在这个包上原来有哪些映射」的
+/// 唯一记录：config.xml 写坏了还有它能对照，而它自己被一次误替换、或一次被跳过的 restore 覆盖后，
+/// 就没有第二份可回了——原有的备份只覆盖 live 文件。
+/// 【为什么不做读取回退】备份只用于人工恢复，程序不去自动挑一份读：那等于把「猜哪份是对的」
+/// 变成默认行为。恢复失败只留 WARNING，用户可在 .user/<存档>/ 里自己看到这些备份。
+pub fn overwrite_snapshot(src: &Path, snapshot_path: &Path) -> Result<(), String> {
+    if snapshot_path.is_file() {
+        let dir = snapshot_path.parent().ok_or("快照路径没有父目录")?;
+        let stem = snapshot_path
+            .file_stem()
+            .ok_or("快照文件名为空")?
+            .to_string_lossy()
+            .to_string();
+        // 备份与快照同目录 → 删档时一起消失，不会散落到用户别的地方。
+        rotate_backup(snapshot_path, dir, &format!("{stem}_backup"))?;
+    }
+    crate::json_store::copy_atomic(src, snapshot_path)
 }
 
 /// 从用户选中的图片绝对路径反推 (相对目录路径, 图名)。只认头像包内真实存在的图片：
@@ -276,7 +314,7 @@ pub fn parse_image_path_in_pack(img_dir: &str, image_path: &str) -> Option<(Stri
     Some((rel, image))
 }
 
-/// 探测实际图片文件（.png/.jpg/.jpeg，对等旧版 PlayerService.resolve_image_file）。
+/// 探测实际图片文件（.png/.jpg/.jpeg）。
 /// config.xml 里只存图片名不存扩展名，需按常见扩展名依次试找出真实文件。
 /// ethnicity 为映射里的相对目录路径（"" = 包根，多级 "a/b" = 子/孙目录）。
 pub fn resolve_image_file(img_dir: &Path, ethnicity: &str, image: &str) -> Option<String> {
@@ -402,14 +440,6 @@ pub fn query_snapshot_page(
 mod tests {
     use super::*;
 
-    fn facepack() -> std::path::PathBuf {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("pack");
-        std::fs::create_dir_all(&p).unwrap();
-        // keep dir alive: 借 path 但由调用方保证在同函数内使用
-        p
-    }
-
     #[test]
     fn write_then_parse_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,7 +465,6 @@ mod tests {
         let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
         assert!(text.contains(r#"<list id="maps">"#));
         assert!(text.contains(r#"from="SpanMed/img1""#));
-        let _ = facepack(); // 占位调用避免未使用告警
     }
 
     #[test]
@@ -575,7 +604,85 @@ mod tests {
         assert_eq!(parsed["r-1001"].ethnicity, "MENA");
         assert_eq!(parsed["r-1001"].image, "m9");
         assert_eq!(parsed["r-1002"].image, "a2"); // 未受影响
-        assert!(!single_replacement("r-9999", "MENA", "m9", &pack, false).unwrap());
+                                                  // 未命中：一个字节都不该动。旧实现照样重写整份文件，还白占一个 10 份轮转槽位。
+        let cfg = pack.join("config.xml");
+        let before = std::fs::read(&cfg).unwrap();
+        let entries_before = std::fs::read_dir(&pack).unwrap().count();
+        assert!(!single_replacement("r-9999", "MENA", "m9", &pack, true).unwrap());
+        assert_eq!(
+            std::fs::read(&cfg).unwrap(),
+            before,
+            "未命中却改写了 config.xml"
+        );
+        assert_eq!(
+            std::fs::read_dir(&pack).unwrap().count(),
+            entries_before,
+            "未命中却打出了一份备份"
+        );
+    }
+
+    #[test]
+    fn single_replacement_keeps_original_line_endings() {
+        // FM 在 Windows 上写出的 config.xml 是 CRLF，且末行常没有换行符。
+        // 用 lines() + join("\n") 的实现会把整份文件转成 LF——等于一次无谓的全文件改写。
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path();
+        let cfg = pack.join("config.xml");
+        std::fs::write(
+            &cfg,
+            "<records>\r\n\
+             <record from=\"Asian/a1\" to=\"graphics/pictures/person/2000472008/portrait\"/>\r\n\
+             <record from=\"Asian/a2\" to=\"graphics/pictures/person/2000472009/portrait\"/>\r\n\
+             </records>",
+        )
+        .unwrap();
+        assert!(single_replacement("2000472008", "SpanMed", "b1", pack, false).unwrap());
+        let got = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(got.matches("\r\n").count(), 3, "CRLF 行尾被动过:\n{got}");
+        assert!(
+            !got.ends_with('\n'),
+            "原本无尾换行，重写后不该冒出: {got:?}"
+        );
+        assert!(got.contains(r#"from="SpanMed/b1""#));
+        assert!(
+            got.contains(
+                r#"<record from="Asian/a2" to="graphics/pictures/person/2000472009/portrait"/>"#
+            ),
+            "未命中的行被改动了"
+        );
+    }
+
+    #[test]
+    fn overwrite_snapshot_backs_up_the_previous_one() {
+        // 档景是 Preserve/Overwrite 的判据源，也是「本档原来有哪些映射」的唯一记录：
+        // 覆盖它之前必须先把盘上那份备份下来（原来只有 live config.xml 有轮转备份）。
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path().join("graphics_a_snapshot-1234abcd.xml");
+        fs::write(&snap, "旧档景").unwrap();
+        let live = dir.path().join("config.xml");
+        fs::write(&live, "新档景").unwrap();
+
+        overwrite_snapshot(&live, &snap).unwrap();
+
+        assert_eq!(fs::read_to_string(&snap).unwrap(), "新档景");
+        let backups = backups_in(dir.path(), "graphics_a_snapshot-1234abcd_backup_");
+        assert_eq!(backups.len(), 1, "覆盖旧档景前应留下一份备份：{backups:?}");
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "旧档景");
+    }
+
+    /// 目录内以 `prefix` 开头、以 .xml 结尾的文件（备份清单）。
+    fn backups_in(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                let n = p.file_name().unwrap().to_string_lossy().to_string();
+                n.starts_with(prefix) && n.ends_with(".xml")
+            })
+            .collect();
+        v.sort();
+        v
     }
 
     #[test]
@@ -593,11 +700,11 @@ mod tests {
             false,
         )
         .unwrap();
-        // 手动造 12 份历史备份（时间戳递增）
+        // 手动造 12 份历史备份：时间戳一律早于「现在」，与本次 write_xml 生成的那份天然错开，
+        // 所以不必 sleep 等秒级时间戳递增（旧实现为此白等了 13 秒）。
         for i in 0..12 {
-            let name = format!("config备份_20260101-0000{:02}.xml", i);
+            let name = format!("config_backup_20260101-0000{:02}.xml", i);
             std::fs::copy(pack.join("config.xml"), pack.join(&name)).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(1100)); // 秒级时间戳递增
         }
         write_xml(
             &[MappingEntry {
@@ -609,12 +716,48 @@ mod tests {
             true,
         )
         .unwrap();
-        let count = std::fs::read_dir(&pack)
+        let mut kept: Vec<String> = std::fs::read_dir(&pack)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("config备份_"))
-            .count();
-        assert_eq!(count, 10);
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("config_backup_"))
+            .collect();
+        kept.sort(); // 文件名含时间戳，字典序 = 时间序
+        assert_eq!(kept.len(), 10, "轮转后应只剩最近 10 份：{kept:?}");
+        // 13 份（12 份伪造 + 本次写入的 1 份）剪到 10 份，剪掉的必须是最旧的 3 份，
+        // 且刚生成的那份最新备份必须在——只校条数的话，「删新留旧」这种反着写的 bug 测不出来。
+        assert_eq!(
+            kept.first().unwrap().as_str(),
+            "config_backup_20260101-000003.xml"
+        );
+        assert!(
+            kept.last().unwrap().as_str() > "config_backup_20260101-000011.xml",
+            "本次替换的新备份被删掉了：{kept:?}"
+        );
+        // 已知残余：v1 及更早的备份叫 config备份_*.xml，轮转既不统计也不清理（按现决策保留现状）。
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file_in_the_pack() {
+        // config.xml 走 tmp+rename 落盘，临时文件必须与它同目录（同卷才能原子替换）。
+        // 写完一点不剩：残留在头像包里的 *.tmp-* 用户会当成垃圾，而实现一旦退化（改用 fs::write
+        // 或忘了清理）只有读目录才能发现，所以这条断言直接盯目录内容。
+        let dir = tempfile::tempdir().unwrap();
+        let entries = [MappingEntry {
+            uid: "r-2000472008".into(), // 位数要符合 RECORD_RE 的 \d{4,}，否则回读恒为 0 条
+            ethnicity: "Asian".into(),
+            image: "x".into(),
+        }];
+        write_xml(&entries, dir.path(), false).unwrap();
+        write_xml(&entries, dir.path(), false).unwrap(); // 覆写已存在的目标同样不留残骸
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "写后残留临时文件：{leftovers:?}");
+        assert_eq!(parse_xml(&dir.path().join("config.xml")).unwrap().len(), 1);
     }
 
     #[test]

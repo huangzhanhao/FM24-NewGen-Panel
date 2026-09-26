@@ -10,7 +10,7 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// 14 个种族目录（标准二出厂默认的 FolderList 数据，也是 validate_image_dirs 的对照基准）。
 pub const FACEPACK_DIRS: [&str; 14] = [
@@ -44,9 +44,12 @@ impl PackLayout {
 
 /// 唯一的标准判定入口（纯函数，不读盘）。
 /// folder_lists：各标准的 (标准号, FolderList)，来自 templates（用户可配置），按登记顺序传入。
-/// 判定顺序：**超集优先**（S ⊇ F，含全部目录、可多出 → 归属该标准，complete = 恰好相等），
-/// 其次**子集**（S ⊂ F，有缺失 → fixable；多个标准同时子集命中时按传入顺序，
-/// 仅 {Scandinavian} 一名重合的历史包因此归标准二），交叉/未知名 → Unknown。
+/// 判定顺序：**超集优先**（S ⊇ F → 归属该标准），其次**子集**（S ⊂ F → 就近归属，标 fixable）。
+/// `complete` 的口径是「该标准配置的目录**都在**包内」，**允许包外还有别的目录**（超集 → true）：
+/// 用户常在一个包里放多套素材，多余目录不参与抽图即可，不必因此判成「不完整」并催用户删目录。
+/// 交叉/未知名 → Unknown。
+/// 【为什么先命中先赢是安全的】`templates::validate_registry` 保证任意两份清单交集为 0，
+/// 于是一个包的目录集不可能同时是两份清单的超集；子集轮里多个标准命中同一包的情况也被同一守卫排除。
 pub fn classify(
     subdirs: &BTreeSet<String>,
     has_root_images: bool,
@@ -56,7 +59,7 @@ pub fn classify(
         return if has_root_images { PackLayout::Flat } else { PackLayout::Empty };
     }
     let names: BTreeSet<&str> = subdirs.iter().map(String::as_str).collect();
-    // 第一轮：超集判定（包含某标准全部目录 → 归属且视为完整；超集间互斥——各标准清单互不包含）。
+    // 第一轮：超集判定（包含某标准全部目录 → 归属且视为完整；超集之间互斥——两份清单交集为 0）。
     // complete = 标准配置的全部目录都在包内（S 可以多出 extra 目录，由调用方按 FolderList 排除）。
     for (n, folders) in folder_lists {
         let f: BTreeSet<&str> = folders.iter().map(String::as_str).collect();
@@ -114,7 +117,8 @@ impl PackScan {
 /// （FM 里那名球员显示空白头像），而且**静默**——不校验的话没有任何人会发现。
 ///
 /// 【只统计「会影响抽图池」的条目】每个非垃圾一级子目录记 (名字, mtime, 直接子条目数)，
-/// 每个非隐藏根图记 (名字, mtime, 0)。`config.xml` / `config备份_*.xml` / README 之类一律不入签名——
+/// 每个非隐藏根图记 (名字, mtime, 0)。判定只看扩展名，所以 `config.xml` / `config_backup_*.xml` / README
+/// 这类非图片文件天然不入签名——
 /// 否则替换自己写完 config.xml 就会让缓存失效，下次又要重扫 28 万文件（这正是要避免的）。
 ///
 /// 【为什么 mtime 与条目数都要】两者互补：改名只动 mtime（条目数不变），同秒内「删一张再加一张」
@@ -275,13 +279,17 @@ fn scan_threads(total_dirs: usize) -> usize {
         .min(PARALLEL_SCAN_MAX_THREADS)
 }
 
-/// 顺序遍历全部一级子目录并报进度（每完成一个报一次）。
+/// 顺序遍历全部一级子目录并报进度（每完成一个报一次）。`cancel` 置位即停在中途（不再开新目录）。
 fn build_pools_sequential(
     subdirs: &[(String, PathBuf)],
     recursive_pools: &mut BTreeMap<String, BTreeSet<String>>,
     progress: &mut dyn FnMut(usize, usize),
+    cancel: &AtomicBool,
 ) {
     for (i, (fname, path)) in subdirs.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         merge_into(recursive_pools, scan_one_subdir(fname, path));
         progress(i + 1, subdirs.len());
     }
@@ -298,6 +306,7 @@ fn build_pools_parallel(
     recursive_pools: &mut BTreeMap<String, BTreeSet<String>>,
     progress: &mut dyn FnMut(usize, usize),
     threads: usize,
+    cancel: &AtomicBool,
 ) {
     let total = subdirs.len();
     let next = AtomicUsize::new(0);
@@ -307,6 +316,11 @@ fn build_pools_parallel(
             let tx = tx.clone();
             let next = &next;
             scope.spawn(move || loop {
+                // worker 也要看取消标志：主线程只是不再收成果，光靠它 break 的话
+                // 剩下的目录照样被各 worker 扫完，取消等于没生效。
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some((fname, path)) = subdirs.get(i) else { return };
                 if tx.send(scan_one_subdir(fname, path)).is_err() { return; }
@@ -316,6 +330,9 @@ fn build_pools_parallel(
         drop(tx);
         let mut done = 0usize;
         for local in rx {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
             merge_into(recursive_pools, local);
             done += 1;
             progress(done, total);
@@ -328,12 +345,13 @@ fn build_pools(
     subdirs: &[(String, PathBuf)],
     recursive_pools: &mut BTreeMap<String, BTreeSet<String>>,
     progress: &mut dyn FnMut(usize, usize),
+    cancel: &AtomicBool,
 ) {
     let threads = scan_threads(subdirs.len());
     if threads <= 1 {
-        build_pools_sequential(subdirs, recursive_pools, progress);
+        build_pools_sequential(subdirs, recursive_pools, progress, cancel);
     } else {
-        build_pools_parallel(subdirs, recursive_pools, progress, threads);
+        build_pools_parallel(subdirs, recursive_pools, progress, threads, cancel);
     }
 }
 
@@ -342,15 +360,19 @@ fn build_pools(
 /// 留这个无进度版只是让测试少写一个空回调，故标 cfg(test) 免得在发布构建里报 dead_code。
 #[cfg(test)]
 pub fn scan_pack(img_dir: &str) -> Result<PackScan, String> {
-    scan_pack_progress(img_dir, &mut |_, _| {})
+    scan_pack_progress(img_dir, &mut |_, _| {}, &AtomicBool::new(false))
 }
 
 /// 同 `scan_pack`，额外把「已扫完第 n 个 / 共 total 个一级子目录」上报给进度回调。
 /// 【为何以一级子目录为进度单位】第一趟只列目录拿到分母、第二趟逐个扫（每个含整棵子树），
 /// 不必为算进度多遍历一遍磁盘，又让「扫描头像」的进度条真实反映工作量（标准二 14 目录 → 14 步）。
+/// `cancel` 置位即中止并返回 Err（替换流水线的取消要能在最耗时这一步生效；无取消入口的调用方
+/// 给一个恒为 false 的临时值即可）。半途而废的索引一律以 Err 抛出，绝不返回残缺的 PackScan——
+/// 那会被 classify 判成另一种布局，把「用户按了取消」说成「这个包不合法」。
 pub fn scan_pack_progress(
     img_dir: &str,
     progress: &mut dyn FnMut(usize, usize),
+    cancel: &AtomicBool,
 ) -> Result<PackScan, String> {
     let root = Path::new(img_dir);
     let mut faces_map = BTreeMap::new();
@@ -372,7 +394,12 @@ pub fn scan_pack_progress(
         }
     }
     // 第二趟：逐个一级子目录建递归池（目录够多时并行遍历，见 build_pools），每完成一个报一次进度。
-    build_pools(&subdirs, &mut recursive_pools, progress);
+    build_pools(&subdirs, &mut recursive_pools, progress, cancel);
+    // 取消检查放在合并之后、建索引之前：半途的 recursive_pools 缺目录，喂给 classify 会判出
+    // 另一个标准（甚至判成不合法），必须在这里就断掉，让调用方按「已取消」收场。
+    if cancel.load(Ordering::Relaxed) {
+        return Err("头像包扫描已取消".into());
+    }
     // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不再单独 read_dir：
     // 主池（标准二/三按 FolderList 过滤 faces_map）与兜底池（recursive_pools）是同一批图的两份索引，
     // 同源取值才保证两者逐字同键——否则词干规则一有分歧（历史上 "a.1.png" 在主池是 "a"、在兜底池是
@@ -407,7 +434,8 @@ pub fn scan_and_total_progress(
     folder_lists: &[(u8, &Vec<String>)],
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(usize, u8, PackScan), String> {
-    let scan = scan_pack_progress(img_dir, progress)?;
+    // 「扫描头像」命令没有取消入口（状态栏进度只报不做），给它一个恒为 false 的标志走同一条实现。
+    let scan = scan_pack_progress(img_dir, progress, &AtomicBool::new(false))?;
     let layout = classify_scan(&scan, folder_lists);
     let total = scan.total_for(&layout);
     Ok((total, layout.standard(), scan))
@@ -693,7 +721,7 @@ mod tests {
 
         // ② 与池无关的改动：替换收尾写 config.xml、生成备份、用户丢个 README —— 签名必须不变。
         std::fs::write(p.join("config.xml"), b"<y/>").unwrap();
-        std::fs::write(p.join("config备份_20260101-000000.xml"), b"<z/>").unwrap();
+        std::fs::write(p.join("config_backup_20260101-000000.xml"), b"<z/>").unwrap();
         std::fs::write(p.join("README.md"), b"md").unwrap();
         assert_eq!(stable_sig(p), s1, "非池文件不得影响签名");
 
@@ -750,11 +778,17 @@ mod tests {
             .collect();
 
         let mut seq: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        build_pools_sequential(&subdirs, &mut seq, &mut |_, _| {});
+        build_pools_sequential(&subdirs, &mut seq, &mut |_, _| {}, &AtomicBool::new(false));
 
         let mut par: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut seen: Vec<(usize, usize)> = Vec::new();
-        build_pools_parallel(&subdirs, &mut par, &mut |d, t| seen.push((d, t)), 4);
+        build_pools_parallel(
+            &subdirs,
+            &mut par,
+            &mut |d, t| seen.push((d, t)),
+            4,
+            &AtomicBool::new(false),
+        );
 
         assert_eq!(par, seq, "并行扫盘结果必须与顺序扫盘逐字相同");
         // 每个一级目录都报一次进度，且最终走满（订阅方靠它把进度条推到区间右端）。
@@ -767,6 +801,31 @@ mod tests {
         assert_eq!(par.get("EECA").map(|s| s.iter().cloned().collect::<Vec<_>>()),
                    Some(vec!["f0".to_string()]));
         assert_eq!(par.get("African").map(|s| s.len()), Some(3));
+    }
+
+    #[test]
+    fn cancel_stops_pack_scan_and_never_returns_a_partial_index() {
+        // 取消检查点必须落在最耗时的这一步（冷扫整包实测 14.6–39 s）：
+        // 原来只有阶段之间有感，用户按取消后几十秒无反应 → 判定假死 → 强杀进程。
+        // 半途的索引尤其不能当结果返回——残缺的目录集会把包判成另一个标准。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for d in ["African", "Asian", "Caucasian"] {
+            std::fs::create_dir_all(p.join(d)).unwrap();
+            std::fs::write(p.join(d).join("f0.png"), b"png").unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let err = scan_pack_progress(
+            p.to_str().unwrap(),
+            &mut |done, _total| {
+                if done >= 1 {
+                    cancel.store(true, Ordering::Relaxed); // 扫完第一个目录就请求取消
+                }
+            },
+            &cancel,
+        )
+        .expect_err("取消后必须报错，而不是返回残缺索引");
+        assert!(err.contains("取消"), "{err}");
     }
 
     #[test]

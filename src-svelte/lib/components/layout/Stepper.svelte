@@ -1,8 +1,8 @@
 <!-- 顶部五步旅程引导：纯展示组件，完成态/当前态全部由后端快照派生，业务状态推进时自动点亮，绝不反向驱动业务。 -->
 <script lang="ts">
-  import { appStore } from "../stores/app.svelte";
-  import { t } from "../text";
-  import { icons } from "../icons";
+  import { appStore } from "../../stores/app.svelte";
+  import { t } from "../../text";
+  import { icons } from "../../ui/icons";
 
   /** 派生结果：current=当前步下标（0~4），doneUpTo=已完成步的最大下标（-1 表示尚无完成步）。 */
   const progress = $derived.by(() => {

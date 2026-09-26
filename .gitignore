@@ -69,3 +69,4 @@ $RECYCLE.BIN/
 .env.*.local
 .env.development
 .env.production
+docs/architecture

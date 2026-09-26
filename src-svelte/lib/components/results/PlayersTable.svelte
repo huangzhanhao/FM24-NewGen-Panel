@@ -2,14 +2,15 @@
      判据与快照预览同款：后端名单缓存还没被填上（既没「扫描RTF」也没跑过替换）时不渲染工具条
      （搜索框/筛选/分页器），只留引导空态。 -->
 <script lang="ts">
-  import { api } from "../api";
-  import { appStore } from "../stores/app.svelte";
-  import { createAvatarBlobs } from "../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
-  import { t } from "../text"; // 全局文案常量
-  import { icons } from "../icons";
+  import { api } from "../../services/api";
+  import { showError } from "../../ui/dialog"; // 查询失败要弹窗（原来裸 await 的 rejection 会静默吞掉错误）
+  import { appStore } from "../../stores/app.svelte";
+  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
+  import { t } from "../../text"; // 全局文案常量
+  import { icons } from "../../ui/icons";
   import TablePager from "./TablePager.svelte"; // 分页器（与快照预览共用）
-  import AvatarThumb from "./AvatarThumb.svelte"; // 头像缩略图 + 放大气泡（与快照预览共用）
-  import type { PageResult, PlayerRecord } from "../types";
+  import AvatarThumb from "../shared/AvatarThumb.svelte"; // 头像缩略图 + 放大气泡（与快照预览共用）
+  import type { PageResult, PlayerRecord } from "../../types";
 
   const PAGE_SIZE = 8; // 每页条数（单页最多 8 行）
   let page = $state(0); // 当前页码（从 0 开始）
@@ -39,16 +40,29 @@
   // 未填充过时工具条（搜索框/筛选/分页器）整块不渲染，只留引导空态。
   const readable = $derived(appStore.rosterReady);
 
+  let queryToken = 0; // 分页查询令牌：翻页/改筛选会乱序返回，过期响应不得写回 result
   /** 拉当前页数据（把页码/搜索/随机人筛选/排序传给后端）。 */
   async function load() {
-    result = await api.queryPlayers({
-      offset: page * PAGE_SIZE,
-      limit: PAGE_SIZE,
-      search,
-      sortKey,
-      sortDesc,
-      newgan: newganQuery === "any" ? null : newganQuery === "yes",
-    });
+    const token = ++queryToken;
+    try {
+      const got = await api.queryPlayers({
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+        search,
+        sortKey,
+        sortDesc,
+        newgan: newganQuery === "any" ? null : newganQuery === "yes",
+      });
+      // 期间又发起了新的查询：这份过期结果整份作废（连头像也别取——它读的是同一批 UID）。
+      // 不拦的话表体停在第 N 页、分页器却显示第 M 页，用户按页码翻回去还是错的。
+      if (token !== queryToken) return;
+      result = got;
+    } catch (e) {
+      if (token !== queryToken) return;
+      result = null;
+      await showError(e);
+      return;
+    }
     void loadAvatars(); // 本页头像另走一次批量查询（路径出处是后端快照/映射缓存）
   }
   // 名单版本变化（「扫描RTF」成功 / 替换结束）：回到第 1 页并清空搜索、排序、随机人筛选。
@@ -64,6 +78,7 @@
     newganFilter = "any";
     blobs.clear(); // 旧名单的缩略图一并回收（新名单的图在 load() 后重取）
     avatarPaths = {};
+    queryToken++; // 使仍在途的旧名单分页响应作废（换名单后它不该再把上一页塞回表体）
     avatarToken++; // 使仍在途的旧名单路径响应作废（不能只靠 clear，它在途完成还会回写）
   });
 
@@ -135,6 +150,7 @@
   let avatarToken = 0; // 路径查询令牌：翻页/换名单后使在途的旧响应作废
   const blobs = createAvatarBlobs(); // 本页缩略图的 blob 账（翻页换代、卸载回收都在其内部）
 
+  let avatarError = $state(""); // 批量取路径失败的原因（挂在「头像」列头提示，见 loadAvatars）
   /** 取当前页头像：批量问后端要路径，再交给 blob 加载器读成可显示的缩略图。 */
   async function loadAvatars() {
     const token = ++avatarToken;
@@ -142,19 +158,25 @@
     // 空页或基础名单（非拓展格式，表格不渲染头像列）：只回收上一批，不必往返。
     if (items.length === 0 || !items.some((r) => r.detailed)) {
       avatarPaths = {};
+      avatarError = "";
       blobs.clear();
       return;
     }
     let paths: Record<string, string | null>;
     try {
       paths = await api.queryAvatars(items.map((r) => r.uid));
-    } catch {
-      // 头像列是辅助展示：取数失败就留白（也不弹窗），但不留上一批的旧图。
+    } catch (e) {
+      // 头像列是辅助展示：取数失败就留白（也不弹窗抢焦点），但不留上一批的旧图。
+      // 【批级失败必须留痕】单张图取不到本来就静默，所以「命令挂了/载荷形状变了/没选头像包」
+      // 与「这份名单真的没脸」绝不能长成同一个样子——否则整列空了，用户没有任何线索可查。
+      // 逐图静默保留，只在列头上挂一句原因。
       avatarPaths = {};
+      avatarError = String(e);
       blobs.clear();
       return;
     }
     if (token !== avatarToken) return; // 期间已翻页/换名单：过期结果直接丢弃，不建 URL
+    avatarError = "";
     avatarPaths = paths;
     // 只有确实找到图的条目才交给加载器；无映射/图片不在包内的留在占位。
     const wanted: Record<string, string> = {};
@@ -314,7 +336,17 @@
             <!-- 仅拓展名单渲染第 8 列起；顺序：肤色/头像/随机人/性别/年龄/身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A。 -->
             {#if hasDetailed}
               <th class="static c">{t.table.colSkin}</th>
-              <th class="static c">{t.table.colAvatar}</th>
+              <th
+                class="static c"
+                title={avatarError
+                  ? t.table.avatarFailHint(avatarError)
+                  : undefined}
+              >
+                {t.table.colAvatar}{#if avatarError}<span
+                    class="avatar-warn"
+                    aria-hidden="true">!</span
+                  >{/if}
+              </th>
               <th class="static c">{t.table.colNewgan}</th>
               {#if hasGender}<th class="static c">{t.table.colGender}</th>{/if}
               <th class="static c">{t.table.colAge}</th>
@@ -387,12 +419,15 @@
 </div>
 
 <style>
-  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（粘顶表头在其中生效） */
+  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（粘顶表头在其中生效）。
+     min-width:0：18 列宽表格首次挂载时，宽度约束在本层即被截断，
+     只允许 .table-scroll 内部横向滚动，不把 .card-body / 网格列撑宽。 */
   .table-pane {
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    min-width: 0;
     gap: 2px;
   }
   /* 随机人筛选：横向排列的“标签+下拉”，下拉用紧凑尺寸（全局 select 默认 width:100%） */
@@ -449,6 +484,13 @@
   th.c,
   td.c {
     text-align: center;
+  }
+  /* 头像列批量取数失败的角标：整列留白看不出是「名单真没脸」还是「取不到」，
+     原因挂在列头 title 上，这里给一个可见的落点。 */
+  .avatar-warn {
+    color: var(--warn);
+    font-weight: 700;
+    margin-left: 3px;
   }
 
   /* 头像格（AvatarThumb）：去掉上下内边距后 30px 的缩略图不超过文本格的盒子（约 32px），

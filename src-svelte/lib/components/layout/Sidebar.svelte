@@ -2,14 +2,14 @@
 <script lang="ts">
   import { open, ask } from "@tauri-apps/plugin-dialog"; // open=选目录；ask=确认框
   import { openUrl } from "@tauri-apps/plugin-opener"; // 用默认浏览器打开外部链接
-  import { api } from "../api";
-  import { showError } from "../dialog";
-  import { t } from "../text"; // 全局文案常量
-  import { appStore, applySnapshot } from "../stores/app.svelte";
-  import { ui, toggleTheme } from "../stores/ui.svelte";
-  import { icons } from "../icons";
+  import { api } from "../../services/api";
+  import { showError } from "../../ui/dialog";
+  import { t } from "../../text"; // 全局文案常量
+  import { appStore, applySnapshot } from "../../stores/app.svelte";
+  import { ui, toggleTheme } from "../../stores/ui.svelte";
+  import { icons } from "../../ui/icons";
   // Vite 静态资源导入：打包后得到带哈希的图片 URL（app-icon.png 在项目根）。
-  import brandLogo from "../../../app-icon.png";
+  import brandLogo from "../../../../app-icon.png";
 
   let newProfileName = $state(""); // 新建存档输入框的值
   let creating = $state(false); // 是否展开“新建存档”行
@@ -46,14 +46,22 @@
 
   /** 下拉选择 = 仅浏览（组列表/当前任务卡随选中项刷新展示），不切换后端当前档；
       需要点「激活」按钮才真正切换。失败时把下拉选中项回退。 */
+  let previewToken = 0; // 预览令牌：快速连点下拉时，先发的响应不能盖掉后选的档
   async function onSelectChange() {
     const target = profileSelect?.value;
     const prev = appStore.selectedProfile;
     if (!target || target === prev) return;
     appStore.selectedProfile = target;
+    const token = ++previewToken;
     try {
-      appStore.profilePreview = await api.previewProfile(target);
+      const got = await api.previewProfile(target);
+      // 【为什么要令牌】下拉里连点两下（档A→档B）时两个请求会乱序返回：
+      // profilePreview 停在档A 的组/RTF/快照路径，而 selectedProfile 显示档B——
+      // 「读取快照」按这份 preview 的路径去读，读的就是**另一个档**的档景。
+      if (token !== previewToken) return;
+      appStore.profilePreview = got;
     } catch (e) {
+      if (token !== previewToken) return; // 已被更新的预览取代：这条错也不再打扰用户
       appStore.selectedProfile = prev; // 预览失败：回退选中项
       appStore.profilePreview = null;
       await showError(e);

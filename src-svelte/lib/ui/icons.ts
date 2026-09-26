@@ -3,7 +3,7 @@
  *
  * 所有图标都是 24×24 的线性 SVG，stroke 使用 currentColor（跟随文字颜色），便于统一线宽与圆角风格，
  * 一处改图标全站生效。用法（在 .svelte 文件里）：
- *   import { icons } from '../icons';
+ *   import { icons } from '../../ui/icons';
  *   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
  *        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
  *        aria-hidden="true">{@html icons.folder.body}</svg>

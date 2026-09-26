@@ -145,6 +145,12 @@ export const t = {
       `标准${standard} 缺少 ${count} 个目录，自动创建并继续？`,
     unknownTitle: '无法识别的结构',
     unknownConfirm: '头像包结构无法识别，替换时将把包内所有图片（含子/孙目录）随机分配，仍要继续？',
+    // 发起前预检（preflight_replace）：只有「生成」+ 本档档景非空时会走到这条确认。
+    preflightTask: '检查既有映射',
+    blankTitle: '将清空本档现有映射',
+    blankConfirm: (existing: number) =>
+      `「生成」模式不携带既有条目。若本次一条也没抽到（名单被筛空、UID 对不上、包里没有图），\n` +
+      `会用空表覆盖本档现有的 ${existing} 条映射。\n\n确认仍要这样执行？`,
   },
 
   /** 结果区顶部 Tab */
@@ -176,6 +182,8 @@ export const t = {
     colEth: '种族',
     colSkin: '肤色',
     colAvatar: '头像',
+    /** 批量取头像失败时挂在「头像」列表头提示上（逐图取不到仍是静默留白，那本来就是正常情况）。 */
+    avatarFailHint: (why: string) => `头像取数失败（${why}），本列留空；这不是「名单里没有脸」`,
     colNewgan: '随机人',
     colGender: '性别',
     colAge: '年龄',

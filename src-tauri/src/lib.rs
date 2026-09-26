@@ -28,7 +28,7 @@ use logger::{LogMemory, LogSink, Logger};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::Manager; // app.handle() 取句柄（交给日志批推线程）
 use tauri_plugin_log::{fern, RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// 便携化数据目录：开发调试 → 项目根目录 data/；正式分发 → 可执行文件所在目录 data/
@@ -52,15 +52,22 @@ fn portable_data_dir() -> Result<PathBuf, String> {
     }
 }
 
-/// 把 v1 的用户数据（.user/）迁移到便携数据目录（首次运行、目标缺失时）
+/// 把 v1 的用户数据（.user/）迁移到便携数据目录（首次运行、目标缺失时）。
 /// v1 便携模式在 <exe>/data，标准模式在 %LOCALAPPDATA%/NewGAN Manager
 ///
 /// 本项目从旧版（Python v1）重写而来，老用户升级后需要把以前的配置自动搬到新位置，
 /// 避免重新配置；仅在「新目录还没有数据」时才搬。
-fn migrate_legacy_user_data(data_dir: &std::path::Path) -> Result<(), String> {
-    // 新位置已有 .user/cfg.json：迁移过或本来就是新用户，不覆盖。
-    if data_dir.join(".user").join("cfg.json").exists() {
-        return Ok(());
+///
+/// 【迁移失败绝不阻断启动】原来第一个 IO 错误就用 `?` 抛出 `.setup()` → Tauri 起不来 →
+/// 发布版没有控制台、用户看到的是「程序打不开」。现在一律记警告后继续跑：v1 原件仍在原处，
+/// 用户可以手工拷贝，也可以下次启动重试。
+/// 【为什么先写暂存目录再 rename】原来「已迁移」只看 cfg.json 是否存在，而 NTFS 目录读序
+/// 大致按字母——拷贝到一半失败时 cfg.json 往往已经落位，下次启动就直接宣布「迁移完成」，
+/// 带着静默缺失的 v1 数据继续跑。暂存目录 + 一次性 rename 让「就位」要么整体发生要么没发生。
+fn migrate_legacy_user_data(data_dir: &std::path::Path) {
+    let dst = data_dir.join(".user");
+    if is_migrated(&dst) {
+        return; // 已迁移过，或本来就是有数据的新用户：不覆盖
     }
     // 候选旧位置按优先级排列：先可执行文件旁的 data/.user，再 Windows 标准安装位置
     // %LOCALAPPDATA%/NewGAN Manager/.user（环境变量缺失时该候选为 None）。
@@ -75,12 +82,56 @@ fn migrate_legacy_user_data(data_dir: &std::path::Path) -> Result<(), String> {
     // 找到第一个真正含有 cfg.json 的旧目录，递归拷贝到新位置。
     for src in candidates.into_iter().flatten() {
         if src.join("cfg.json").is_file() {
-            let dst = data_dir.join(".user");
-            copy_dir_recursive(&src, &dst)?;
-            return Ok(());
+            migrate_from(&src, data_dir);
+            return;
         }
     }
-    Ok(()) // 所有候选都没有旧数据，也算成功（新用户本来就没有）
+    // 所有候选都没有旧数据：新用户本来就没有，什么都不做。
+}
+
+/// 迁移的核心一步：把 `src` 整体搬进 `data_dir/.user`（先写 `.user.migrating` 暂存，再一次 rename）。
+/// 【为什么单独成函数】上面那层要从环境变量/可执行文件位置里挑候选目录，测试不便插手；
+/// 这一层是纯路径参数，「绝不留下半个 .user」「绝不碰已有的 .user」两条都能直接校。
+fn migrate_from(src: &std::path::Path, data_dir: &std::path::Path) {
+    let dst = data_dir.join(".user");
+    let tmp = data_dir.join(".user.migrating");
+    // 上一次中断留下的暂存目录：里面只可能有本次迁移的副本，删掉重来才是正解。
+    if tmp.exists() {
+        log::warn!(target: "migrate", "清理上次未完成的迁移暂存目录：{}", tmp.display());
+        if let Err(e) = std::fs::remove_dir_all(&tmp) {
+            log::warn!(target: "migrate", "暂存目录清理失败，本次迁移放弃：{e}");
+            return;
+        }
+    }
+    if let Err(e) = copy_dir_recursive(src, &tmp) {
+        log::warn!(
+            target: "migrate",
+            "旧版数据迁移未完成（原件仍在 {}，本次启动按现有配置继续，下次启动会重试）：{e}",
+            src.display()
+        );
+        let _ = std::fs::remove_dir_all(&tmp); // 半成品整棵删掉，避免下次被当成完整数据
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        // dst 已存在（例如迁移失败后用户已在 v2 里新建过配置）：不覆盖、不合并，把暂存丢掉，
+        // v1 原件仍完整留在 src。这种并存的处置要用户自己决定，程序不该猜。
+        log::warn!(
+            target: "migrate",
+            "迁移结果无法就位（{} 已存在或不可写）：{e}；旧数据仍完整保留在 {}，本次启动按现有配置继续",
+            dst.display(),
+            src.display()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    } else {
+        log::info!(target: "migrate", "旧版数据迁移完成：{} → {}", src.display(), dst.display());
+    }
+}
+
+/// 「迁移已完成」的判据：存档索引与档名表都在。
+/// 【为什么不能只看 cfg.json】它恰好是拷贝时最先落位的文件之一，半途失败时它已在、
+/// profiles.json 却还没搬过来——按老口径下次启动就再也看不出这份数据是残缺的。
+fn is_migrated(user_dir: &std::path::Path) -> bool {
+    user_dir.join("cfg.json").is_file() && user_dir.join("profiles.json").is_file()
 }
 
 /// 递归拷贝整个目录（含子目录和文件）。Rust 标准库没有现成的「拷目录」，故手写。
@@ -104,6 +155,8 @@ pub fn run() {
     // 数据目录必须先于插件装配确定：日志文件的 Folder target 在 .plugin() 注册时就要用到它
     // （插件 setup 先于应用 setup 运行，全局 logger 在应用 setup 第一行日志前已就位）。
     let data_dir = portable_data_dir().expect("无法定位便携数据目录");
+    // 「正在替换」标志：交给 AppState 做重入保护与界面禁用（setup 里托管时用同一份 Arc）。
+    let running = Arc::new(AtomicBool::new(false));
     // 内存环形缓冲 + 事件通道（logger.rs 自研补齐的部分）：Arc 一份给插件 fern 闭包，
     // 一份给 setup 里的 Logger；接收端最后交给后台聚批线程。
     let (memory, log_rx) = LogMemory::channel();
@@ -167,12 +220,18 @@ pub fn run() {
                 ])
                 .build(),
         )
+        // 关窗不做任何拦截：× 直接退出（Tauri 默认行为）。替换中的 config.xml 与档景快照都走
+        // tmp+rename 原子落盘，进程退出时正式文件要么旧要么新，不会有半截映射表。
         // .setup(...) 在应用启动、窗口创建前执行一次初始化。
-        .setup(|app| {
+        // 【move 捕获】Tauri 要求该闭包 'static，故把 data_dir / logger / running 等句柄的
+        // 所有权交给它。
+        .setup(move |app| {
             // 1) 便携数据目录（路径已在 run() 顶部确定，这里只补建目录）。
             std::fs::create_dir_all(&data_dir)?;
-            // 2) 尝试把旧版数据迁移过来（首次运行时）。
-            migrate_legacy_user_data(&data_dir)?;
+            // 2) 尝试把旧版数据迁移过来（首次运行时）。失败只记警告，绝不阻断启动。
+            //    这里用 log 门面而不是 Logger：官方日志插件在 setup 之前已装好全局 logger，
+            //    自研 Logger 门面要到第 4 步才建起来，而迁移的失败恰恰必须被看见。
+            migrate_legacy_user_data(&data_dir);
 
             // 3) 主窗口编程式创建（而非在 tauri.conf.json 里声明）：
             // 只有 Builder API 能指定 WebView2 数据目录为绝对路径，把浏览器缓存/localStorage
@@ -218,7 +277,7 @@ pub fn run() {
                 pm: Mutex::new(pm),                              // 存档管理器（互斥锁保护）
                 logger: logger.clone(),                          // 日志器（Arc 共享）
                 cancel: Arc::new(AtomicBool::new(false)),        // 「请求取消」标志
-                running: Arc::new(AtomicBool::new(false)),       // 「正在替换」标志
+                running: Arc::clone(&running), // 「正在替换」标志
                 rtf_cache: Arc::new(Mutex::new(Vec::new())),     // 最近一次解析的 RTF 球员缓存
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)), // 「扫描头像」的包索引缓存（初始为空）
@@ -251,6 +310,7 @@ pub fn run() {
             commands::preview_profile, // 预览指定存档（下拉浏览展示，不切换当前档）
             commands::read_rule_file,  // 读取标准规则文件内容（规则编辑对话框）
             commands::save_rule_file,  // 保存标准规则文件（先校验 schema 再原子写回）
+            commands::preflight_replace, // 发起前预检：本次会不会清空本档既有映射（需要就先弹确认）
             commands::start_replace,   // 启动批量替换（后台线程）
             commands::cancel_replace,  // 请求取消正在进行的替换
             commands::query_players,   // 分页查询名单（预览）
@@ -266,4 +326,64 @@ pub fn run() {
         // .run(...) 启动事件循环，阻塞直到窗口关闭；启动失败直接 panic。
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一份 v1 形状的 .user：存档索引 + 档名表 + 一个档的子目录。
+    fn v1_fixture(src: &Path) {
+        std::fs::create_dir_all(src.join("档A")).unwrap();
+        std::fs::write(src.join("cfg.json"), r#"{"prf":"档A"}"#).unwrap();
+        std::fs::write(src.join("profiles.json"), r#"{"Profile":{"档A":true}}"#).unwrap();
+        std::fs::write(src.join("档A").join("档A.json"), r#"{"img_dir":"C:\\pack"}"#).unwrap();
+    }
+
+    #[test]
+    fn migrate_from_moves_the_whole_tree_and_leaves_no_temp_dir() {
+        let data = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        v1_fixture(src.path());
+        migrate_from(src.path(), data.path());
+
+        let dst = data.path().join(".user");
+        assert!(dst.join("cfg.json").is_file(), "存档索引没搬过来");
+        assert!(dst.join("profiles.json").is_file(), "档名表没搬过来");
+        assert!(
+            dst.join("档A").join("档A.json").is_file(),
+            "档子目录里的 json 没搬过来（递归拷贝漏了）"
+        );
+        assert!(!data.path().join(".user.migrating").exists(), "暂存目录没清掉");
+        // 原件留在原地：迁移是「搬一份副本过来」，不是「搬走」——失败时用户的数据必须还在。
+        assert!(src.path().join("cfg.json").is_file());
+    }
+
+    #[test]
+    fn migrate_from_never_touches_an_existing_user_dir() {
+        // 迁移半途失败后用户已在 v2 里新建过配置：.user 已存在（残缺），绝不能被覆盖或合并。
+        let data = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        v1_fixture(src.path());
+        let dst = data.path().join(".user");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("cfg.json"), "v2 自己的内容").unwrap();
+
+        migrate_from(src.path(), data.path());
+
+        assert_eq!(std::fs::read_to_string(dst.join("cfg.json")).unwrap(), "v2 自己的内容");
+        assert!(!dst.join("profiles.json").is_file(), "不该把 v1 的文件补进 v2 的数据里");
+        assert!(!data.path().join(".user.migrating").exists(), "失败路径也要清掉暂存目录");
+    }
+
+    #[test]
+    fn half_populated_user_dir_is_not_declared_migrated() {
+        // 老口径只看 cfg.json：而它是拷贝时最先落位的文件之一 → 半途失败会被当成「已完成」，
+        // 从此再没人知道这份数据缺了 profiles.json 和各档的 json。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cfg.json"), "{}").unwrap();
+        assert!(!is_migrated(dir.path()));
+        std::fs::write(dir.path().join("profiles.json"), "{}").unwrap();
+        assert!(is_migrated(dir.path()));
+    }
 }

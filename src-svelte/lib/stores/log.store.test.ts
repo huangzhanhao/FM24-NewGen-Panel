@@ -1,6 +1,6 @@
 /** logStore 的单元测试：环形缓冲上限与级别过滤口径（与后端 logger.query 一致）。 */
 import { describe, expect, it } from 'vitest';
-import { appendLogBatch, filterLines, logStore } from './stores/log.svelte';
+import { appendLogBatch, filterLines, logStore } from './log.svelte';
 
 describe('logStore', () => {
   it('超出上限时保留最新一万条', () => {

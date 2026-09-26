@@ -8,8 +8,8 @@
      - path（图片绝对路径）为空 = 没找到图，渲染占位符。
      - path 变化（同一 UID 换了图）时用 {#key} 重建气泡：否则气泡缓存里会留着旧图。 -->
 <script lang="ts">
-  import { loadImageBlobUrl } from "../images";
-  import { t } from "../text"; // 全局文案常量
+  import { loadImageBlobUrl } from "../../services/images";
+  import { t } from "../../text"; // 全局文案常量
   import AvatarPopover, {
     type AvatarEntry,
     type AvatarPopoverApi,

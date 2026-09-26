@@ -5,15 +5,15 @@
      头像的「读字节 → 建 blob → 回收」走共用的 createAvatarBlobs，缩略图与放大气泡走共用的
      AvatarThumb（两处都与名单预览同一份实现，本组件只把路径交出去）。 -->
 <script lang="ts">
-  import { api } from '../api';
-  import { appStore } from '../stores/app.svelte';
-  import { createAvatarBlobs } from '../avatarBlobs.svelte'; // 头像 blob 加载器（三个标签页共用）
-  import { t } from '../text'; // 全局文案常量
-  import { showError } from '../dialog';
-  import { icons } from '../icons';
+  import { api } from '../../services/api';
+  import { appStore } from '../../stores/app.svelte';
+  import { createAvatarBlobs } from '../../avatarBlobs.svelte'; // 头像 blob 加载器（三个标签页共用）
+  import { t } from '../../text'; // 全局文案常量
+  import { showError } from '../../ui/dialog';
+  import { icons } from '../../ui/icons';
   import TablePager from './TablePager.svelte'; // 分页器（与名单预览共用）
-  import AvatarThumb from './AvatarThumb.svelte'; // 头像缩略图 + 放大气泡（与名单预览共用）
-  import type { PageResult, SnapshotEntry } from '../types';
+  import AvatarThumb from '../shared/AvatarThumb.svelte'; // 头像缩略图 + 放大气泡（与名单预览共用）
+  import type { PageResult, SnapshotEntry } from '../../types';
 
   const PAGE_SIZE = 8;        // 每页条数（头像图同页加载：一次最多 8 张）
   let page = $state(0);       // 当前页码（从 0 开始）
@@ -29,10 +29,12 @@
   const readable = $derived(!!xmlPath && xmlPath === appStore.snapshotReadPath);
   const totalPages = $derived(result ? Math.max(1, Math.ceil(result.total / PAGE_SIZE)) : 1);
 
+  let queryToken = 0; // 分页查询令牌：切档/翻页的在途响应不得写回当前展示的结果
   // 快照路径变化或重新「读取快照」：回到第 1 页、清空筛选并释放图片（新数据从头看）。
   // 只读这两个依赖，刻意不读 readable——读取成功瞬间不能把刚要展示的数据清掉。
   $effect(() => {
     void xmlPath; void appStore.snapshotVersion;
+    queryToken++; // 上一个快照的分页查询若在途，回来时直接作废
     result = null;
     page = 0;
     search = '';
@@ -50,11 +52,18 @@
   /** 拉当前页数据（UID 筛选 + 分页），随后只为本页条目加载头像图。 */
   async function load() {
     if (!readable) return;
+    const token = ++queryToken;
+    const wantPath = xmlPath; // 发出请求时的快照路径：返回时展示档可能已经换了
     try {
-      result = await api.querySnapshot(xmlPath, imgDir, {
+      const got = await api.querySnapshot(xmlPath, imgDir, {
         offset: page * PAGE_SIZE, limit: PAGE_SIZE, search,
       });
+      // 【为什么要令牌】切档连点时两个 querySnapshot 会乱序返回：晚到的旧档结果会盖在
+      // 新档的表格上，而头像又按这份结果去读——展示的会是别档的映射。
+      if (token !== queryToken || wantPath !== xmlPath) return;
+      result = got;
     } catch (e) {
+      if (token !== queryToken || wantPath !== xmlPath) return;
       await showError(e);
       result = { total: 0, items: [] };
       return;
@@ -138,8 +147,9 @@
 </div>
 
 <style>
-  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（与名单预览一致） */
-  .table-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 2px; }
+  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（与名单预览一致）。
+     min-width:0：宽表格只在 .table-scroll 内部横滚，不向上撑宽卡片与网格列。 */
+  .table-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; gap: 2px; }
   /* 头像格（AvatarThumb）：去掉上下内边距后 30px 的缩略图不超过文本格的盒子（约 32px），
      行高因此始终与名单预览的文本行一致，不会因图片被撑高 */
   td.imgcell { padding-top: 0; padding-bottom: 0; }

@@ -3,8 +3,8 @@
   import PlayersTable from './PlayersTable.svelte';
   import PlayerViewer from './PlayerViewer.svelte';
   import SnapshotPreview from './SnapshotPreview.svelte';
-  import { t } from '../text'; // 全局文案常量
-  import { appStore } from '../stores/app.svelte';
+  import { t } from '../../text'; // 全局文案常量
+  import { appStore } from '../../stores/app.svelte';
 
   // 当前 Tab 存全局态（appStore.resultsView）：「读取快照」成功后要从当前任务卡跨组件切过来。
   const view = $derived(appStore.resultsView);

@@ -3,10 +3,10 @@
      保存时后端先按该标准 schema 校验（非法 JSON 直接报错，不会写入坏规则）。 -->
 <script lang="ts">
   import { ask } from '@tauri-apps/plugin-dialog';
-  import { api } from '../api';
-  import { showError } from '../dialog';
-  import { t } from '../text'; // 全局文案常量
-  import { appStore, refreshSnapshot } from '../stores/app.svelte';
+  import { api } from '../../services/api';
+  import { showError } from '../../ui/dialog';
+  import { t } from '../../text'; // 全局文案常量
+  import { appStore, refreshSnapshot } from '../../stores/app.svelte';
 
   type RuleName = 'standard2' | 'standard3';
   const LABELS: Record<RuleName, string> = {
@@ -38,10 +38,18 @@
   /** 载入指定标准的规则文件内容，并把当前内容记为 baseline（用于判断有无未保存修改）。 */
   async function load(name: RuleName) {
     try {
-      text = await api.readRuleFile(name);
-      baseline = text;
+      const got = await api.readRuleFile(name);
+      // 【必须校验 active】快速连点两个标准 chip 时两个请求会乱序返回：
+      // 晚到的 standard3 内容会盖进编辑区，用户一按保存就把它写进 standard2.json
+      //（后端只校目标文件的 schema 形状，语义错的内容照样被原子写入）。
+      if (name !== active) return;
+      text = got;
+      baseline = got;
       status = '';
-    } catch (e) { await showError(e); }
+    } catch (e) {
+      if (name !== active) return; // 已被别的标准取代，这条错误不该再弹
+      await showError(e);
+    }
   }
 
   /** 切换标准；有未保存修改时先弹确认，用户放弃才切换。 */

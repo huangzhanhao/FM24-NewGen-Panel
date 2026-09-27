@@ -21,12 +21,17 @@ export const imageaiStore = $state({
   templateId: 'default',
   prompt: '',
   negative: '',
-  size: '1024x1024',
+  // 默认 350x350（验收反馈）：不在任何模型预设里时 UI 自动落「自定义…」，宽高输入显示 350/350。
+  size: '350x350',
   n: 1,
   quality: 'auto',
   seed: '',
   generating: false,
   results: [] as GeneratedImage[],
+
+  /** 会话内「已设置 Key」指示（id → 是否已设置）。Key 本体只进后端会话内存、后端不回传，
+   *  这里仅记录设置过与否，供顶栏输入框占位与「已设置」徽标展示；不持久化，刷新即清。 */
+  keysSet: {} as Record<string, boolean>,
 
   // ---- 批量生成队列（P2）：queue 是后端快照的镜像，唯一写入方是 setQueue ----
   queue: [] as QueueEntry[],
@@ -63,16 +68,24 @@ export async function loadImageState() {
 export function selectProvider(id: string) {
   imageaiStore.providerId = id;
   imageaiStore.model = imageaiStore.provider?.defaultModel ?? '';
-  imageaiStore.size = imageaiStore.modelInfo?.capabilities.sizes[0] ?? '1024x1024';
+  imageaiStore.size = imageaiStore.modelInfo?.capabilities.sizes[0] ?? '350x350';
   imageaiStore.n = 1;
   imageaiStore.seed = '';
   imageaiStore.quality = 'auto';
 }
 
+/** 写当前服务商的 API Key（顶栏直达与服务商设置弹窗共用的入口）：
+ *  Key 仅进后端会话内存（set_provider_key），成功后标记本会话「已设置」。 */
+export async function setProviderKey(id: string, key: string) {
+  await api.setProviderKey(id, key);
+  imageaiStore.keysSet[id] = true;
+}
+
 export function selectModel(model: string) {
   imageaiStore.model = model;
   const caps = imageaiStore.modelInfo?.capabilities;
-  if (caps && !caps.sizes.includes(imageaiStore.size)) imageaiStore.size = caps.sizes[0] ?? imageaiStore.size;
+  // 尺寸不随模型切换重置：原尺寸不在新模型预设里时保持现值（UI 自动落「自定义…」），
+  // 用户可能是有意沿用自定义尺寸，不要悄悄改掉。
   if (caps && imageaiStore.n > caps.maxN) imageaiStore.n = caps.maxN;
 }
 

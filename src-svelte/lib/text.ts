@@ -132,6 +132,11 @@ export const t = {
     toggleNegative: '负向提示词',
     negative: '负向提示词（模型不支持时仅记录不发送）',
     size: '尺寸',
+    // 尺寸下拉末尾的「自定义…」项 + 宽高输入与提醒（选中后显示）
+    sizeCustom: '自定义…',
+    sizeWLabel: '宽',
+    sizeHLabel: '高',
+    sizeCustomHint: '自定义尺寸厂商可能拒绝，生成失败时请改用上方预设尺寸。',
     n: '张数',
     quality: '质量',
     seed: 'Seed',
@@ -148,6 +153,11 @@ export const t = {
     // 服务商设置
     keyLabel: 'API Key（仅本会话记忆，不落盘）',
     keySetHint: '已输入，如需更换请重新填写',
+    // 顶栏直达的 Key 掩码输入（与服务商设置里的 pv-key 各自独立，均可设 Key）
+    keyBarLabel: 'API Key',
+    keyBarPlaceholder: '输入当前服务商的 Key，仅本会话记忆，不落盘',
+    keyBarSetPlaceholder: '已设置（不回显），如需更换请重新输入',
+    keySetBadge: '已设置',
     baseUrl: '接口地址 Base URL',
     kind: '类型',
     providerIdLabel: 'ID',

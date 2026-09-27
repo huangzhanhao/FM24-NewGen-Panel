@@ -110,3 +110,68 @@ export interface SnapshotEntry { uid: string; relPath: string; imagePath: string
 
 /** 一行日志（对应 Rust 的 LogLine）。 */
 export interface LogLine { ts: string; level: string; module: string; message: string; }
+
+export type ProviderKindCode = 'openai' | 'volcano' | 'dashscope' | 'custom';
+
+export interface Capabilities {
+  sizes: string[]; maxN: number;
+  supportsQuality: boolean; supportsSeed: boolean; supportsSteps: boolean;
+  supportsNegativePrompt: boolean; supportsResponseFormat: boolean; qualities: string[];
+}
+
+export interface ModelInfo {
+  model: string; label: string; currency: string;
+  prices: Record<string, number>; capabilities: Capabilities;
+}
+
+export interface ProviderConfig {
+  id: string; kind: ProviderKindCode; name: string;
+  baseUrl: string; defaultModel: string; models: ModelInfo[];
+}
+
+/** 生图设置。historyLimit/concurrency/namingPattern 在 P1 只随文件读写、不参与逻辑（分别 P2/P2/P3 生效）。 */
+export interface GenSettings {
+  defaultProviderId: string; historyLimit: number; concurrency: number; namingPattern: string;
+}
+
+export interface PromptTemplate { id: string; name: string; body: string; negative: string; }
+
+export interface ImageConfig {
+  providers: ProviderConfig[]; settings: GenSettings;
+  templates: PromptTemplate[];
+  dictionary: Record<string, Record<string, string>>;
+}
+
+export interface GenRequest {
+  providerId: string; model: string; prompt: string; negativePrompt: string;
+  size: string; n: number; quality: string | null; seed: number | null;
+  /** P2 生效（steps 依赖支持该参数的适配器）；字段先落下，P1 恒不传。 */
+  steps?: number | null;
+  /** P3 生效（uid 依赖名单数据源）；字段先落下，P1 恒不传。 */
+  uid?: string | null;
+}
+
+/** render_prompt 的返回：渲染后文本 + 无值且无默认值的占位符键名。 */
+export interface RenderOutcome { text: string; missing: string[]; }
+
+export interface GenImage { id: string; path: string; bytes: number; }
+
+export interface GenResult {
+  images: GenImage[]; recordId: string; estimatedCost: number; currency: string;
+}
+
+export interface GeneratedImage { id: string; path: string; url: string; }
+
+export interface RealUsage { inputTokens: number; outputTokens: number; }
+
+export interface UsageRecord {
+  id: string; ts: string; providerId: string; providerName: string; kind: string;
+  model: string; size: string; n: number; seed: number | null; quality: string | null;
+  prompt: string; negativePrompt: string; estimatedCost: number; currency: string;
+  status: 'success' | 'failed'; error: string; realUsage: RealUsage | null;
+}
+
+export interface UsageQuery {
+  offset: number; limit: number; providerId: string; model: string;
+  status: string; date: string;
+}

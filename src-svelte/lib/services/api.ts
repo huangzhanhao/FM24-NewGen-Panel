@@ -7,8 +7,9 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, ImageScanResult, IntegrityResult, LogLine, PageResult, PlayerPreview,
-  PlayerQuery, PlayerRecord, PreflightResult, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery,
+  AppSnapshot, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
+  PageResult, PlayerPreview, PlayerQuery, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
+  RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery, UsageQuery, UsageRecord,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
@@ -65,4 +66,18 @@ export const api = {
   resolveAvatar: (avatar: string) => invoke<string | null>('resolve_avatar', { avatar }),
   queryLogs: (level: string, only: boolean, offset: number, limit: number) =>
     invoke<PageResult<LogLine>>('query_logs', { level, only, offset, limit }),
+  getImageAiState: () => invoke<ImageConfig>('get_image_ai_state'),
+  saveProvider: (provider: ProviderConfig) => invoke<ImageConfig>('save_provider', { provider }),
+  deleteProvider: (id: string) => invoke<ImageConfig>('delete_provider', { id }),
+  setProviderKey: (id: string, key: string) => invoke<void>('set_provider_key', { id, key }),
+  savePromptTemplate: (template: PromptTemplate) =>
+    invoke<ImageConfig>('save_prompt_template', { template }),
+  deletePromptTemplate: (id: string) => invoke<ImageConfig>('delete_prompt_template', { id }),
+  /** P1 无数据源：vars 不传（Rust 侧 `Option<HashMap>` → null 即 None），占位符全部取默认值。 */
+  renderPrompt: (body: string, vars?: Record<string, string>) =>
+    invoke<RenderOutcome>('render_prompt', { body, vars: vars ?? null }),
+  generateImage: (req: GenRequest) => invoke<GenResult>('generate_image', { req }),
+  saveGeneratedImage: (imageId: string, targetPath: string) =>
+    invoke<string>('save_generated_image', { imageId, targetPath }),
+  queryUsage: (query: UsageQuery) => invoke<PageResult<UsageRecord>>('query_usage', { query }),
 };

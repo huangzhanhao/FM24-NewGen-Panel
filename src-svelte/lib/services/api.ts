@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
   PageResult, PlayerPreview, PlayerQuery, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
-  RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery, UsageQuery, UsageRecord,
+  QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery, UsageQuery, UsageRecord,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
@@ -80,4 +80,11 @@ export const api = {
   saveGeneratedImage: (imageId: string, targetPath: string) =>
     invoke<string>('save_generated_image', { imageId, targetPath }),
   queryUsage: (query: UsageQuery) => invoke<PageResult<UsageRecord>>('query_usage', { query }),
+  // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
+  addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),
+  removeFromQueue: (ids: string[]) => invoke<QueueEntry[]>('remove_from_queue', { ids }),
+  clearQueue: () => invoke<QueueEntry[]>('clear_queue'),
+  startQueue: () => invoke<void>('start_queue'),
+  cancelQueue: () => invoke<void>('cancel_queue'),
+  queryQueue: () => invoke<QueueEntry[]>('query_queue'),
 };

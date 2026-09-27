@@ -188,6 +188,37 @@ export const t = {
     colStatus: '状态',
     ledgerTotal: '本页估算合计',
     count: (total: number) => `共 ${total} 条`,
+    // 生成队列（批量）
+    queue: {
+      tabQueue: '生成队列',
+      startBtn: '启动生成',
+      cancelBtn: '取消生成',
+      clearBtn: '清空队列',
+      removeBtn: '移除选中',
+      addBtn: (n: number) => `加入队列（${n}）`,
+      statusQueued: '排队中',
+      statusRunning: '生成中',
+      statusSuccess: '成功',
+      statusFailed: '失败',
+      colPlayer: '球员',
+      colDetail: '详情',
+      count: (total: number) => `共 ${total} 条`,
+      startConfirm: (n: number) => `开始批量生成 ${n} 个排队任务？将逐条调用服务商接口并产生费用。`,
+      cancelConfirm: '取消后未启动的条目将标记为已取消，正在生成的会跑完。确定取消？',
+      clearConfirm: (n: number) => `清空队列全部 ${n} 条条目？状态记录一并删除，无法恢复。`,
+      removeConfirm: (n: number) => `移除选中的 ${n} 条条目？`,
+      empty: '队列为空。在「名单预览」勾选球员后点「加入队列」，即可批量生成。',
+      enqueued: (n: number) => `已加入 ${n} 条生成任务`,
+      imagesDone: (n: number) => `生成 ${n} 张图`,
+      progressLabel: '批量生成进度',
+      finishedSummary: (finished: number, failed: number, total: number) =>
+        `批量生成结束：成功 ${finished} · 失败 ${failed} · 共 ${total} 条`,
+      // 复选框的读屏文案：队列条目（QueuePanel）与名单表格（PlayersTable）各一套
+      selectRowAria: (name: string) => `选择 ${name}`,
+      selectAllAria: '全选或取消本页条目',
+      selectPlayerAria: (name: string) => `选择球员 ${name}`,
+      selectAllPlayersAria: '全选或取消本页球员',
+    },
   },
 
   /** 「替换执行」面板 */

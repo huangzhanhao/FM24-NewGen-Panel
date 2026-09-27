@@ -4,7 +4,14 @@
 <script lang="ts">
   import { api } from "../../services/api";
   import { showError } from "../../ui/dialog"; // 查询失败要弹窗（原来裸 await 的 rejection 会静默吞掉错误）
+  import { message } from "@tauri-apps/plugin-dialog"; // 「加入队列」成功提示（与 ImageAiPanel 保存成功同款）
   import { appStore } from "../../stores/app.svelte";
+  import {
+    enqueuePlayers,
+    imageaiStore,
+    toggleSelect,
+    toggleSelectPage,
+  } from "../../stores/imageai.svelte"; // 勾选与批量入队（队列动作转发见 store）
   import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
   import { t } from "../../text"; // 全局文案常量
   import { icons } from "../../ui/icons";
@@ -129,6 +136,45 @@
     return "";
   }
 
+  // ---------------- 勾选列与「加入队列」（P2 Task5） ----------------
+  // 勾选状态存 imageaiStore.selectedInTable（key=uid，翻页/切组/换名单都不清空——勾选跟随球员）。
+  // 【按钮口径】「加入队列（N）」的 N 与可用性都按**当前页勾选数**：提交动作永远只针对用户
+  // 眼前这一页，语义最直白（store.selectedCount 是含跨页勾选的全局口径，不在这里用——
+  // 避免按钮显示 5 实际提交了别页 12 条的错位）。勾选本身跨页保留，翻回来仍是勾上的。
+  const pageSelectedCount = $derived(
+    result
+      ? result.items.filter((r) => imageaiStore.selectedInTable[r.uid]).length
+      : 0,
+  );
+  const allPageSelected = $derived(
+    (result?.items.length ?? 0) > 0 &&
+      result!.items.every((r) => imageaiStore.selectedInTable[r.uid]),
+  );
+  const somePageSelected = $derived(
+    !!result?.items.some((r) => imageaiStore.selectedInTable[r.uid]),
+  );
+
+  /** 表头全选/取消：只作用于当前页数据行（翻页后另一页不受影响）。 */
+  function onPageAll(v: boolean) {
+    toggleSelectPage(
+      (result?.items ?? []).map((r) => r.uid),
+      v,
+    );
+  }
+  /** 把当前页勾选的球员按工作台当前参数加入批量队列；成功后弹提示（条数）。 */
+  async function onEnqueue() {
+    const rows = (result?.items ?? [])
+      .filter((r) => imageaiStore.selectedInTable[r.uid])
+      .map((r) => ({ uid: r.uid, name: r.name }));
+    if (rows.length === 0) return;
+    try {
+      const n = await enqueuePlayers(rows);
+      await message(t.gen.queue.enqueued(n), { title: t.dialog.info });
+    } catch (e) {
+      await showError(e); // 缺模型/占位符未填充等组装错误也走统一弹窗
+    }
+  }
+
   // 第 15 列语义：按后端结构化协议码区分球员（所在地）/职员（偏好工作），不依赖中文展示文案。
   const isStaffRoster = $derived(
     appStore.lastRtfScan?.formatCode === "extStaff",
@@ -227,6 +273,15 @@
           aria-label={t.table.searchPlaceholder}
         />
       </div>
+      <!-- 加入队列：按当前页勾选数计数（见脚本内口径注释），无勾选时禁用。
+           名单缓存可读但本页无数据行时同样无勾选，禁用态即引导。 -->
+      <button
+        class="btn sm"
+        disabled={pageSelectedCount === 0}
+        onclick={onEnqueue}
+      >
+        {t.gen.queue.addBtn(pageSelectedCount)}
+      </button>
       <!-- 随机人筛选：仅拓展名单显示（默认「任意」）；切换后回到第 1 页再查询。 -->
       {#if isExtRoster}
         <label class="newgan-filter">
@@ -268,8 +323,10 @@
   {:else if result && result.items.length > 0}
     <div class="table-scroll">
       <table class="grid">
-        <!-- 列宽：长文本列（姓名/俱乐部/所在地）给宽余量吃剩余空间；码值/数值列收窄并居中。 -->
+        <!-- 列宽：长文本列（姓名/俱乐部/所在地）给宽余量吃剩余空间；码值/数值列收窄并居中。
+             首列是勾选框（P2 Task5）：不可排序、不参与筛选，宽度固定。 -->
         <colgroup>
+          <col class="w-sel" />
           <col class="w-uid" />
           <col class="w-nat" />
           <col class="w-nat2" />
@@ -297,6 +354,17 @@
                  role=button + tabindex=0 + onkeydown 让键盘用户也能排序。
                  排序键（'uid'/'primaryNat'/'name'/'ethnicityCode'）是发往后端的协议值，勿改。
                  static 类=不可排序列，默认光标；c 类=紧凑列居中。 -->
+            <!-- 首列：勾选框。表头复选 = 全选/取消当前页数据行（indeterminate 表达部分勾选）；
+                 aria-label 提供读屏文案（不造 label/for，避免为每行生成唯一 id）。 -->
+            <th class="static c sel-col">
+              <input
+                type="checkbox"
+                aria-label={t.gen.queue.selectAllPlayersAria}
+                checked={allPageSelected}
+                indeterminate={somePageSelected && !allPageSelected}
+                onchange={(e) => onPageAll(e.currentTarget.checked)}
+              />
+            </th>
             <th
               role="button"
               tabindex="0"
@@ -363,6 +431,14 @@
           <!-- 以 uid 为键，便于 Svelte 复用 DOM 行。 -->
           {#each result.items as r (r.uid)}
             <tr>
+              <td class="c sel-col">
+                <input
+                  type="checkbox"
+                  aria-label={t.gen.queue.selectPlayerAria(r.name)}
+                  checked={!!imageaiStore.selectedInTable[r.uid]}
+                  onchange={(e) => toggleSelect(r.uid, e.currentTarget.checked)}
+                />
+              </td>
               <td class="mono">{r.uid}</td>
               <td>{r.primaryNat}</td>
               <td>{r.secNat}</td>
@@ -443,6 +519,9 @@
   }
 
   /* ---- 列宽（auto 布局下为建议宽度，姓名/俱乐部/所在地会分吃剩余空间；总宽超出则横向滚动） ---- */
+  .w-sel {
+    width: 36px; /* 勾选框列：固定窄列，不可排序 */
+  }
   .w-uid {
     width: 96px;
   }

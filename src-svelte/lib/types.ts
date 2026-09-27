@@ -149,6 +149,11 @@ export interface GenRequest {
   steps?: number | null;
   /** P3 生效（uid 依赖名单数据源）；字段先落下，P1 恒不传。 */
   uid?: string | null;
+  /** 内部字段（serde 缺省为空）：后端 generate 解析出服务商后回填 base_url，前端提交（单张/批量）
+   *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。 */
+  baseUrl?: string;
+  /** 内部字段：generate 从模型能力集拷入，前端提交时不传（serde 缺省为 false）。 */
+  supportsResponseFormat?: boolean;
 }
 
 /** render_prompt 的返回：渲染后文本 + 无值且无默认值的占位符键名。 */
@@ -175,3 +180,25 @@ export interface UsageQuery {
   offset: number; limit: number; providerId: string; model: string;
   status: string; date: string;
 }
+
+// ---------------- 批量生成队列（对应 image_ai_queue.rs，serde 均为 camelCase） ----------------
+
+/** 队列条目状态：对应 Rust QueueStatus（serde rename_all = "lowercase"）。 */
+export type QueueStatus = 'queued' | 'running' | 'success' | 'failed';
+
+/** 一条批量生成任务（对应 Rust 的 QueueEntry）。
+ *  images/error 在 Rust 侧带 skip_serializing_if：成功前/无错误时 JSON 里不出现这两个字段，
+ *  消费侧用 ?? 兜底，不要直接 .length/.error 裸取。 */
+export interface QueueEntry {
+  id: string; uid: string; name: string;
+  req: GenRequest;
+  status: QueueStatus;
+  images: GenImage[];
+  error: string;
+}
+
+/** 进度事件 gen:queue:progress 的载荷；current 是已派发序号（1 起）。 */
+export interface QueueProgress { status: 'running' | 'success' | 'failed'; current: number; total: number; uid: string; }
+
+/** 收尾事件 gen:queue:finished 的载荷；failed 含「已取消」条目。 */
+export interface QueueFinished { finished: number; failed: number; total: number; }

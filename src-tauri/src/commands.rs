@@ -1779,6 +1779,30 @@ pub fn render_prompt(
     Ok(image_ai::render(&body, &vars.unwrap_or_default()))
 }
 
+/// 按球员数据源渲染模板（P3）：uid 定位 rtf_cache 里的球员 → build_vars → render 模板 body。
+/// 【短锁】两把锁各自「锁内只做查找/clone」即释放，锁后都是纯内存计算，绝不跨任何风险操作持锁。
+#[tauri::command]
+pub fn preview_prompt(
+    state: State<'_, AppState>,
+    uid: String,
+    template_id: String,
+) -> Result<image_ai::RenderOutcome, String> {
+    let rec = {
+        let cache = state.rtf_cache.lock().unwrap();
+        cache.iter().find(|p| p.uid == uid).cloned()
+    };
+    let rec =
+        rec.ok_or_else(|| format!("名单中没有该球员（{uid}），请先扫描RTF名单后再预览提示词"))?;
+    let cfg = state.image.lock().unwrap().clone();
+    let tpl = cfg
+        .templates
+        .iter()
+        .find(|t| t.id == template_id)
+        .ok_or_else(|| format!("找不到提示词模板（{template_id}）"))?;
+    let vars = image_ai::build_vars(&rec, &cfg.dictionary);
+    Ok(image_ai::render(&tpl.body, &vars))
+}
+
 #[tauri::command]
 pub fn save_provider(
     state: State<'_, AppState>,

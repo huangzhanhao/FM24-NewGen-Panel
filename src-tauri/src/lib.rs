@@ -344,6 +344,7 @@ pub fn run() {
             commands::query_logs,      // 分页查询日志
             commands::get_image_ai_state,
             commands::render_prompt,
+            commands::preview_prompt, // 按球员数据源渲染模板（uid → build_vars → render）
             commands::save_provider,
             commands::delete_provider,
             commands::set_provider_key,

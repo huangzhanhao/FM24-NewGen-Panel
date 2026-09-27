@@ -607,6 +607,62 @@ pub fn render(body: &str, vars: &HashMap<String, String>) -> RenderOutcome {
     RenderOutcome { text: out, missing }
 }
 
+// ===================== 球员数据源 → 模板变量（P3：与 render 同层的纯函数） =====================
+
+/// 从球员记录构建模板变量。**缺失字段一律不入 map**：render 对查不到的键会展开
+/// `{{key|默认值}}` 的默认值兜底，模板作者得以按变量是否可用分别写默认文案；
+/// 若用空串占位反而会「渲染成功但内容为空」，绕过了默认值机制。
+/// 码值转译口径（对齐计划表）：ethnicity/hairLength/skinCode 经码值字典转译
+/// （如 "0" → "北欧/白人"、"12" → 色卡号文本）；hairColor 不过字典——FM 发色码
+/// 语义无权威来源，色卡即原文（见 CodeDictionary 上的说明）；其余字段一律原文。
+/// 基础名单 `detailed` 为 None：gender/skinCode 等拓展字段全部缺席但绝不 panic。
+pub fn build_vars(
+    rec: &crate::rtf_scanner::PlayerRecord,
+    dict: &CodeDictionary,
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    vars.insert("uid".into(), rec.uid.clone());
+    vars.insert("name".into(), rec.name.clone());
+    vars.insert("primaryNat".into(), rec.primary_nat.clone());
+    vars.insert("secNat".into(), rec.sec_nat.clone());
+    if !rec.ethnicity_code.is_empty() {
+        vars.insert(
+            "ethnicity".into(),
+            dict.translate(CodeKind::Ethnicity, &rec.ethnicity_code),
+        );
+    }
+    if !rec.hair_length.is_empty() {
+        vars.insert(
+            "hairLength".into(),
+            dict.translate(CodeKind::HairLength, &rec.hair_length),
+        );
+    }
+    if !rec.hair_color.is_empty() {
+        vars.insert("hairColor".into(), rec.hair_color.clone());
+    }
+    if let Some(d) = &rec.detailed {
+        if !d.skin_code.is_empty() {
+            vars.insert(
+                "skinCode".into(),
+                dict.translate(CodeKind::SkinCode, &d.skin_code),
+            );
+        }
+        for (key, val) in [
+            ("gender", &d.gender),
+            ("age", &d.age),
+            ("height", &d.height),
+            ("club", &d.club),
+            ("ca", &d.ca),
+            ("pa", &d.pa),
+        ] {
+            if !val.is_empty() {
+                vars.insert(key.into(), val.clone());
+            }
+        }
+    }
+    vars
+}
+
 // ===================== 生成编排：适配器 → 字节 → 临时文件 → 估价 =====================
 
 pub fn new_id() -> String {
@@ -845,6 +901,7 @@ pub fn enforce_history_limit(data_dir: &Path, limit: usize) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtf_scanner::{DetailedInfo, PlayerRecord}; // build_vars 单测的样本类型
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -1186,5 +1243,98 @@ mod tests {
         }
         let kept: Vec<HistoryEntry> = load_history(dir.path());
         assert_eq!(kept.len(), 3);
+    }
+
+    // ===================== build_vars：球员数据源 → 模板变量 =====================
+
+    /// 造一条可指定 detailed 的样本记录（各测试互不影响，每次现造）。
+    fn sample_record(detailed: Option<DetailedInfo>) -> PlayerRecord {
+        PlayerRecord {
+            uid: "2000123456".into(),
+            primary_nat: "CHN".into(),
+            sec_nat: "SWE".into(),
+            name: "测试球员".into(),
+            hair_length: "2".into(),
+            hair_color: "FF88CC".into(), // 发色无字典：任意原文都应原样保留
+            ethnicity_code: "0".into(),
+            detailed,
+        }
+    }
+
+    #[test]
+    fn build_vars_expanded_roster_translates_codes() {
+        // 拓展名单全字段：码值经字典转译，其余原文；hairColor 原文不过字典。
+        let cfg = Config::builtin();
+        let vars = build_vars(
+            &sample_record(Some(DetailedInfo {
+                skin_code: "12".into(),
+                gender: "男".into(),
+                age: "24".into(),
+                height: "182".into(),
+                club: "Test FC".into(),
+                ca: "120".into(),
+                pa: "150".into(),
+                ..Default::default()
+            })),
+            &cfg.dictionary,
+        );
+        assert_eq!(vars["uid"], "2000123456");
+        assert_eq!(vars["name"], "测试球员");
+        assert_eq!(vars["primaryNat"], "CHN");
+        assert_eq!(vars["secNat"], "SWE");
+        assert_eq!(vars["ethnicity"], "北欧/白人"); // "0" 经字典转译
+        assert_eq!(vars["hairLength"], "短发"); // "2" 经字典转译
+        assert_eq!(vars["hairColor"], "FF88CC"); // 字典里没有发色表：原样保留
+        assert_eq!(vars["skinCode"], "红棕褐色（#b47454）"); // "12" → 色卡号文本
+        assert_eq!(vars["gender"], "男");
+        assert_eq!(vars["age"], "24");
+        assert_eq!(vars["height"], "182");
+        assert_eq!(vars["club"], "Test FC");
+        assert_eq!(vars["ca"], "120");
+        assert_eq!(vars["pa"], "150");
+    }
+
+    #[test]
+    fn build_vars_basic_roster_omits_missing() {
+        // 基础名单 detailed=None：拓展字段缺席（模板 {{key|默认值}} 兜底），且绝不 panic。
+        let cfg = Config::builtin();
+        let vars = build_vars(&sample_record(None), &cfg.dictionary);
+        for key in ["skinCode", "gender", "age", "height", "club", "ca", "pa"] {
+            assert!(!vars.contains_key(key), "{key} 不应出现在基础名单变量中");
+        }
+        assert_eq!(vars["uid"], "2000123456");
+        assert_eq!(vars["name"], "测试球员");
+        assert_eq!(vars["primaryNat"], "CHN");
+        assert_eq!(vars["ethnicity"], "北欧/白人");
+    }
+
+    #[test]
+    fn build_vars_skips_empty_fields() {
+        // 空字段一律不入 map（包括 detailed 为 Some 但字段空串）：
+        // 若空串占位，render 会「命中变量」而不再展开默认值。
+        let cfg = Config::builtin();
+        let vars = build_vars(
+            &PlayerRecord {
+                uid: "u1".into(),
+                primary_nat: "SWE".into(),
+                sec_nat: String::new(),
+                name: "n".into(),
+                hair_length: String::new(),
+                hair_color: String::new(),
+                ethnicity_code: String::new(),
+                detailed: Some(DetailedInfo {
+                    skin_code: String::new(),
+                    ..Default::default()
+                }),
+            },
+            &cfg.dictionary,
+        );
+        for key in ["ethnicity", "hairLength", "hairColor", "skinCode"] {
+            assert!(!vars.contains_key(key), "空字段 {key} 不应入 map");
+        }
+        // secNat 与 uid/name 同为「原文」字段：无条件入 map（空串也是其原文）。
+        assert!(vars.contains_key("secNat"));
+        assert_eq!(vars["uid"], "u1");
+        assert_eq!(vars["primaryNat"], "SWE");
     }
 }

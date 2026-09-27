@@ -15,6 +15,7 @@ mod face_mapper; // 核心算法：球员 → 头像图片的映射
 mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（FolderList 来自 templates，不硬编码）
 mod image_ai; // AI 文生图（契约/模板渲染/生成编排/用量台账；命令在 commands.rs）
 mod image_ai_providers; // AI 文生图适配器族（openai/custom/volcano/dashscope 协议适配）
+mod image_ai_queue; // AI 文生图批量生成队列（条目状态机/并发调度/事件 Seam；命令在 commands.rs）
 mod json_store; // JSON 配置的原子读写
 mod logger; // 日志系统（log 门面 + 官方插件管道；自研内存缓冲与批量事件见模块头）
 mod paging; // 通用分页契约（日志/名单/快照预览共用 total+items）
@@ -27,9 +28,9 @@ mod xml_parser; // 读写 config.xml（FM 认的头像映射配置）
 
 use commands::AppState;
 use logger::{LogMemory, LogSink, Logger};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::Manager; // app.handle() 取句柄（交给日志批推线程）
 use tauri_plugin_log::{fern, RotationStrategy, Target, TargetKind, TimezoneStrategy};
@@ -288,7 +289,7 @@ pub fn run() {
                 pm: Mutex::new(pm),                              // 存档管理器（互斥锁保护）
                 logger: logger.clone(),                          // 日志器（Arc 共享）
                 cancel: Arc::new(AtomicBool::new(false)),        // 「请求取消」标志
-                running: Arc::clone(&running), // 「正在替换」标志
+                running: Arc::clone(&running),                   // 「正在替换」标志
                 rtf_cache: Arc::new(Mutex::new(Vec::new())),     // 最近一次解析的 RTF 球员缓存
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)), // 「扫描头像」的包索引缓存（初始为空）
@@ -300,7 +301,8 @@ pub fn run() {
                     }),
                 )),
                 image_keys: Arc::new(Mutex::new(HashMap::new())),
-                data_dir,                                   // 便携数据目录（标准规则在其下 rules/）
+                queue: Arc::new(Mutex::new(image_ai_queue::QueueState::default())), // 批量生成队列（条目 + cancel 标志）
+                data_dir, // 便携数据目录（标准规则在其下 rules/）
             });
 
             // 7) 启动一个后台线程，把日志按批通过事件（log:batch）推给前端。
@@ -349,7 +351,13 @@ pub fn run() {
             commands::delete_prompt_template,
             commands::generate_image,
             commands::save_generated_image,
-            commands::query_usage
+            commands::query_usage,
+            commands::add_to_queue,      // 批量生成：追加条目（返回快照）
+            commands::remove_from_queue, // 批量生成：按 id 移除条目
+            commands::clear_queue,       // 批量生成：清空队列
+            commands::start_queue,       // 批量生成：启动队列（后台异步跑 run_queue）
+            commands::cancel_queue,      // 批量生成：请求取消（未启动条目判「已取消」）
+            commands::query_queue        // 批量生成：查询队列全量快照
         ])
         // .run(...) 启动事件循环，阻塞直到窗口关闭；启动失败直接 panic。
         .run(tauri::generate_context!())
@@ -365,7 +373,11 @@ mod tests {
         std::fs::create_dir_all(src.join("档A")).unwrap();
         std::fs::write(src.join("cfg.json"), r#"{"prf":"档A"}"#).unwrap();
         std::fs::write(src.join("profiles.json"), r#"{"Profile":{"档A":true}}"#).unwrap();
-        std::fs::write(src.join("档A").join("档A.json"), r#"{"img_dir":"C:\\pack"}"#).unwrap();
+        std::fs::write(
+            src.join("档A").join("档A.json"),
+            r#"{"img_dir":"C:\\pack"}"#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -382,7 +394,10 @@ mod tests {
             dst.join("档A").join("档A.json").is_file(),
             "档子目录里的 json 没搬过来（递归拷贝漏了）"
         );
-        assert!(!data.path().join(".user.migrating").exists(), "暂存目录没清掉");
+        assert!(
+            !data.path().join(".user.migrating").exists(),
+            "暂存目录没清掉"
+        );
         // 原件留在原地：迁移是「搬一份副本过来」，不是「搬走」——失败时用户的数据必须还在。
         assert!(src.path().join("cfg.json").is_file());
     }
@@ -399,9 +414,18 @@ mod tests {
 
         migrate_from(src.path(), data.path());
 
-        assert_eq!(std::fs::read_to_string(dst.join("cfg.json")).unwrap(), "v2 自己的内容");
-        assert!(!dst.join("profiles.json").is_file(), "不该把 v1 的文件补进 v2 的数据里");
-        assert!(!data.path().join(".user.migrating").exists(), "失败路径也要清掉暂存目录");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("cfg.json")).unwrap(),
+            "v2 自己的内容"
+        );
+        assert!(
+            !dst.join("profiles.json").is_file(),
+            "不该把 v1 的文件补进 v2 的数据里"
+        );
+        assert!(
+            !data.path().join(".user.migrating").exists(),
+            "失败路径也要清掉暂存目录"
+        );
     }
 
     #[test]

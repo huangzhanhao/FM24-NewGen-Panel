@@ -6,6 +6,9 @@
 //! 运行/取消标志用 AtomicBool。返回 Result<T, String> 时，Err 的中文描述由前端直接弹窗展示。
 use crate::face_mapper::Mode;
 use crate::facepack_scanner::{self, IntegrityResult, PackScan, PackSig};
+use crate::image_ai::{self, Config};
+use crate::image_ai_queue; // 批量生成队列（条目/状态机/执行器；6 个命令在本文件尾部）
+use crate::json_store; // save_generated_image 用其 copy_atomic（既有代码亦用全限定写法）
 use crate::logger::{LogPage, LogSink, Logger};
 use crate::paging::PageResult;
 use crate::profile_manager::ProfileManager;
@@ -15,10 +18,8 @@ use crate::rtf_scanner::{
 };
 use crate::templates::{self, RuleConfig};
 use crate::xml_parser::{self, MappingEntry, SnapshotEntry, SnapshotQuery};
-use crate::image_ai::{self, Config};
-use crate::json_store;                 // save_generated_image 用其 copy_atomic（既有代码亦用全限定写法）
-use std::collections::HashMap; // AppState.image_keys；commands.rs 原本没有这条 use
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap; // AppState.image_keys；commands.rs 原本没有这条 use
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,9 +42,10 @@ pub struct AppState {
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存（同上；两者切档/切组/换名单一律清空）
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>,   // 「扫描头像」的包索引缓存（替换可复用）
     pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
-    pub image: Arc<Mutex<Config>>,                            // 生图生效配置（image_ai.json + 默认双来源）
-    pub image_keys: Arc<Mutex<HashMap<String, String>>>,      // 会话内 API Key（不落盘）
-    pub data_dir: PathBuf, // 便携数据目录（标准规则 data/rules/ 在其下）
+    pub image: Arc<Mutex<Config>>, // 生图生效配置（image_ai.json + 默认双来源）
+    pub image_keys: Arc<Mutex<HashMap<String, String>>>, // 会话内 API Key（不落盘）
+    pub queue: Arc<Mutex<image_ai_queue::QueueState>>, // 批量生成队列（条目列表 + cancel 标志）
+    pub data_dir: PathBuf,         // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
 /// 「扫描头像」产出的索引缓存：目录 + 完整扫描结果 + 目录签名。
@@ -1867,4 +1869,99 @@ pub fn query_usage(
     query: image_ai::UsageQuery,
 ) -> Result<PageResult<image_ai::UsageRecord>, String> {
     image_ai::query_usage(&image_ai::usage_path(&state.data_dir), &query)
+}
+
+// ---------------- 批量生成队列（image_ai_queue::run_queue 承担实际调度） ----------------
+
+/// 追加一批生成任务，返回追加后的全量快照（条目 id 由后端统一生成，前端以此为准）。
+#[tauri::command]
+pub fn add_to_queue(
+    state: State<'_, AppState>,
+    entries: Vec<image_ai_queue::QueueEntry>,
+) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+    let mut q = state.queue.lock().unwrap();
+    q.add(entries);
+    Ok(q.snapshot())
+}
+
+/// 按 id 批量移除条目，返回移除后的全量快照。
+#[tauri::command]
+pub fn remove_from_queue(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+    let mut q = state.queue.lock().unwrap();
+    q.remove(&ids);
+    Ok(q.snapshot())
+}
+
+/// 清空队列，返回空快照。
+#[tauri::command]
+pub fn clear_queue(state: State<'_, AppState>) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+    let mut q = state.queue.lock().unwrap();
+    q.clear();
+    Ok(q.snapshot())
+}
+
+/// 启动批量生成：校验通过后把整个队列交给后台异步任务，命令本身立即返回。
+/// 【为什么 async】run_queue 是异步的；用 tauri::async_runtime::spawn 让它跑在运行时上，
+/// 进度经事件推送（gen:queue:progress / gen:queue:finished），前端另行 query_queue 拉快照。
+#[tauri::command]
+pub async fn start_queue(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // 出锁前把后台任务需要的全部数据 clone 下来：std Mutex 绝不跨 await 持有。
+    let (cfg, keys, concurrency) = {
+        let q = state.queue.lock().unwrap();
+        // 已有任务在跑（存在 Running 条目）：拒绝重入。
+        if q.entries
+            .iter()
+            .any(|e| e.status == image_ai_queue::QueueStatus::Running)
+        {
+            return Err("队列正在执行中".into());
+        }
+        // 启动前逐条校验 Queued 条目的服务商 Key：任一缺失就整批不启动（跑一半才失败
+        // 会白白烧掉前几条的配额）。Key 只在本会话内存（见 set_provider_key）。
+        let keys = state.image_keys.lock().unwrap().clone();
+        for e in q
+            .entries
+            .iter()
+            .filter(|e| e.status == image_ai_queue::QueueStatus::Queued)
+        {
+            let ok = keys
+                .get(&e.req.provider_id)
+                .is_some_and(|k| !k.trim().is_empty());
+            if !ok {
+                return Err("请先输入该服务商 Key".into());
+            }
+        }
+        let cfg = state.image.lock().unwrap().clone();
+        let concurrency = cfg.settings.concurrency;
+        (cfg, keys, concurrency)
+    };
+    let sink: Arc<dyn image_ai_queue::EventSink> = Arc::new(image_ai_queue::AppEventSink(app));
+    let queue = Arc::clone(&state.queue);
+    let data_dir = state.data_dir.clone();
+    let executor: Arc<dyn image_ai_queue::GenExecutor> = Arc::new(image_ai_queue::RealExecutor);
+    tauri::async_runtime::spawn(async move {
+        let (finished, failed, total) =
+            image_ai_queue::run_queue(queue, data_dir, cfg, keys, concurrency, executor, sink)
+                .await;
+        log::info!(
+            target: "image_ai",
+            "批量生成队列结束：成功 {finished}，失败 {failed}，共 {total}"
+        );
+    });
+    Ok(())
+}
+
+/// 请求取消：尚未启动的条目将被判「已取消」，在跑的等它自然收尾（见 run_queue）。
+#[tauri::command]
+pub fn cancel_queue(state: State<'_, AppState>) -> Result<(), String> {
+    state.queue.lock().unwrap().cancel = true;
+    Ok(())
+}
+
+/// 查询队列全量快照（条目状态/图片/错误都从这里拉）。
+#[tauri::command]
+pub fn query_queue(state: State<'_, AppState>) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+    Ok(state.queue.lock().unwrap().snapshot())
 }

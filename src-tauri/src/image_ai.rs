@@ -155,7 +155,9 @@ pub struct CodeDictionary {
 }
 
 /// 一次生成请求。
-#[derive(Debug, Clone, Deserialize)]
+/// 【Serialize】批量生成队列的条目（image_ai_queue::QueueEntry 内嵌本类型）要经 IPC
+/// 回传快照，序列化方向也需要——字段无新增，仅补派生。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenRequest {
     pub provider_id: String,
@@ -185,7 +187,9 @@ pub struct GenRequest {
 }
 
 /// 一张临时图片元信息。
-#[derive(Debug, Clone, Serialize)]
+/// 【Deserialize】批量生成队列的条目经 IPC 往返（image_ai_queue::QueueEntry 内嵌本类型），
+/// 反序列化方向也需要它——前端提交的新条目 images 恒为空，字段本身不产生新契约。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenImage {
     pub id: String,

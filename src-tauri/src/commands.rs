@@ -1759,6 +1759,86 @@ mod tests {
         assert!(broken.lock().unwrap().is_empty(), "中毒的缓存应被清空");
         assert!(!broken.is_poisoned(), "清空后应解除中毒");
     }
+
+    // ---------------- save_and_replace（P3-2）的可纯测部分 ----------------
+    // 命令本体依赖 State（Tauri 托管，单测不可构造），故把查找/命名/避让做成近纯函数覆盖。
+
+    #[test]
+    fn expand_naming_supports_uid_and_index_placeholders() {
+        // 默认模板
+        assert_eq!(expand_naming("{uid}_{index}", "p123", 1), "p123_1");
+        // 字面量与占位符混排
+        assert_eq!(
+            expand_naming("gen-{uid}__{index}.v2", "p1", 12),
+            "gen-p1__12.v2"
+        );
+        // 未知占位符按字面量保留（不猜、不报错）
+        assert_eq!(expand_naming("{uid}-{seq}-{index}", "p1", 2), "p1-{seq}-2");
+        // 没有配对右括号：剩余内容原样
+        assert_eq!(expand_naming("{uid}x{", "p1", 3), "p1x{");
+        // 无占位符：纯字面量
+        assert_eq!(expand_naming("static", "p1", 5), "static");
+    }
+
+    #[test]
+    fn count_existing_only_counts_uid_prefixed_files() {
+        let tmp = tempfile::tempdir().unwrap(); // TempDir 必须先绑定变量
+        let dir = tmp.path().join("_generated");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("p123_1.png"), b"x").unwrap();
+        std::fs::write(dir.join("p123_2.png"), b"x").unwrap();
+        std::fs::write(dir.join("p123.png"), b"x").unwrap(); // 无 `_` 前缀：不算
+        std::fs::write(dir.join("p12_3.png"), b"x").unwrap(); // 其他 uid 的前缀：不算
+        std::fs::create_dir_all(dir.join("p123_9")).unwrap(); // 同名目录：不算
+        assert_eq!(count_existing(&dir, "p123"), 2);
+        assert_eq!(count_existing(&dir, "nobody"), 0);
+    }
+
+    #[test]
+    fn next_free_target_counts_then_skips_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("_generated");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 空目录：从 1 起
+        assert_eq!(
+            next_free_target(&dir, "{uid}_{index}", "p1").unwrap(),
+            dir.join("p1_1.png")
+        );
+        // 已有 p1_1 与 p1_3（计数=2 → index=3 撞上 p1_3）：递增避让到 p1_4，
+        // 计数与避让两道保障在同一条路径上都生效。
+        std::fs::write(dir.join("p1_1.png"), b"x").unwrap();
+        std::fs::write(dir.join("p1_3.png"), b"x").unwrap();
+        assert_eq!(
+            next_free_target(&dir, "{uid}_{index}", "p1").unwrap(),
+            dir.join("p1_4.png")
+        );
+        // 模板不含 {index}：目标名恒定，已存在时递增也腾不出新名字 → 显式报错，绝不静默覆盖旧图
+        std::fs::write(dir.join("fixed.png"), b"x").unwrap();
+        let err = next_free_target(&dir, "fixed", "p1").unwrap_err();
+        assert!(err.contains("命名模板"), "报错应指引补 {{index}}：{err}");
+    }
+
+    #[test]
+    fn find_tmp_image_matches_by_stem_regardless_of_extension() {
+        let tmp = tempfile::tempdir().unwrap(); // TempDir 必须先绑定变量
+        let imgtmp = tmp.path().join(".imgtmp");
+        std::fs::create_dir_all(&imgtmp).unwrap();
+        // 扩展名不写死：按 file_stem 匹配（服务商响应决定扩展名）
+        std::fs::write(imgtmp.join("abc.webp"), b"x").unwrap();
+        std::fs::write(imgtmp.join("other.png"), b"x").unwrap();
+        assert_eq!(
+            find_tmp_image(&imgtmp, "abc").unwrap(),
+            imgtmp.join("abc.webp")
+        );
+        // 不存在的 id：报错含「生成图中不存在」
+        let err = find_tmp_image(&imgtmp, "missing").unwrap_err();
+        assert!(err.contains("生成图中不存在"), "实际报错：{err}");
+        // 临时目录整个不存在：读目录失败也给出可懂的中文报错
+        let gone = tempfile::tempdir().unwrap();
+        let empty = gone.path().join(".imgtmp");
+        let err2 = find_tmp_image(&empty, "abc").unwrap_err();
+        assert!(err2.contains("临时目录"), "实际报错：{err2}");
+    }
 }
 
 // ===================== AI 文生图命令（实现统一在 image_ai；与既有命令同居本文件）=====================
@@ -1885,6 +1965,152 @@ pub fn save_generated_image(
     }
     json_store::copy_atomic(&src, Path::new(&target_path))?;
     Ok(target_path)
+}
+
+/// 在 `.imgtmp` 里按 image_id 找源文件。生成图落盘名为 `{image_id}.{扩展名}`，扩展名由服务商
+/// 响应决定，所以按 file_stem 遍历比对而不是写死 .png（对等 save_generated_image 的查找意图，
+/// 但放宽到任意扩展名）。找不到＝图片已被会话清理或 id 传错。
+fn find_tmp_image(tmp_dir: &Path, image_id: &str) -> Result<PathBuf, String> {
+    let entries = std::fs::read_dir(tmp_dir)
+        .map_err(|e| format!("读取生成图临时目录失败（{}）: {e}", tmp_dir.display()))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() && p.file_stem().and_then(|s| s.to_str()) == Some(image_id) {
+            return Ok(p);
+        }
+    }
+    Err(format!(
+        "生成图中不存在该图片（{image_id}）：可能已被会话清理，请重新生成后再保存并替换"
+    ))
+}
+
+/// 展开命名模板为文件主干：`{uid}` → 球员 UID，`{index}` → 序号；其余内容（含未知占位符）
+/// 一律按字面量原样保留。只认这两个占位符是为了让「用户改模板」的行为可预期——
+/// 未知的占位符不猜、不报错，原样落进文件名里，用户一眼就能看到并改掉。
+fn expand_naming(pattern: &str, uid: &str, index: usize) -> String {
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut rest = pattern;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                match &after[..close] {
+                    "uid" => out.push_str(uid),
+                    "index" => out.push_str(&index.to_string()),
+                    // 未知占位符（含配对花括号）按字面量回填
+                    other => out.push_str(&format!("{{{other}}}")),
+                }
+                rest = &after[close + 1..];
+            }
+            // 没有配对的右括号：剩余内容全部原样
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 统计 `_generated` 目录里「属于该 uid」的已有文件数：file_stem 以 `{uid}_` 开头才算
+/// （默认模板 `{uid}_{index}` 的产物都带这个前缀）。只数文件，同名目录与读目录失败一律跳过。
+fn count_existing(dir: &Path, uid: &str) -> usize {
+    let prefix = format!("{uid}_");
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    let p = e.path();
+                    p.is_file()
+                        && p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .is_some_and(|s| s.starts_with(&prefix))
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// 计算本次落盘的目标路径：index 从「同 uid 已有数 + 1」起步，目标名已存在则继续递增。
+/// 【为什么不能指望 copy_atomic 拒绝覆盖】copy_atomic 是覆盖写（rename 语义，见其实现），
+/// 「不覆盖已有生成图」必须在这里显式保证；模板不含 {index} 时递增也腾不出新名字，
+/// 有限次后报错而非静默覆盖——那种情况下同名即旧图，覆盖会无声丢掉用户之前保存的生成图。
+fn next_free_target(gen_dir: &Path, pattern: &str, uid: &str) -> Result<PathBuf, String> {
+    let mut index = count_existing(gen_dir, uid) + 1;
+    let mut target = gen_dir.join(format!("{}.png", expand_naming(pattern, uid, index)));
+    let mut tries = 0;
+    while target.is_file() {
+        if tries >= 32 {
+            return Err(format!(
+                "目标文件已存在且命名模板无法自动避让（{}）：请给命名模板加上 {{index}}",
+                target.display()
+            ));
+        }
+        index += 1;
+        target = gen_dir.join(format!("{}.png", expand_naming(pattern, uid, index)));
+        tries += 1;
+    }
+    Ok(target)
+}
+
+/// 「保存并替换」闭环（P3）：把 `.imgtmp` 里的生成图落盘到 `<当前组>/_generated/`，
+/// 再复用 `replace_single_face` 的完整单人换脸链（互斥检查/快照归位/config.xml 改行/缓存同步），
+/// 不重写任何替换逻辑。返回落盘后的图片信息（前端据此更新结果卡）。
+/// 【为什么是同步 fn】内部没有 await 点，重活是 replace_single_face 的同步 XML 链路；
+/// 与它保持同形（Tauri 同步命令跑在命令线程池，不会卡 UI），不硬套 async。
+#[tauri::command]
+pub fn save_and_replace(
+    state: State<'_, AppState>,
+    image_id: String,
+    uid: String,
+    save_backup: bool,
+) -> Result<image_ai::GenImage, String> {
+    let uid = uid.trim().to_string();
+    // ① 批量互斥前置检查：把失败挡在复制文件之前，磁盘上不会留下半成品。
+    //    replace_single_face 内部还会再查一次 running（双保险，拒绝文案与其对齐）。
+    if state.running.load(Ordering::SeqCst) {
+        state
+            .logger
+            .warn("image_ai", "保存并替换被拒绝：批量替换正在进行");
+        return Err("批量替换正在进行，请等它完成或先取消，再做单人微调".into());
+    }
+    // ② 短锁取生效配置里的命名模板（clone 一份字符串即放锁，锁内不做任何重活）。
+    let pattern = state.image.lock().unwrap().settings.naming_pattern.clone();
+    // ③ 源文件：.imgtmp 按 image_id 找（扩展名不写死，见 find_tmp_image）。
+    let src = find_tmp_image(&image_ai::tmp_dir(&state.data_dir), &image_id)?;
+    // ④ 当前组目录：生成图必须落进头像包，替换链路才能按「包内图片」解析
+    //    （parse_image_path_in_pack 会 canonicalize 后剥离组目录前缀，包外路径会被拒）。
+    let img_dir = {
+        let pm = state.pm.lock().unwrap();
+        pm.cur_group
+            .clone()
+            .ok_or("请先关联头像包（当前没有选中组），再保存并替换")?
+    };
+    let gen_dir = Path::new(&img_dir).join("_generated");
+    std::fs::create_dir_all(&gen_dir)
+        .map_err(|e| format!("创建生成图目录失败（{}）: {e}", gen_dir.display()))?;
+    // ⑤ 目标路径：命名模板展开 + 同名避让（见 next_free_target）；生成图统一 png。
+    let target = next_free_target(&gen_dir, &pattern, &uid)?;
+    json_store::copy_atomic(&src, &target)?;
+    // ⑥ 复用单人换脸全链：互斥/快照归位/改 config.xml/同步 mapping_cache 与存档快照全部继承。
+    //    返回的命中 bool 不再上报——未命中时 replace_single_face 内部已 WARN 留痕，
+    //    图片本身已安全落盘，算不上本命令的失败。
+    let target_str = target.to_string_lossy().to_string();
+    let logger = state.logger.clone();
+    replace_single_face(state, uid.clone(), target_str.clone(), save_backup)?;
+    let bytes = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+    logger.info(
+        "image_ai",
+        format!("保存并替换完成：{uid} → {target_str}（{bytes} 字节）"),
+    );
+    Ok(image_ai::GenImage {
+        id: image_id,
+        path: target_str,
+        bytes,
+    })
 }
 
 #[tauri::command]

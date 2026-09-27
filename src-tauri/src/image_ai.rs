@@ -996,4 +996,22 @@ mod tests {
         assert!(validate_request(&cfg, &r).is_err());
         assert!(validate_request(&cfg, &gen_req()).is_ok());
     }
+
+    #[test]
+    fn builtin_has_four_providers_p2() {
+        let cfg = Config::builtin();
+        let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["openai", "custom", "volcano", "dashscope"]);
+        // 火山能力抽查：单张、支持 seed、不支持 quality
+        let flash = cfg.model("volcano", "seedream-5.0-flash").unwrap();
+        assert_eq!(flash.capabilities.max_n, 1);
+        assert!(flash.capabilities.supports_seed);
+        assert!(!flash.capabilities.supports_quality);
+        assert_eq!(flash.prices["1024x1024"], 0.12);
+        // 百炼能力抽查：n=4、负向提示词、size 用 * 形态
+        let turbo = cfg.model("dashscope", "wanx2.1-t2i-turbo").unwrap();
+        assert_eq!(turbo.capabilities.max_n, 4);
+        assert!(turbo.capabilities.supports_negative_prompt);
+        assert!(turbo.capabilities.sizes.contains(&"1024*1024".to_string()));
+    }
 }

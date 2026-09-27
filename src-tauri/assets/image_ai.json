@@ -32,6 +32,104 @@
       "baseUrl": "",
       "defaultModel": "",
       "models": []
+    },
+    {
+      "id": "volcano",
+      "kind": "volcano",
+      "name": "火山方舟 Seedream",
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "defaultModel": "seedream-5.0-flash",
+      "models": [
+        {
+          "model": "seedream-5.0-flash",
+          "label": "seedream-5.0-flash",
+          "currency": "CNY",
+          "prices": { "1024x1024": 0.12 },
+          "capabilities": {
+            "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
+            "maxN": 1,
+            "supportsQuality": false,
+            "supportsSeed": true,
+            "supportsSteps": false,
+            "supportsNegativePrompt": false,
+            "supportsResponseFormat": true,
+            "qualities": []
+          }
+        },
+        {
+          "model": "seedream-5.0-lite",
+          "label": "seedream-5.0-lite",
+          "currency": "CNY",
+          "prices": { "1024x1024": 0.22 },
+          "capabilities": {
+            "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
+            "maxN": 1,
+            "supportsQuality": false,
+            "supportsSeed": true,
+            "supportsSteps": false,
+            "supportsNegativePrompt": false,
+            "supportsResponseFormat": true,
+            "qualities": []
+          }
+        },
+        {
+          "model": "seedream-4.0",
+          "label": "seedream-4.0",
+          "currency": "CNY",
+          "prices": { "1024x1024": 0.20 },
+          "capabilities": {
+            "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
+            "maxN": 1,
+            "supportsQuality": false,
+            "supportsSeed": true,
+            "supportsSteps": false,
+            "supportsNegativePrompt": false,
+            "supportsResponseFormat": true,
+            "qualities": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "dashscope",
+      "kind": "dashscope",
+      "name": "百炼通义万相",
+      "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
+      "defaultModel": "wanx2.1-t2i-turbo",
+      "models": [
+        {
+          "model": "wanx2.1-t2i-turbo",
+          "label": "wanx2.1-t2i-turbo",
+          "currency": "CNY",
+          "prices": { "1024*1024": 0.14 },
+          "capabilities": {
+            "sizes": ["1024*1024", "720*1280", "1280*720"],
+            "maxN": 4,
+            "supportsQuality": false,
+            "supportsSeed": true,
+            "supportsSteps": false,
+            "supportsNegativePrompt": true,
+            "supportsResponseFormat": false,
+            "qualities": []
+          }
+        },
+        {
+          "model": "wanx2.1-t2i-plus",
+          "label": "wanx2.1-t2i-plus",
+          "currency": "CNY",
+          "prices": { "1024*1024": 0.20 },
+          "capabilities": {
+            "sizes": ["1024*1024", "720*1280", "1280*720"],
+            "maxN": 4,
+            "supportsQuality": false,
+            "supportsSeed": true,
+            "supportsSteps": false,
+            "supportsNegativePrompt": true,
+            "supportsResponseFormat": false,
+            "qualities": []
+          }
+        }
+      ]
     }
   ],
   "settings": {

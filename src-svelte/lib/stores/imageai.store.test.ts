@@ -9,6 +9,11 @@ vi.mock('../services/api', () => ({
       text: body.replace(/\{\{(\w+)\|([^}]*)\}\}/g, '$2'),
       missing: [],
     })),
+    // P3 数据源：按 uid 拼一句可区分的渲染结果（个别用例会 mockResolvedValueOnce 覆盖）
+    previewPrompt: vi.fn(async (uid: string) => ({ text: `${uid} 的渲染结果`, missing: [] })),
+    // images 留空：generate 的 blob 加载循环不执行，无需替身 readImage
+    generateImage: vi.fn(async () => ({ images: [], recordId: 'rec1', estimatedCost: 0, currency: 'CNY' })),
+    saveAndReplace: vi.fn(async () => ({ id: 'g1', path: '/tmp/x.png', bytes: 1 })),
     addToQueue: vi.fn(async (entries: QueueEntry[]) =>
       entries.map((e, i) => ({ ...e, id: `q${i + 1}` })),
     ),
@@ -16,15 +21,25 @@ vi.mock('../services/api', () => ({
   },
 }));
 
+// saveAndReplace 读「替换执行」面板共享的备份开关：替身成普通对象即可（store 只读这一个字段）。
+vi.mock('./app.svelte', () => ({
+  appStore: { saveBackup: true },
+}));
+
 import { api } from '../services/api';
+import { appStore } from './app.svelte';
 import {
   applyTemplate,
   buildQueueEntries,
   clearSelection,
+  clearSourcePlayer,
   enqueuePlayers,
+  generate,
   imageaiStore,
+  saveAndReplace,
   selectProvider,
   setQueue,
+  setSourcePlayer,
   toggleSelect,
   toggleSelectPage,
 } from './imageai.svelte';
@@ -171,5 +186,86 @@ describe('queue store', () => {
     expect(imageaiStore.queueRunning).toBe(true);
     setQueue([{ ...base, status: 'queued' }]);
     expect(imageaiStore.queueRunning).toBe(false);
+  });
+});
+
+describe('P3 数据源与保存并替换', () => {
+  beforeEach(() => {
+    vi.mocked(api.renderPrompt).mockClear();
+    vi.mocked(api.previewPrompt).mockClear();
+    vi.mocked(api.generateImage).mockClear();
+    vi.mocked(api.saveAndReplace).mockClear();
+    clearSourcePlayer();
+    imageaiStore.config = cfg;
+    selectProvider('p1'); // model=m2, size=768x768, n=1, quality=auto, seed=''
+    imageaiStore.templateId = 'tpl1';
+    imageaiStore.prompt = '一张{{gender|男性}}脸';
+  });
+
+  it('setSourcePlayer / clearSourcePlayer', () => {
+    setSourcePlayer('u1', '甲');
+    expect(imageaiStore.sourcePlayer).toEqual({ uid: 'u1', name: '甲' });
+    clearSourcePlayer();
+    expect(imageaiStore.sourcePlayer).toBeNull();
+  });
+
+  it('generate with a source player renders via previewPrompt and keeps the manual prompt', async () => {
+    setSourcePlayer('u1', '甲');
+    vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: '甲的专属提示词', missing: [] });
+    await generate();
+    expect(api.previewPrompt).toHaveBeenCalledWith('u1', 'tpl1');
+    expect(api.renderPrompt).not.toHaveBeenCalled(); // 数据源模式不走手填渲染链
+    // 请求携带渲染结果；工作台手填 prompt 不被回写（渲染基座是模板，回写会污染下一次渲染）
+    expect(vi.mocked(api.generateImage).mock.calls[0][0].prompt).toBe('甲的专属提示词');
+    expect(imageaiStore.prompt).toBe('一张{{gender|男性}}脸');
+  });
+
+  it('generate with a source player rejects when placeholders are missing', async () => {
+    setSourcePlayer('u1', '甲');
+    vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: '', missing: ['skinCode'] });
+    await expect(generate()).rejects.toThrow('占位符未填充：skinCode');
+    expect(api.generateImage).not.toHaveBeenCalled(); // missing 不得原文送进 API
+  });
+
+  it('generate without a source player keeps the manual renderPrompt flow', async () => {
+    await generate();
+    expect(api.renderPrompt).toHaveBeenCalledWith('一张{{gender|男性}}脸');
+    expect(api.previewPrompt).not.toHaveBeenCalled();
+  });
+
+  it('buildQueueEntries renders per player via previewPrompt with a source player', async () => {
+    setSourcePlayer('u0', '源');
+    const entries = await buildQueueEntries([
+      { uid: 'u1', name: '甲' },
+      { uid: 'u2', name: '乙' },
+    ]);
+    // 队列逐球员渲染：每行各问一次 preview_prompt，prompt 各自携带该球员的变量
+    expect(api.previewPrompt).toHaveBeenCalledTimes(2);
+    expect(api.renderPrompt).not.toHaveBeenCalled();
+    expect(entries[0].req.prompt).toBe('u1 的渲染结果');
+    expect(entries[1].req.prompt).toBe('u2 的渲染结果');
+  });
+
+  it('buildQueueEntries rejects when a per-row preview reports missing placeholders', async () => {
+    setSourcePlayer('u0', '源');
+    vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: 'x', missing: ['skinCode'] });
+    await expect(buildQueueEntries([{ uid: 'u1', name: '甲' }])).rejects.toThrow(
+      '占位符未填充：skinCode',
+    );
+  });
+
+  it('saveAndReplace passes the source uid and the shared backup switch', async () => {
+    setSourcePlayer('u1', '甲');
+    await saveAndReplace('img1');
+    expect(api.saveAndReplace).toHaveBeenCalledWith('img1', 'u1', true);
+    (appStore as unknown as { saveBackup: boolean }).saveBackup = false; // 关掉共享备份开关
+    await saveAndReplace('img2');
+    expect(api.saveAndReplace).toHaveBeenLastCalledWith('img2', 'u1', false);
+    (appStore as unknown as { saveBackup: boolean }).saveBackup = true; // 还原，不污染其它用例
+  });
+
+  it('saveAndReplace without a source player throws', async () => {
+    await expect(saveAndReplace('img1')).rejects.toThrow();
+    expect(api.saveAndReplace).not.toHaveBeenCalled();
   });
 });

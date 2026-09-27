@@ -9,6 +9,7 @@
   import {
     enqueuePlayers,
     imageaiStore,
+    setSourcePlayer,
     toggleSelect,
     toggleSelectPage,
   } from "../../stores/imageai.svelte"; // 勾选与批量入队（队列动作转发见 store）
@@ -175,6 +176,14 @@
     }
   }
 
+  // ---------------- 行尾「送生图」（P3 数据源入口） ----------------
+  /** 把该行球员设为生图数据源并切到 AI 生图 Tab。切 Tab 走 appStore.resultsView
+   *  （结果区 Tab 的全局态，「读取快照」后跨组件切换用的同一机制，最小侵入）。 */
+  function sendToGenerate(r: PlayerRecord) {
+    setSourcePlayer(r.uid, r.name);
+    appStore.resultsView = "generate";
+  }
+
   // 第 15 列语义：按后端结构化协议码区分球员（所在地）/职员（偏好工作），不依赖中文展示文案。
   const isStaffRoster = $derived(
     appStore.lastRtfScan?.formatCode === "extStaff",
@@ -324,7 +333,8 @@
     <div class="table-scroll">
       <table class="grid">
         <!-- 列宽：长文本列（姓名/俱乐部/所在地）给宽余量吃剩余空间；码值/数值列收窄并居中。
-             首列是勾选框（P2 Task5）：不可排序、不参与筛选，宽度固定。 -->
+             首列是勾选框（P2 Task5）：不可排序、不参与筛选，宽度固定；
+             末列是「送生图」（P3 数据源入口）：基础/拓展名单都有，固定窄列。 -->
         <colgroup>
           <col class="w-sel" />
           <col class="w-uid" />
@@ -347,6 +357,7 @@
             <col class="w-code" />
             <col class="w-rca" />
           {/if}
+          <col class="w-gen" />
         </colgroup>
         <thead>
           <tr>
@@ -425,6 +436,8 @@
               <th class="static c">{t.table.colPa}</th>
               <th class="static c">{t.table.colRca}</th>
             {/if}
+            <!-- 末列「送生图」操作列：基础/拓展名单都有，表头留白（按钮自带读屏文案） -->
+            <th class="static c" title={t.gen.source.sendBtn}></th>
           </tr>
         </thead>
         <tbody>
@@ -474,6 +487,19 @@
                 <td class="c">{d?.pa || "—"}</td>
                 <td class="c">{d?.rca || "—"}</td>
               {/if}
+              <!-- 行尾「送生图」（P3）：设为数据源并切到 AI 生图；已是数据源的球员按钮变「已选」描边高亮 -->
+              <td class="c">
+                <button
+                  class="btn sm gen-send"
+                  class:on={imageaiStore.sourcePlayer?.uid === r.uid}
+                  title={t.gen.source.sendTitle(r.name)}
+                  onclick={() => sendToGenerate(r)}
+                >
+                  {imageaiStore.sourcePlayer?.uid === r.uid
+                    ? t.gen.source.sent
+                    : t.gen.source.sendBtn}
+                </button>
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -554,6 +580,14 @@
   }
   .w-rca {
     width: 56px;
+  }
+  .w-gen {
+    width: 64px; /* 行尾「送生图」按钮列：固定窄列，不可排序 */
+  }
+  /* 已是数据源的行按钮：主题色描边高亮（两主题各自取色），文字同步变「已选」 */
+  .gen-send.on {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   /* 不可排序列：去掉全局 table.grid th 的手型指针 */
   th.static {

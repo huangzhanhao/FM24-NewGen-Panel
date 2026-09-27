@@ -742,6 +742,8 @@ input.uid-chip {
 .meta.mono b { font-family: var(--mono); font-weight: 500; white-space: normal; word-break: break-all; }
 .replace-row { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; align-items: center; }
 .replace-row .input-wrap { flex: 1; min-width: 240px; }
+/* 「用此球员生成」（P3 数据源入口）：已是数据源时主题色描边高亮 + 文字变「已选为数据源」 */
+.gen-src-btn.on { border-color: var(--accent); color: var(--accent); }
 
 /* 表格工具栏（B3） */
 .table-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; min-width: 0; }

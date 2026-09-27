@@ -7,7 +7,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
+  AppSnapshot, GenImage, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
   PageResult, PlayerPreview, PlayerQuery, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery, UsageQuery, UsageRecord,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
@@ -79,6 +79,13 @@ export const api = {
   generateImage: (req: GenRequest) => invoke<GenResult>('generate_image', { req }),
   saveGeneratedImage: (imageId: string, targetPath: string) =>
     invoke<string>('save_generated_image', { imageId, targetPath }),
+  // P3 数据源：按名单球员构建变量并渲染模板（肤色码经字典转译为色卡号文本）；
+  // missing = 既无值又无默认值的占位符键名（同 render_prompt 口径）。
+  previewPrompt: (uid: string, templateId: string) =>
+    invoke<RenderOutcome>('preview_prompt', { uid, templateId }),
+  // P3 保存并替换：生成图复制到 <头像包>/_generated/ 并走单人换脸全链；批量替换进行中返回中文错误。
+  saveAndReplace: (imageId: string, uid: string, saveBackup: boolean) =>
+    invoke<GenImage>('save_and_replace', { imageId, uid, saveBackup }),
   queryUsage: (query: UsageQuery) => invoke<PageResult<UsageRecord>>('query_usage', { query }),
   // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
   addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),

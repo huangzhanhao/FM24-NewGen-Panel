@@ -1,8 +1,9 @@
 /** AI 生图工作台状态（runes）。配置来自后端双来源文件，Key 不经前端持久化。 */
 import { api } from '../services/api';
+import { appStore } from './app.svelte';
 import { loadImageBlobUrl } from '../services/images';
 import { t } from '../text';
-import type { GeneratedImage, ImageConfig, QueueEntry } from '../types';
+import type { GeneratedImage, ImageConfig, QueueEntry, RenderOutcome } from '../types';
 
 /** 模板变量说明（P3 起由上游自动填充；P1 仅展示与追加占位符）。
     `skinCode` 对应 RTF 的 FM 内置肤色码（0–19，见 FM NewGAN种族代码示例.html）；
@@ -32,6 +33,11 @@ export const imageaiStore = $state({
   /** 会话内「已设置 Key」指示（id → 是否已设置）。Key 本体只进后端会话内存、后端不回传，
    *  这里仅记录设置过与否，供顶栏输入框占位与「已设置」徽标展示；不持久化，刷新即清。 */
   keysSet: {} as Record<string, boolean>,
+
+  /** 生图数据源球员（P3）：名单/单人预览入口「送生图/用此球员生成」写入。
+   *  null = 无数据源，变量走模板默认值（工作台手填 prompt 生效）；
+   *  有数据源时单张/批量生成均改走 preview_prompt——按该球员的名单记录构建变量渲染模板正文。 */
+  sourcePlayer: null as { uid: string; name: string } | null,
 
   // ---- 批量生成队列（P2）：queue 是后端快照的镜像，唯一写入方是 setQueue ----
   queue: [] as QueueEntry[],
@@ -109,15 +115,29 @@ export function appendVariable(key: string) {
   imageaiStore.prompt = `${imageaiStore.prompt}{{${key}}}`;
 }
 
+/** 设定/清除生图数据源球员（名单行「送生图」与单人预览「用此球员生成」共用入口；
+ *  清除由工作台数据源条的按钮触发）。 */
+export function setSourcePlayer(uid: string, name: string) {
+  imageaiStore.sourcePlayer = { uid, name };
+}
+
+export function clearSourcePlayer() {
+  imageaiStore.sourcePlayer = null;
+}
+
 export async function generate() {
   if (!imageaiStore.model) throw new Error(t.gen.needModel);
   imageaiStore.generating = true;
   try {
-    // 生成前再渲染一次：用户可能手工改写过文本，模板原文不得覆盖编辑结果。
+    // P3 数据源模式：改走 preview_prompt——按数据源球员的名单记录构建变量渲染「模板正文」，
+    // 工作台手填 prompt 不参与（渲染基座是模板，换球员即可复用同一模板）。
+    // 无数据源维持原链路：生成前再渲染一次——用户可能手工改写过文本，模板原文不得覆盖编辑结果；
     // 入参刻意用「当前文本」而非模板 ID，正是为了让手工编辑生效。
-    const rendered = await api.renderPrompt(imageaiStore.prompt);
+    const rendered = imageaiStore.sourcePlayer
+      ? await api.previewPrompt(imageaiStore.sourcePlayer.uid, imageaiStore.templateId)
+      : await api.renderPrompt(imageaiStore.prompt);
     if (rendered.missing.length > 0) throw new Error(t.gen.missingPlaceholders(rendered.missing));
-    imageaiStore.prompt = rendered.text; // 回写：所见即所发
+    if (!imageaiStore.sourcePlayer) imageaiStore.prompt = rendered.text; // 回写：所见即所发（仅手填链路）
     const res = await api.generateImage({
       providerId: imageaiStore.providerId,
       model: imageaiStore.model,
@@ -144,22 +164,37 @@ export function removeResult(id: string) {
   imageaiStore.results = imageaiStore.results.filter((r) => r.id !== id);
 }
 
+// ---------------- 结果卡「保存并替换」（P3） ----------------
+
+/** 把生成图写为数据源球员的新头像：后端复制到 <头像包>/_generated/ 并复用单人换脸全链
+ *  （批量替换进行中由后端拒绝并返回中文错误）。备份开关读「替换执行」面板共享的
+ *  appStore.saveBackup（与单人微调同一口径）。sourcePlayer 为 null 时 UI 已禁用按钮，
+ *  这里再拦一道；返回后端落盘的 GenImage（id/path/bytes）。 */
+export async function saveAndReplace(imageId: string) {
+  const sp = imageaiStore.sourcePlayer;
+  if (!sp) throw new Error(t.gen.saveReplace.needSource);
+  return api.saveAndReplace(imageId, sp.uid, appStore.saveBackup);
+}
+
 // ---------------- 批量生成队列（P2 Task5） ----------------
 
 /** 提交加入队列的行数据（名单预览当前页勾选的球员）。 */
 export interface PlayerRow { uid: string; name: string; }
 
-/** 组装队列条目：prompt 经 renderPrompt 展开「默认值版本」（与单张 generate 同一条渲染链），
- *  其余参数取工作台当前值；id 留空由后端统一补发（见 image_ai_queue::QueueState::add），
+/** 组装队列条目：其余参数取工作台当前值；id 留空由后端统一补发（见 image_ai_queue::QueueState::add），
  *  images/error 留空、status 复位为 queued（后端 add 也会再复位一次，双保险）。
- *  【逐行渲染】渲染放在行循环里：每行的 prompt 都过一遍 render_prompt——现在入参相同，
- *  P3 起可按行传 vars（name/uid 等数据源）而无需改结构。 */
+ *  【渲染策略（P3）】有数据源：逐行 preview_prompt——每个球员按名单记录构建变量，
+ *  prompt 各自携带其姓名/肤色等（队列逐球员渲染）；无数据源：各行入参完全相同，
+ *  循环外 renderPrompt 一次复用（原实现每行调一次同参数 renderPrompt，是 N 次等价 IPC）。 */
 export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise<QueueEntry[]> {
   if (!imageaiStore.model) throw new Error(t.gen.needModel);
   const entries: QueueEntry[] = [];
+  let shared: RenderOutcome | null = null;
   for (const r of rows) {
     // 渲染失败/缺占位符即整批失败：与单张 generate 的口径一致（missing 不得原文送进 API）。
-    const rendered = await api.renderPrompt(imageaiStore.prompt);
+    const rendered = imageaiStore.sourcePlayer
+      ? await api.previewPrompt(r.uid, imageaiStore.templateId)
+      : (shared ??= await api.renderPrompt(imageaiStore.prompt));
     if (rendered.missing.length > 0) throw new Error(t.gen.missingPlaceholders(rendered.missing));
     entries.push({
       id: '',

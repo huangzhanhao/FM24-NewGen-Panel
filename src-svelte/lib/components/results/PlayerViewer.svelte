@@ -11,6 +11,7 @@
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
   import { appStore } from "../../stores/app.svelte";
+  import { imageaiStore, setSourcePlayer } from "../../stores/imageai.svelte"; // P3 数据源入口
   import { icons } from "../../ui/icons";
   import type { PlayerPreview } from "../../types";
 
@@ -97,7 +98,9 @@
       );
       // hit=true 表示命中并替换；false 表示 config.xml 里本来就没这个 UID，未做修改。
       await message(
-        hit ? t.viewer.replacedOk(writeUid) : t.viewer.mappingNotFound(writeUid),
+        hit
+          ? t.viewer.replacedOk(writeUid)
+          : t.viewer.mappingNotFound(writeUid),
         { title: hit ? t.dialog.info : t.dialog.warning },
       );
       await showPreview(); // 刷新预览
@@ -108,6 +111,20 @@
 
   // 球员记录简写（未预览时为 null，模板用 ?? '—' 兜底）。
   const rec = $derived(preview?.record ?? null);
+
+  // ---------------- 「用此球员生成」（P3 数据源入口） ----------------
+  // 当前预览的球员是否已是生图数据源（按钮文字/描边随之变化作为反馈）。
+  const isSource = $derived(
+    !!previewedUid && imageaiStore.sourcePlayer?.uid === previewedUid,
+  );
+  /** 把当前预览的球员设为生图数据源并切到 AI 生图 Tab（appStore.resultsView 是
+   *  结果区 Tab 的全局态，与名单预览行尾「送生图」同一机制）。 */
+  function useForGenerate() {
+    if (!previewedUid) return;
+    // 姓名取名单记录（仅命中映射表时没有姓名，退回 UID 展示）。
+    setSourcePlayer(previewedUid, rec?.name?.trim() || previewedUid);
+    appStore.resultsView = "generate";
+  }
 
   // 第 15 列语义：按后端结构化协议码区分球员/职员，与名单预览表同一口径（不依赖中文文案）。
   const isStaffRoster = $derived(
@@ -304,14 +321,26 @@
       </div>
       <!-- 批量替换进行中禁用这两个按钮：本标签页是 keep-alive 常驻挂载的，切过去就能在替换跑着时
            操作；后端也已加同样的拒绝（见 replace_single_face），这里先挡一层免得用户撞错误框。 -->
-      <button class="btn" onclick={browseImage} disabled={!snap?.currentGroup || busy}
-        >{t.viewer.browseBtn}</button
+      <button
+        class="btn"
+        onclick={browseImage}
+        disabled={!snap?.currentGroup || busy}>{t.viewer.browseBtn}</button
       >
       <button
         class="btn primary"
         onclick={replaceIt}
         disabled={!uid.trim() || !imgPathInput.trim() || busy}
         >{t.viewer.replaceBtn}</button
+      >
+      <!-- 用此球员生成（P3）：把当前预览的球员设为生图数据源并切到 AI 生图；
+           已是该数据源时按钮文字/描边变化作为反馈。 -->
+      <button
+        class="btn gen-src-btn"
+        class:on={isSource}
+        onclick={useForGenerate}
+        disabled={!previewedUid || busy}
+        title={isSource ? t.gen.source.selected : t.gen.source.useForGen}
+        >{isSource ? t.gen.source.selected : t.gen.source.useForGen}</button
       >
     </div>
   </div>

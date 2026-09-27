@@ -3,12 +3,15 @@
      复用全局类与 icons，不重写控件。 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { message, save } from "@tauri-apps/plugin-dialog";
+  import { confirm, message, save } from "@tauri-apps/plugin-dialog";
   import { api } from "../../services/api";
   import UsageLedger from "./UsageLedger.svelte";
   import QueuePanel from "./QueuePanel.svelte";
   import ProviderDialog from "./ProviderDialog.svelte";
   import TemplateDialog from "./TemplateDialog.svelte";
+  import AvatarThumb from "../shared/AvatarThumb.svelte"; // 数据源条的头像缩略图 + 放大气泡（与名单预览共用）
+  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 缩略图 blob 加载器（卸载自动回收）
+  import { appStore } from "../../stores/app.svelte"; // 气泡缓存失效键（currentGroup）与备份开关
   import { t } from "../../text";
   import { showError } from "../../ui/dialog";
   import { icons } from "../../ui/icons";
@@ -16,10 +19,12 @@
     VARIABLE_HINTS,
     appendVariable,
     applyTemplate,
+    clearSourcePlayer,
     generate,
     imageaiStore,
     loadImageState,
     removeResult,
+    saveAndReplace,
     selectModel,
     selectProvider,
     setProviderKey,
@@ -106,11 +111,54 @@
     if (!imageaiStore.config) void loadImageState().catch(showError);
   });
 
+  // ---- 数据源条（P3）：头像缩略图（有映射时）+ 姓名 + UID + 清除按钮 ----
+  // 头像路径按 UID 问后端 query_avatars（映射缓存 → 存档快照，与名单预览同源），blob 交给
+  // 共用加载器（组件卸载自动回收）；取不到/取失败都静默降级为只显示姓名+UID（辅助展示不弹窗）。
+  const srcBlobs = createAvatarBlobs();
+  let srcAvatarPath = $state<string | undefined>(undefined);
+  let srcAvatarToken = 0;
+  $effect(() => {
+    const sp = imageaiStore.sourcePlayer;
+    const token = ++srcAvatarToken;
+    srcAvatarPath = undefined;
+    srcBlobs.clear();
+    if (!sp) return;
+    api
+      .queryAvatars([sp.uid])
+      .then((paths) => {
+        if (token !== srcAvatarToken) return; // 期间已换数据源：过期响应作废
+        const p = paths[sp.uid] ?? undefined;
+        srcAvatarPath = p;
+        if (p) void srcBlobs.load({ [sp.uid]: p });
+      })
+      .catch(() => {
+        if (token === srcAvatarToken) srcAvatarPath = undefined;
+      });
+  });
+
   async function onGenerate() {
     try {
       await generate();
     } catch (e) {
       await showError(e);
+    }
+  }
+
+  // ---- 结果卡「保存并替换」（P3）：确认后写入 _generated 并走单人换脸链路 ----
+  async function onSaveReplace(imgId: string) {
+    const sp = imageaiStore.sourcePlayer;
+    if (!sp) return; // 无数据源时按钮已禁用，这里只是防御
+    if (
+      !(await confirm(t.gen.saveReplace.confirm(sp.name), {
+        title: t.dialog.info,
+      }))
+    )
+      return;
+    try {
+      await saveAndReplace(imgId);
+      await message(t.gen.saveReplace.ok(sp.name), { title: t.dialog.info });
+    } catch (e) {
+      await showError(e); // 批量替换进行中被拒等后端错误走统一弹窗
     }
   }
 
@@ -142,6 +190,29 @@
     <button class:active={view === "queue"} onclick={() => (view = "queue")}
       >{t.gen.queue.tabQueue}</button
     >
+  </div>
+
+  <!-- 数据源条（P3）：显示当前数据源球员（头像缩略图 + 姓名 + UID + 清除），选中态描边高亮；
+       无数据源时灰字提示「变量走默认值」。 -->
+  <div class="src-bar" class:on={!!imageaiStore.sourcePlayer}>
+    {#if imageaiStore.sourcePlayer}
+      {@const sp = imageaiStore.sourcePlayer}
+      <AvatarThumb
+        itemKey={sp.uid}
+        url={srcBlobs.urls[sp.uid]}
+        path={srcAvatarPath}
+        groupKey={appStore.snapshot?.currentGroup}
+      />
+      <span class="src-name" title={sp.name}>{sp.name}</span>
+      <span class="src-uid mono">{sp.uid}</span>
+      <button
+        class="btn sm"
+        title={t.gen.source.clearTitle}
+        onclick={clearSourcePlayer}>{t.gen.source.clear}</button
+      >
+    {:else}
+      <span class="src-none">{t.gen.source.none}</span>
+    {/if}
   </div>
 
   <div class="bar">
@@ -359,6 +430,17 @@
                     >
                     {t.gen.save}
                   </button>
+                  <!-- 保存并替换（P3）：需数据源球员，无数据源禁用并提示入口 -->
+                  <button
+                    class="btn sm"
+                    disabled={!imageaiStore.sourcePlayer}
+                    title={imageaiStore.sourcePlayer
+                      ? t.gen.saveReplace.btn
+                      : t.gen.saveReplace.needPlayer}
+                    onclick={() => onSaveReplace(img.id)}
+                  >
+                    {t.gen.saveReplace.btn}
+                  </button>
                   <button class="btn sm" onclick={onGenerate}>
                     <svg
                       class="ic"
@@ -426,6 +508,33 @@
   /* 分段已是独立的一行：回到全局 .seg-tabs 版式（保留绿色标条），只去掉自带下边距（间距交给 .panel 的 gap） */
   .seg-tabs {
     margin: 0;
+  }
+  /* 数据源条：默认灰描边弱提示；有数据源时主题色描边高亮（两主题各自取色） */
+  .src-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    font-size: 12.5px;
+  }
+  .src-bar.on {
+    border-color: var(--accent);
+  }
+  .src-name {
+    font-weight: 600;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .src-uid {
+    color: var(--text-3);
+  }
+  .src-none {
+    color: var(--text-3);
   }
   .key-input {
     width: 170px;

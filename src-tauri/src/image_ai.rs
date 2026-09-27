@@ -257,6 +257,15 @@ pub struct UsageQuery {
     pub date: String,
 }
 
+/// 一条会话历史索引：指向 `.imgtmp` 里的一张临时图（文件名为 `{id}.{扩展名}`）。
+/// ts 为写入时间（now_ts 格式），该格式字典序即时间序，LRU 裁剪据此判断新旧。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub id: String,
+    pub ts: String,
+}
+
 // ===================== data/ 路径（与既有路径工具同居一层风格）=====================
 
 pub fn providers_path(d: &Path) -> PathBuf {
@@ -274,6 +283,9 @@ pub fn usage_path(d: &Path) -> PathBuf {
 pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
 }
+pub fn history_path(d: &Path) -> PathBuf {
+    tmp_dir(d).join("history.json")
+}
 
 // ===================== Config：内置默认 + 用户文件双来源（仿 templates::RuleConfig）=====================
 
@@ -290,8 +302,8 @@ pub struct Config {
 impl Config {
     /// 解析编译期内嵌的出厂默认。
     pub fn builtin() -> Self {
-        let f: ImageAiFile = serde_json::from_str(crate::assets::IMAGE_AI_RAW)
-            .expect("内置 image_ai.json 格式错误");
+        let f: ImageAiFile =
+            serde_json::from_str(crate::assets::IMAGE_AI_RAW).expect("内置 image_ai.json 格式错误");
         Config {
             providers: f.providers,
             settings: f.settings,
@@ -312,21 +324,30 @@ impl Config {
             }
             Err(LoadError::Missing) => {}
             Err(LoadError::Corrupt(e)) => {
-                return Err(format!("生图配置无法解析：{}（{e}）", providers_path(d).display()))
+                return Err(format!(
+                    "生图配置无法解析：{}（{e}）",
+                    providers_path(d).display()
+                ))
             }
         }
         match json_store::load::<Vec<PromptTemplate>>(&templates_path(d)) {
             Ok(v) => cfg.templates = v,
             Err(LoadError::Missing) => {}
             Err(LoadError::Corrupt(e)) => {
-                return Err(format!("模板无法解析：{}（{e}）", templates_path(d).display()))
+                return Err(format!(
+                    "模板无法解析：{}（{e}）",
+                    templates_path(d).display()
+                ))
             }
         }
         match json_store::load::<CodeDictionary>(&dictionary_path(d)) {
             Ok(v) => cfg.dictionary = v,
             Err(LoadError::Missing) => {}
             Err(LoadError::Corrupt(e)) => {
-                return Err(format!("码值表无法解析：{}（{e}）", dictionary_path(d).display()))
+                return Err(format!(
+                    "码值表无法解析：{}（{e}）",
+                    dictionary_path(d).display()
+                ))
             }
         }
         Ok(cfg)
@@ -343,15 +364,19 @@ impl Config {
         let mut file = match json_store::load::<ImageAiFile>(&pp) {
             Ok(f) => f,
             Err(LoadError::Missing) => {
-                json_store::save(&pp, &ImageAiFile {
+                json_store::save(
+                    &pp,
+                    &ImageAiFile {
+                        providers: builtin.providers.clone(),
+                        settings: builtin.settings.clone(),
+                    },
+                )?;
+                ImageAiFile {
                     providers: builtin.providers.clone(),
                     settings: builtin.settings.clone(),
-                })?;
-                ImageAiFile { providers: builtin.providers.clone(), settings: builtin.settings.clone() }
+                }
             }
-            Err(LoadError::Corrupt(e)) => {
-                return Err(format!("{}（{e}）", pp.display()))
-            }
+            Err(LoadError::Corrupt(e)) => return Err(format!("{}（{e}）", pp.display())),
         };
         let mut changed = false;
         for p in &builtin.providers {
@@ -360,7 +385,11 @@ impl Config {
                 changed = true;
             }
         }
-        if !file.providers.iter().any(|p| p.id == file.settings.default_provider_id) {
+        if !file
+            .providers
+            .iter()
+            .any(|p| p.id == file.settings.default_provider_id)
+        {
             file.settings.default_provider_id = "openai".into();
             changed = true;
         }
@@ -413,10 +442,13 @@ impl Config {
 
     /// 持久化服务商与设置（CRUD 命令收尾调用）。
     pub fn save_providers(&self, d: &Path) -> Result<(), String> {
-        json_store::save(&providers_path(d), &ImageAiFile {
-            providers: self.providers.clone(),
-            settings: self.settings.clone(),
-        })
+        json_store::save(
+            &providers_path(d),
+            &ImageAiFile {
+                providers: self.providers.clone(),
+                settings: self.settings.clone(),
+            },
+        )
     }
 
     pub fn save_templates(&self, d: &Path) -> Result<(), String> {
@@ -428,7 +460,10 @@ impl Config {
     }
 
     pub fn model(&self, provider_id: &str, model: &str) -> Option<&ModelInfo> {
-        self.provider(provider_id)?.models.iter().find(|m| m.model == model)
+        self.provider(provider_id)?
+            .models
+            .iter()
+            .find(|m| m.model == model)
     }
 }
 
@@ -487,12 +522,16 @@ pub fn validate_request(cfg: &Config, req: &GenRequest) -> Result<(), String> {
     let provider = cfg.provider(&req.provider_id).ok_or("请先选择服务商")?;
     // P2 起 openai/custom/volcano/dashscope 四家均已适配（image_ai_providers 族）。
     if provider.base_url.trim().is_empty()
-        && matches!(provider.kind, ProviderKind::OpenAI | ProviderKind::Custom | ProviderKind::Volcano)
+        && matches!(
+            provider.kind,
+            ProviderKind::OpenAI | ProviderKind::Custom | ProviderKind::Volcano
+        )
     {
         // dashscope endpoint 为固定常量，不需要 base_url；其余三家必须填写。
         return Err("请先在「服务商设置」中填写接口地址 Base URL".into());
     }
-    let model = cfg.model(&req.provider_id, &req.model)
+    let model = cfg
+        .model(&req.provider_id, &req.model)
         .ok_or("请先选择模型，或在服务商设置中为该服务添加模型")?;
     if model.capabilities.max_n > 0 && req.n > model.capabilities.max_n {
         return Err(format!("该模型单次最多 {} 张", model.capabilities.max_n));
@@ -583,8 +622,14 @@ pub async fn generate(
     mut req: GenRequest,
 ) -> Result<GenResult, String> {
     let (provider, model) = {
-        let provider = cfg.provider(&req.provider_id).cloned().ok_or("请先选择服务商")?;
-        let model = cfg.model(&req.provider_id, &req.model).cloned().ok_or("请先选择模型")?;
+        let provider = cfg
+            .provider(&req.provider_id)
+            .cloned()
+            .ok_or("请先选择服务商")?;
+        let model = cfg
+            .model(&req.provider_id, &req.model)
+            .cloned()
+            .ok_or("请先选择模型")?;
         (provider, model)
     };
     // 协议适配所需的服务商/能力信息随请求内部字段带入适配器（前端无需传）。
@@ -644,7 +689,16 @@ pub async fn generate(
                 real_usage,
             };
             append_usage(&usage_path(data_dir), &rec)?;
-            Ok(GenResult { images, record_id, estimated_cost: cost, currency: model.currency })
+            // 会话历史只是临时图索引：记录/裁剪失败不应掩盖已成功的生成（图片与台账均已落盘）。
+            if let Err(e) = record_history(data_dir, &images, cfg.settings.history_limit) {
+                log::warn!(target: "image_ai", "记录会话历史失败（不影响本次生成）: {e}");
+            }
+            Ok(GenResult {
+                images,
+                record_id,
+                estimated_cost: cost,
+                currency: model.currency,
+            })
         }
         Err(e) => {
             let rec = UsageRecord {
@@ -690,7 +744,10 @@ pub fn append_usage(path: &Path, rec: &UsageRecord) -> Result<(), String> {
 
 pub fn query_usage(path: &Path, q: &UsageQuery) -> Result<PageResult<UsageRecord>, String> {
     if !path.is_file() {
-        return Ok(PageResult { total: 0, items: vec![] });
+        return Ok(PageResult {
+            total: 0,
+            items: vec![],
+        });
     }
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut recs: Vec<UsageRecord> = Vec::new();
@@ -698,7 +755,9 @@ pub fn query_usage(path: &Path, q: &UsageQuery) -> Result<PageResult<UsageRecord
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(r) = serde_json::from_str::<UsageRecord>(line) else { continue };
+        let Ok(r) = serde_json::from_str::<UsageRecord>(line) else {
+            continue;
+        };
         if (!q.provider_id.is_empty() && r.provider_id != q.provider_id)
             || (!q.model.is_empty() && r.model != q.model)
             || (!q.status.is_empty() && r.status != q.status)
@@ -713,12 +772,81 @@ pub fn query_usage(path: &Path, q: &UsageQuery) -> Result<PageResult<UsageRecord
     let items = recs.into_iter().skip(q.offset).take(q.limit).collect();
     Ok(PageResult { total, items })
 }
+
+// ===================== 会话历史：LRU 裁剪（清单在 .imgtmp/history.json，随会话清理）=====================
+
+/// 读历史清单。缺失（首次生成）按空表；损坏同样按空表并告警——历史只是临时图索引，
+/// 不值得为它阻断生成（对齐台账「坏行跳过」的宽容口径），下次保存即完成重建。
+fn read_history(path: &Path) -> Vec<HistoryEntry> {
+    match json_store::load::<Vec<HistoryEntry>>(path) {
+        Ok(v) => v,
+        Err(LoadError::Missing) => Vec::new(),
+        Err(LoadError::Corrupt(e)) => {
+            log::warn!(target: "image_ai", "生图历史损坏，按空历史重建: {}（{e}）", path.display());
+            Vec::new()
+        }
+    }
+}
+
+/// 把本次生成的每张图记入历史（每图一条：裁剪粒度是图片文件，而非一次生成），
+/// 再按上限裁剪。仅 generate() 成功路径调用——失败路径图片未落盘，不产生历史。
+pub fn record_history(data_dir: &Path, images: &[GenImage], limit: usize) -> Result<(), String> {
+    // 目录可能不存在（极端情况下被外部清走）：对齐 append_usage「自建父目录」的惯例，不让索引写盘因目录缺失而失败。
+    fs::create_dir_all(tmp_dir(data_dir)).map_err(|e| e.to_string())?;
+    let path = history_path(data_dir);
+    let ts = now_ts();
+    let mut hist = read_history(&path);
+    for img in images {
+        hist.push(HistoryEntry {
+            id: img.id.clone(),
+            ts: ts.clone(),
+        });
+    }
+    json_store::save(&path, &hist)?;
+    enforce_history_limit(data_dir, limit)
+}
+
+/// 按写入时间倒序保留最新 limit 条历史，超出的条目连同 `.imgtmp` 中的图片文件一并删除。
+/// limit==0 视为「不裁剪」：与 P1 的「无上限」语义对齐（出厂默认 20，0 是用户显式关闭裁剪的开关，
+/// 若按「全删」解释会在用户改配置的瞬间清空全部会话图片，代价不对称）。
+pub fn enforce_history_limit(data_dir: &Path, limit: usize) -> Result<(), String> {
+    if limit == 0 {
+        return Ok(());
+    }
+    let path = history_path(data_dir);
+    let mut hist = read_history(&path);
+    if hist.len() <= limit {
+        return Ok(());
+    }
+    // ts 为 "%Y-%m-%d %H:%M:%S"，字典序即时间序；按升序稳定排序后旧的聚在前，
+    // 同一秒内先写入的条目排前（先写入=更旧），与正常追加顺序一致，裁剪结果确定。
+    hist.sort_by(|a, b| a.ts.cmp(&b.ts));
+    let excess: Vec<HistoryEntry> = hist.drain(..hist.len() - limit).collect();
+    let tmp = tmp_dir(data_dir);
+    for e in &excess {
+        // 图片名 `{id}.{扩展名}`，扩展名随厂商返回格式变化，只能按文件主干匹配；
+        // 对应文件可能已被清走（prepare_session/手动清理），找不到即跳过；删除失败仅告警不阻断。
+        let Ok(rd) = fs::read_dir(&tmp) else { continue };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.file_stem().map(|s| s == e.id.as_str()).unwrap_or(false) {
+                if let Err(err) = fs::remove_file(&p) {
+                    log::warn!(target: "image_ai", "清理过期临时图片失败 {}: {err}", p.display());
+                }
+            }
+        }
+    }
+    json_store::save(&path, &hist)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn gen_req() -> GenRequest {
@@ -740,8 +868,14 @@ mod tests {
 
     #[test]
     fn provider_kind_serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&ProviderKind::Dashscope).unwrap(), r#""dashscope""#);
-        assert_eq!(serde_json::from_str::<ProviderKind>(r#""custom""#).unwrap(), ProviderKind::Custom);
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Dashscope).unwrap(),
+            r#""dashscope""#
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>(r#""custom""#).unwrap(),
+            ProviderKind::Custom
+        );
     }
 
     #[test]
@@ -762,7 +896,10 @@ mod tests {
         assert!(dictionary_path(root.path()).is_file());
         let before = fs::read_to_string(providers_path(root.path())).unwrap();
         Config::ensure_user_files(root.path()).unwrap();
-        assert_eq!(before, fs::read_to_string(providers_path(root.path())).unwrap());
+        assert_eq!(
+            before,
+            fs::read_to_string(providers_path(root.path())).unwrap()
+        );
     }
 
     #[test]
@@ -782,7 +919,10 @@ mod tests {
         cfg.providers[0].name = "MyOpenAI".into();
         cfg.save_providers(root.path()).unwrap();
         Config::ensure_user_files(root.path()).unwrap();
-        assert_eq!(Config::load(root.path()).unwrap().providers[0].name, "MyOpenAI");
+        assert_eq!(
+            Config::load(root.path()).unwrap().providers[0].name,
+            "MyOpenAI"
+        );
     }
 
     #[test]
@@ -809,8 +949,10 @@ mod tests {
 
     #[test]
     fn render_replaces_and_reports_missing() {
-        let r = render("一名{{ethnicity}}球员，{{age}}岁",
-                      &vars(&[("ethnicity", "东亚"), ("age", "18")]));
+        let r = render(
+            "一名{{ethnicity}}球员，{{age}}岁",
+            &vars(&[("ethnicity", "东亚"), ("age", "18")]),
+        );
         assert_eq!(r.text, "一名东亚球员，18岁");
         assert!(r.missing.is_empty());
         let r = render("{{hairLength|短发}}的{{name|球员}}", &vars(&[]));
@@ -838,11 +980,23 @@ mod tests {
     fn append_and_query_usage() {
         let p = tempfile::tempdir().unwrap().path().join("usage.jsonl");
         let mut rec = UsageRecord {
-            id: "a".into(), ts: "2026-09-26 10:00:00".into(), provider_id: "openai".into(),
-            provider_name: "OpenAI".into(), kind: "openai".into(), model: "gpt-image-1".into(),
-            size: "1024x1024".into(), n: 1, seed: None, quality: None, prompt: "p".into(),
-            negative_prompt: String::new(), estimated_cost: 0.04, currency: "USD".into(),
-            status: "success".into(), error: String::new(), real_usage: None,
+            id: "a".into(),
+            ts: "2026-09-26 10:00:00".into(),
+            provider_id: "openai".into(),
+            provider_name: "OpenAI".into(),
+            kind: "openai".into(),
+            model: "gpt-image-1".into(),
+            size: "1024x1024".into(),
+            n: 1,
+            seed: None,
+            quality: None,
+            prompt: "p".into(),
+            negative_prompt: String::new(),
+            estimated_cost: 0.04,
+            currency: "USD".into(),
+            status: "success".into(),
+            error: String::new(),
+            real_usage: None,
         };
         append_usage(&p, &rec).unwrap();
         rec.id = "b".into();
@@ -850,8 +1004,12 @@ mod tests {
         rec.status = "failed".into();
         append_usage(&p, &rec).unwrap();
         let q = UsageQuery {
-            offset: 0, limit: 10, provider_id: String::new(), model: String::new(),
-            status: String::new(), date: String::new(),
+            offset: 0,
+            limit: 10,
+            provider_id: String::new(),
+            model: String::new(),
+            status: String::new(),
+            date: String::new(),
         };
         let page = query_usage(&p, &q).unwrap();
         assert_eq!(page.total, 2);
@@ -864,8 +1022,12 @@ mod tests {
         let p = dir.path().join("usage.jsonl");
         fs::write(&p, "not json\n").unwrap();
         let q = UsageQuery {
-            offset: 0, limit: 10, provider_id: String::new(), model: String::new(),
-            status: String::new(), date: String::new(),
+            offset: 0,
+            limit: 10,
+            provider_id: String::new(),
+            model: String::new(),
+            status: String::new(),
+            date: String::new(),
         };
         assert_eq!(query_usage(&p, &q).unwrap().total, 0); // 坏行不报错
     }
@@ -901,5 +1063,124 @@ mod tests {
         assert_eq!(turbo.capabilities.max_n, 4);
         assert!(turbo.capabilities.supports_negative_prompt);
         assert!(turbo.capabilities.sizes.contains(&"1024*1024".to_string()));
+    }
+
+    // ===================== 会话历史 LRU =====================
+
+    /// 在 .imgtmp 造一张假图文件（裁剪按文件主干匹配，扩展名随意）。TempDir 必须先绑定再使用。
+    fn fake_image(root: &Path, id: &str) -> PathBuf {
+        fs::create_dir_all(tmp_dir(root)).unwrap();
+        let p = tmp_dir(root).join(format!("{id}.png"));
+        fs::write(&p, b"img").unwrap();
+        p
+    }
+
+    /// 造一条指定秒数的时间戳条目（"%H:%M:%S" 字典序即时间序，秒数递增即时间递增）。
+    fn hist_entry(id: &str, sec: u32) -> HistoryEntry {
+        HistoryEntry {
+            id: id.into(),
+            ts: format!("2026-09-26 10:00:{sec:02}"),
+        }
+    }
+
+    /// 测试里读回历史清单（LoadError 未实现 Debug，不能对 json_store::load 直接 unwrap）。
+    fn load_history(root: &Path) -> Vec<HistoryEntry> {
+        serde_json::from_str(&fs::read_to_string(history_path(root)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn enforce_keeps_newest_and_deletes_oldest_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
+        let ids: Vec<String> = (0..7).map(|_| new_id()).collect();
+        let hist: Vec<HistoryEntry> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| hist_entry(id, i as u32))
+            .collect();
+        json_store::save(&history_path(dir.path()), &hist).unwrap();
+        for id in &ids {
+            fake_image(dir.path(), id);
+        }
+
+        enforce_history_limit(dir.path(), 5).unwrap();
+
+        // 最早 2 张连文件一起删，最新 5 张保留
+        assert!(!tmp_dir(dir.path()).join(format!("{}.png", ids[0])).exists());
+        assert!(!tmp_dir(dir.path()).join(format!("{}.png", ids[1])).exists());
+        for id in &ids[2..] {
+            assert!(tmp_dir(dir.path()).join(format!("{}.png", id)).exists());
+        }
+        let kept: Vec<HistoryEntry> = load_history(dir.path());
+        assert_eq!(kept.len(), 5);
+        assert_eq!(kept[0].id, ids[2]); // 清单保持时间升序：最旧在先
+        assert_eq!(kept[4].id, ids[6]);
+    }
+
+    #[test]
+    fn corrupt_history_rebuilds_and_trims() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
+        fs::write(history_path(dir.path()), "not json").unwrap();
+        // 损坏不报错，按空历史处理（空表不触发裁剪）
+        enforce_history_limit(dir.path(), 2).unwrap();
+
+        // 随后记录与裁剪恢复正常：3 张图 limit=2 → 最旧一张连文件一起删
+        let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
+        let images: Vec<GenImage> = ids
+            .iter()
+            .map(|id| GenImage {
+                id: id.clone(),
+                path: String::new(),
+                bytes: 0,
+            })
+            .collect();
+        for id in &ids {
+            fake_image(dir.path(), id);
+        }
+        record_history(dir.path(), &images, 2).unwrap();
+        assert!(!tmp_dir(dir.path()).join(format!("{}.png", ids[0])).exists());
+        assert!(tmp_dir(dir.path()).join(format!("{}.png", ids[1])).exists());
+        assert!(tmp_dir(dir.path()).join(format!("{}.png", ids[2])).exists());
+        let kept: Vec<HistoryEntry> = load_history(dir.path());
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn trim_skips_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
+        let hist: Vec<HistoryEntry> = (0..3)
+            .map(|i| hist_entry(&format!("ghost{i}"), i as u32))
+            .collect();
+        json_store::save(&history_path(dir.path()), &hist).unwrap();
+        // 对应文件全都不存在，裁剪不应报错
+        enforce_history_limit(dir.path(), 1).unwrap();
+        let kept: Vec<HistoryEntry> = load_history(dir.path());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "ghost2");
+    }
+
+    #[test]
+    fn zero_limit_means_no_trim() {
+        // limit==0 与 P1「无上限」语义对齐：不裁剪、不动文件
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
+        let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
+        let hist: Vec<HistoryEntry> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| hist_entry(id, i as u32))
+            .collect();
+        json_store::save(&history_path(dir.path()), &hist).unwrap();
+        for id in &ids {
+            fake_image(dir.path(), id);
+        }
+        enforce_history_limit(dir.path(), 0).unwrap();
+        for id in &ids {
+            assert!(tmp_dir(dir.path()).join(format!("{}.png", id)).exists());
+        }
+        let kept: Vec<HistoryEntry> = load_history(dir.path());
+        assert_eq!(kept.len(), 3);
     }
 }

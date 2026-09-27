@@ -38,4 +38,11 @@ export const icons: Record<string, IconDef> = {
   sun: {
     body: '<circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />',
   },
+  image: {
+    body: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21" />',
+  },
+  download: {
+    body: '<path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />',
+  },
+  refresh: { body: '<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />' },
 };

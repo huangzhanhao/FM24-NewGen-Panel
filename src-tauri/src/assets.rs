@@ -13,6 +13,12 @@ use std::sync::LazyLock;
 pub const STANDARD2_RAW: &str = include_str!("../assets/standard2.json");
 /// 标准三（细分目录）规则的出厂默认：FolderList + Ethnics + DefaultCodes + 族群映射规则块 + Fallback。
 pub const STANDARD3_RAW: &str = include_str!("../assets/standard3.json");
+/// AI 文生图出厂服务商与设置（image_ai::Config::builtin 解析；首次启动导出 data/image_ai.json）。
+pub const IMAGE_AI_RAW: &str = include_str!("../assets/image_ai.json");
+/// AI 文生图出厂提示词模板（导出 data/prompts/templates.json）。
+pub const IMAGE_AI_TEMPLATES_RAW: &str = include_str!("../assets/image_ai_templates.json");
+/// AI 文生图出厂码值转译表（导出 data/prompts/code_translation.json）。
+pub const IMAGE_AI_DICT_RAW: &str = include_str!("../assets/image_ai_code_translation.json");
 
 // ---------------- 国籍对照表（基础数据，非标准规则） ----------------
 /// 语言 → {国籍显示文本: 三字码}。rtf_scanner 解析名单时按数据语言查它，把各语言的国籍显示文本

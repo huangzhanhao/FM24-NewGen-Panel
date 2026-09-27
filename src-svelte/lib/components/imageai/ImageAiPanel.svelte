@@ -249,7 +249,11 @@
       value={imageaiStore.model}
       onchange={(e) => selectModel(e.currentTarget.value)}
     >
-      {#each imageaiStore.provider?.models ?? [] as m (m.model)}
+      <!-- 默认模型不在明细行里时也要能选中（custom 服务商常无明细行，见 store.modelInfo 兜底） -->
+      {#if imageaiStore.provider?.defaultModel && !(imageaiStore.provider?.models ?? []).some((m) => m.model === imageaiStore.provider?.defaultModel)}
+        <option value={imageaiStore.provider.defaultModel}>{imageaiStore.provider.defaultModel}</option>
+      {/if}
+      {#each imageaiStore.provider?.models ?? [] as m}
         <option value={m.model}>{m.label}</option>
       {/each}
     </select>

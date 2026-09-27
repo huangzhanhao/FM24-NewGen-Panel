@@ -463,11 +463,27 @@ impl Config {
         self.providers.iter().find(|p| p.id == id)
     }
 
-    pub fn model(&self, provider_id: &str, model: &str) -> Option<&ModelInfo> {
-        self.provider(provider_id)?
-            .models
-            .iter()
-            .find(|m| m.model == model)
+    /// 查模型明细行；查不到时按「默认模型」兜底合成一行通用模型。
+    /// 【为什么兜底】custom（OpenAI 兼容服务）服务商只有 default_model 一个字符串，
+    /// 模型明细行（尺寸/价格/能力）要手工编辑 image_ai.json 才有——若校验死盯明细行，
+    /// 用户填了默认模型也会被「请先选择模型」拦住（实测反馈）。合成的行为：
+    /// 不限张数（max_n=0）、不发 response_format/seed 等高级参数（能力默认 false）、
+    /// 无价格表（估价 0，台账照记）；要精细控制就在 JSON 里补明细行，明细行优先。
+    pub fn model(&self, provider_id: &str, model: &str) -> Option<ModelInfo> {
+        let p = self.provider(provider_id)?;
+        if let Some(m) = p.models.iter().find(|m| m.model == model) {
+            return Some(m.clone());
+        }
+        if !p.default_model.is_empty() && p.default_model == model {
+            return Some(ModelInfo {
+                model: model.to_string(),
+                label: model.to_string(),
+                currency: "USD".into(),
+                prices: HashMap::new(),
+                capabilities: Capabilities::default(),
+            });
+        }
+        None
     }
 }
 
@@ -688,7 +704,6 @@ pub async fn generate(
             .ok_or("请先选择服务商")?;
         let model = cfg
             .model(&req.provider_id, &req.model)
-            .cloned()
             .ok_or("请先选择模型")?;
         (provider, model)
     };
@@ -1029,6 +1044,31 @@ mod tests {
         let cfg = Config::builtin();
         let openai = cfg.model("openai", "gpt-image-1").unwrap();
         assert!(!openai.capabilities.supports_response_format);
+    }
+
+    #[test]
+    fn default_model_without_detail_row_is_served() {
+        // custom 服务商只有 default_model 字符串、没有模型明细行：
+        // 请求默认模型必须放行（合成通用能力），这是用户实测被「请先选择模型」拦住的根因。
+        let mut cfg = Config::builtin();
+        upsert_provider(
+            &mut cfg,
+            ProviderConfig {
+                id: "my-relay".into(),
+                kind: ProviderKind::Custom,
+                name: "中转".into(),
+                base_url: "https://x/compatible-mode/v1".into(),
+                default_model: "qwen-image-3.0".into(),
+                models: vec![], // 明细行缺失：正是用户文件的真实形状
+            },
+        )
+        .unwrap();
+        let m = cfg.model("my-relay", "qwen-image-3.0").unwrap();
+        assert_eq!(m.model, "qwen-image-3.0");
+        assert!(m.prices.is_empty(), "无价格表 → 估价 0，不阻断");
+        assert_eq!(m.capabilities.max_n, 0, "0 = 不限张数");
+        // 请求的不是默认模型：仍然拒绝（提示用户去设置）。
+        assert!(cfg.model("my-relay", "other-model").is_none());
     }
 
     #[test]

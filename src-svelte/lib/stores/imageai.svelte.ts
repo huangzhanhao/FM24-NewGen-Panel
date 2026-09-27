@@ -51,8 +51,30 @@ export const imageaiStore = $state({
   get provider() {
     return this.config?.providers.find((p) => p.id === this.providerId) ?? null;
   },
+  /** 当前模型明细；无明细行但等于服务商默认模型时合成通用能力（与后端 Config::model
+   *  的兜底同口径）：不限张数、高级参数一律不发、无价格表（估价 0）。 */
   get modelInfo() {
-    return this.provider?.models.find((m) => m.model === this.model) ?? null;
+    const found = this.provider?.models.find((m) => m.model === this.model);
+    if (found) return found;
+    if (this.model && this.model === this.provider?.defaultModel) {
+      return {
+        model: this.model,
+        label: this.model,
+        currency: 'USD',
+        prices: {},
+        capabilities: {
+          sizes: [],
+          maxN: 0,
+          supportsQuality: false,
+          supportsSeed: false,
+          supportsSteps: false,
+          supportsNegativePrompt: false,
+          supportsResponseFormat: false,
+          qualities: [],
+        },
+      };
+    }
+    return null;
   },
   /** 全局勾选数：直接统计 map 中为 true 的数量，不校验 uid 是否仍在当前名单/当前页
    *  （勾选跟随球员，见 selectedInTable 注释）。名单表格的「加入队列」按钮用的是

@@ -2,6 +2,13 @@
 
 > 承接 P1/P2（image_ai.rs 单文件核心 + image_ai_providers/ 适配器族 + image_ai_queue.rs 队列）。
 > 触发点：用户验收反馈④「提示词转译后，肤色带入色卡号」+ 决策「直接接球员数据源」。
+>
+> **执行记录（2026-09-27，全部完成）**
+> - P3-1 `0c4bf2d`：build_vars + preview_prompt（+3 测试；CodeKind/translate/HairLength 的 P3 预留 dead_code 警告按预期消失）
+> - P3-2 `ec895eb`：save_and_replace（+4 测试；copy_atomic 为覆盖写语义，「不覆盖」由 next_free_target 计数+避让保证，绝不静默覆盖）
+> - P3-3 `440ca67`：前端数据源条/两入口/结果卡保存并替换/队列逐球员 preview_prompt（vitest 33 全绿；切 Tab 复用 appStore.resultsView='generate'，零新增 props）
+> - P3-4：cargo 205/0、pnpm test 33/33、pnpm check 0/0、tauri dev 冒烟通过（进程已清理）；双主题与 860px 视觉验收留给人工
+> - 验收修复①②③（分段独立成行/工作台 Key 直达/尺寸预设+自定义默认 350×350）见 `d2d839b`
 
 **Goal：** 球员数据源 → 提示词变量自动填充（肤色经码值字典转译为色卡号）→ 结果卡「保存并替换」闭环。
 

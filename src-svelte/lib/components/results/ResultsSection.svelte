@@ -1,8 +1,9 @@
-<!-- 结果区的 Tab 切换器：在「名单预览」「单人微调」「快照预览」三个子组件之间切换。 -->
+<!-- 结果区的 Tab 切换器：在「名单预览」「单人微调」「快照预览」「AI 生图」四个子组件之间切换。 -->
 <script lang="ts">
   import PlayersTable from './PlayersTable.svelte';
   import PlayerViewer from './PlayerViewer.svelte';
   import SnapshotPreview from './SnapshotPreview.svelte';
+  import ImageAiPanel from '../imageai/ImageAiPanel.svelte';
   import { t } from '../../text'; // 全局文案常量
   import { appStore } from '../../stores/app.svelte';
 
@@ -11,11 +12,12 @@
 </script>
 
 <div class="card grow">
-  <!-- 三个分段按钮，选中的加 active 类。 -->
+  <!-- 四个分段按钮，选中的加 active 类。 -->
   <div class="seg-tabs">
     <button class:active={view === 'table'} onclick={() => (appStore.resultsView = 'table')}>{t.results.tabTable}</button>
     <button class:active={view === 'viewer'} onclick={() => (appStore.resultsView = 'viewer')}>{t.results.tabViewer}</button>
     <button class:active={view === 'snapshot'} onclick={() => (appStore.resultsView = 'snapshot')}>{t.results.tabSnapshot}</button>
+    <button class:active={view === 'generate'} onclick={() => (appStore.resultsView = 'generate')}>{t.gen.tabGenerate}</button>
   </div>
   <div class="card-body">
     <!-- 名单预览 / 快照预览保持条件渲染：切走即卸载，本地搜索/页码/排序随之重置。 -->
@@ -28,6 +30,9 @@
          全部保留，直至用户重新搜索；隐藏层 display:none 不占布局、不进 Tab 焦点序。 -->
     <div class="tab-pane" class:active={view === 'viewer'}>
       <PlayerViewer />
+    </div>
+    <div class="tab-pane" class:active={view === 'generate'}>
+      <ImageAiPanel />
     </div>
   </div>
 </div>

@@ -5,11 +5,11 @@
 //! - 出厂默认是 assets/ 三份 JSON（assets.rs include_str! 内嵌），用户可编辑副本在 data/；
 //!   Config::builtin/load/ensure_user_files 仿 templates::RuleConfig；
 //! - 原子写复用 json_store、分页复用 paging::PageResult。
-//! 【扩展点】P2 多家适配器成「族」时，按 templates/ 目录先例把协议适配拆为 image_ai_providers/。
+//! P2 起多家协议适配成「族」拆在 image_ai_providers/（openai 迁入 + volcano + dashscope），
+//! 本模块只保留契约/配置/渲染/台账与生成编排，生成时按 ProviderKind 经 registry 分发。
 
 use crate::json_store::{self, LoadError};
 use crate::paging::PageResult;
-use base64::Engine;
 use rand::Rng; // new_id() 用 rand::rng().random()（本项目既有模块同样显式导入，见 templates/mod.rs）
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -174,6 +174,14 @@ pub struct GenRequest {
     pub steps: Option<u32>,
     #[serde(default)]
     pub uid: Option<String>,
+    /// 内部字段（前端不传，serde 缺省为空）：`generate` 解析出服务商后填入 base_url，
+    /// 适配器据此拼 endpoint。
+    #[serde(default)]
+    pub base_url: String,
+    /// 内部字段：`generate` 从模型能力集 `supports_response_format` 拷入，
+    /// OpenAI 协议适配器据此决定是否传 response_format。
+    #[serde(default)]
+    pub supports_response_format: bool,
 }
 
 /// 一张临时图片元信息。
@@ -477,10 +485,11 @@ pub fn validate_request(cfg: &Config, req: &GenRequest) -> Result<(), String> {
         return Err("张数至少为 1".into());
     }
     let provider = cfg.provider(&req.provider_id).ok_or("请先选择服务商")?;
-    if !matches!(provider.kind, ProviderKind::OpenAI | ProviderKind::Custom) {
-        return Err("该服务商适配将在后续版本提供，当前请使用 OpenAI 或自定义兼容服务".into());
-    }
-    if provider.base_url.trim().is_empty() {
+    // P2 起 openai/custom/volcano/dashscope 四家均已适配（image_ai_providers 族）。
+    if provider.base_url.trim().is_empty()
+        && matches!(provider.kind, ProviderKind::OpenAI | ProviderKind::Custom | ProviderKind::Volcano)
+    {
+        // dashscope endpoint 为固定常量，不需要 base_url；其余三家必须填写。
         return Err("请先在「服务商设置」中填写接口地址 Base URL".into());
     }
     let model = cfg.model(&req.provider_id, &req.model)
@@ -555,74 +564,7 @@ pub fn render(body: &str, vars: &HashMap<String, String>) -> RenderOutcome {
     RenderOutcome { text: out, missing }
 }
 
-// ===================== OpenAI Images 协议纯函数 =====================
-
-pub fn endpoint(base_url: &str) -> String {
-    format!("{}/images/generations", base_url.trim_end_matches('/'))
-}
-
-/// 组装 OpenAI Images 请求体。
-/// `supports_response_format` 来自模型能力集（`ModelInfo.capabilities`）：
-/// OpenAI 官方 gpt-image-1 系列**不支持** `response_format`（始终返回 base64，传了即 400），
-/// 出厂该能力为 false；OpenAI 兼容的第三方服务多默认返回 URL，需显式声明 b64_json 免去一次下载。
-pub fn build_body(req: &GenRequest, supports_response_format: bool) -> serde_json::Value {
-    use serde_json::json;
-    let mut v = json!({
-        "model": req.model,
-        "prompt": req.prompt,
-        "n": req.n,
-        "size": req.size,
-    });
-    let obj = v.as_object_mut().unwrap();
-    if supports_response_format {
-        obj.insert("response_format".into(), json!("b64_json"));
-    }
-    if let Some(q) = &req.quality {
-        if q != "auto" {
-            obj.insert("quality".into(), json!(q));
-        }
-    }
-    // OpenAI 不支持 seed，故此处不插入；支持 seed 的适配器在 P2 各自追加。
-    v
-}
-
-#[derive(Debug)]
-pub enum ImagePayload {
-    B64(String),
-    Url(String),
-}
-
-pub fn parse_images(resp: &serde_json::Value) -> Result<Vec<ImagePayload>, String> {
-    if let Some(err) = resp.get("error") {
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
-        return Err(format!("服务商返回错误：{msg}"));
-    }
-    let items = resp.get("data").and_then(|d| d.as_array()).ok_or("响应缺少 data 数组")?;
-    let mut out = Vec::new();
-    for item in items {
-        if let Some(b64) = item.get("b64_json").and_then(|x| x.as_str()) {
-            out.push(ImagePayload::B64(b64.to_string()));
-        } else if let Some(url) = item.get("url").and_then(|x| x.as_str()) {
-            out.push(ImagePayload::Url(url.to_string()));
-        } else {
-            return Err("响应中的图片既无 b64_json 也无 url".into());
-        }
-    }
-    if out.is_empty() {
-        return Err("data 数组为空".into());
-    }
-    Ok(out)
-}
-
-pub fn parse_real_usage(resp: &serde_json::Value) -> Option<RealUsage> {
-    let u = resp.get("usage")?;
-    Some(RealUsage {
-        input_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-        output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-    })
-}
-
-// ===================== 生成编排：HTTP → 字节 → 临时文件 → 估价 =====================
+// ===================== 生成编排：适配器 → 字节 → 临时文件 → 估价 =====================
 
 pub fn new_id() -> String {
     let bytes: [u8; 8] = rand::rng().random();
@@ -638,13 +580,16 @@ pub async fn generate(
     data_dir: &Path,
     cfg: &Config,
     key: &str,
-    req: GenRequest,
+    mut req: GenRequest,
 ) -> Result<GenResult, String> {
     let (provider, model) = {
         let provider = cfg.provider(&req.provider_id).cloned().ok_or("请先选择服务商")?;
         let model = cfg.model(&req.provider_id, &req.model).cloned().ok_or("请先选择模型")?;
         (provider, model)
     };
+    // 协议适配所需的服务商/能力信息随请求内部字段带入适配器（前端无需传）。
+    req.base_url = provider.base_url.clone();
+    req.supports_response_format = model.capabilities.supports_response_format;
     let record_id = new_id();
     let ts = now_ts();
 
@@ -654,51 +599,26 @@ pub async fn generate(
             .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
-        let url = endpoint(&provider.base_url);
-        let resp = client
-            .post(&url)
-            .bearer_auth(key)
-            .json(&build_body(&req, model.capabilities.supports_response_format))
-            .send()
-            .await
-            .map_err(|e| format!("请求发送失败: {e}"))?;
-        let status = resp.status();
-        let json: serde_json::Value =
-            resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
-        let payloads = parse_images(&json).map_err(|e| format!("HTTP {status}：{e}"))?;
-        let real_usage = parse_real_usage(&json);
+        let adapter = crate::image_ai_providers::for_kind(provider.kind);
+        // 适配器内部完成 POST/解析/（异步厂商的 submit→poll→fetch），图片已为字节。
+        let fetched = adapter.generate(&client, key, &req).await?;
 
         let tmp = tmp_dir(data_dir);
         fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
         let mut images = Vec::new();
-        for payload in payloads {
-            let bytes = match payload {
-                ImagePayload::B64(b64) => base64::engine::general_purpose::STANDARD
-                    .decode(b64.trim())
-                    .map_err(|e| format!("图片 base64 解码失败: {e}"))?,
-                ImagePayload::Url(u) => {
-                    // URL 有时效：此刻立即下载，不懒加载。
-                    client
-                        .get(&u)
-                        .send()
-                        .await
-                        .map_err(|e| format!("图片下载失败: {e}"))?
-                        .error_for_status()
-                        .map_err(|e| format!("图片下载失败: {e}"))?
-                        .bytes()
-                        .await
-                        .map_err(|e| format!("图片读取失败: {e}"))?
-                        .to_vec()
-                }
-            };
+        for img in fetched.images {
             let id = new_id();
-            let path = tmp.join(format!("{id}.png"));
-            fs::write(&path, &bytes).map_err(|e| format!("临时图片写入失败: {e}"))?;
-            images.push(GenImage { id, path: path.to_string_lossy().to_string(), bytes: bytes.len() as u64 });
+            let path = tmp.join(format!("{id}.{}", img.extension));
+            fs::write(&path, &img.bytes).map_err(|e| format!("临时图片写入失败: {e}"))?;
+            images.push(GenImage {
+                id,
+                path: path.to_string_lossy().to_string(),
+                bytes: img.bytes.len() as u64,
+            });
         }
         let unit = model.prices.get(&req.size).copied().unwrap_or(0.0);
         let cost = (unit * req.n as f64 * 1000.0).round() / 1000.0;
-        Ok((images, cost, real_usage))
+        Ok((images, cost, fetched.real_usage))
     }
     .await;
 
@@ -813,6 +733,8 @@ mod tests {
             seed: None,
             steps: None,
             uid: None,
+            base_url: String::new(),
+            supports_response_format: false,
         }
     }
 
@@ -899,45 +821,11 @@ mod tests {
     }
 
     #[test]
-    fn build_body_quality_and_response_format_rules() {
-        // 能力集允许时才带 response_format。
-        let b = build_body(&gen_req(), true);
-        assert_eq!(b["quality"], "high");
-        assert_eq!(b["response_format"], "b64_json");
-        // gpt-image-1 能力为 false：整条字段不得出现（否则官方 API 返回 400）。
-        let b = build_body(&gen_req(), false);
-        assert!(b.get("response_format").is_none());
-        let mut r = gen_req();
-        r.quality = Some("auto".into());
-        assert!(build_body(&r, true).get("quality").is_none());
-    }
-
-    #[test]
     fn builtin_openai_disables_response_format() {
         // 出厂 gpt-image-1 必须关掉该能力，custom 保持开启。
         let cfg = Config::builtin();
         let openai = cfg.model("openai", "gpt-image-1").unwrap();
         assert!(!openai.capabilities.supports_response_format);
-    }
-
-    #[test]
-    fn parse_images_accepts_b64_url_and_error() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"data":[{"b64_json":"QUJD"},{"url":"https://x/a.png"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(parse_images(&v).unwrap().len(), 2);
-        let v: serde_json::Value = serde_json::from_str(r#"{"error":{"message":"bad key"}}"#).unwrap();
-        assert_eq!(parse_images(&v).unwrap_err(), "服务商返回错误：bad key");
-    }
-
-    #[test]
-    fn parse_real_usage_tokens() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"usage":{"input_tokens":120,"output_tokens":2899}}"#,
-        )
-        .unwrap();
-        assert_eq!(parse_real_usage(&v).unwrap().output_tokens, 2899);
     }
 
     #[test]

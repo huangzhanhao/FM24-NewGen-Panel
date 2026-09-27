@@ -10,6 +10,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 同下：resolver 2 下 build-dependencies 的 feature 独立统一，tauri-build → schemars
+# → indexmap 1.9.3 的 build 单元必须单独打开 std，否则 build.rs 探测失败同样炸 E0107。
+indexmap = { version = "1.9.3", features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -24,6 +27,10 @@ log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
 tauri-plugin-log = "2"
+# 显式打开 indexmap 1.9.3 的 std feature（经 feature 统一作用于 schemars 0.8 的实例）：
+# 该版本 build.rs 依赖 autocfg 子进程探测 std，本机环境下探测会静默失败，导致
+# schemars 的 `IndexMap<K, V>` 别名因缺失默认泛型参数而报 E0107。std 可用时探测无必要。
+indexmap = { version = "1.9.3", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

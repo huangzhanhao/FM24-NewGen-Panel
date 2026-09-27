@@ -28,6 +28,7 @@ use commands::AppState;
 use logger::{LogMemory, LogSink, Logger};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::Manager; // app.handle() 取句柄（交给日志批推线程）
 use tauri_plugin_log::{fern, RotationStrategy, Target, TargetKind, TimezoneStrategy};
@@ -234,6 +235,14 @@ pub fn run() {
             //    自研 Logger 门面要到第 4 步才建起来，而迁移的失败恰恰必须被看见。
             migrate_legacy_user_data(&data_dir);
 
+            // AI 文生图：清理上次临时图片、导出/补齐配置文件。失败不阻断启动。
+            if let Err(e) = image_ai::Config::prepare_session(&data_dir) {
+                log::warn!(target: "image_ai", "临时目录清理失败: {e}");
+            }
+            if let Err(e) = image_ai::Config::ensure_user_files(&data_dir) {
+                log::warn!(target: "image_ai", "生图配置初始化失败: {e}");
+            }
+
             // 3) 主窗口编程式创建（而非在 tauri.conf.json 里声明）：
             // 只有 Builder API 能指定 WebView2 数据目录为绝对路径，把浏览器缓存/localStorage
             // 一并便携化到 <data>\webview，避免 WebView2 默认写入 C 盘 AppData。
@@ -283,6 +292,13 @@ pub fn run() {
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)), // 「扫描头像」的包索引缓存（初始为空）
                 snapshot_cache: Arc::new(Mutex::new(None)), // 快照解析缓存（「读取快照」/替换收尾写入；初始为空）
+                image: Arc::new(Mutex::new(
+                    image_ai::Config::load(&data_dir).unwrap_or_else(|e| {
+                        log::warn!(target: "image_ai", "读取生图配置失败，使用出厂默认: {e}");
+                        image_ai::Config::builtin()
+                    }),
+                )),
+                image_keys: Arc::new(Mutex::new(HashMap::new())),
                 data_dir,                                   // 便携数据目录（标准规则在其下 rules/）
             });
 
@@ -322,7 +338,17 @@ pub fn run() {
             commands::replace_single_face, // 单人换脸
             commands::read_image,      // 读取图片字节（前端转 blob 显示）
             commands::resolve_avatar,  // 解析名单「头像」列原文为包内图片路径
-            commands::query_logs       // 分页查询日志
+            commands::query_logs,      // 分页查询日志
+            commands::get_image_ai_state,
+            commands::render_prompt,
+            commands::save_provider,
+            commands::delete_provider,
+            commands::set_provider_key,
+            commands::save_prompt_template,
+            commands::delete_prompt_template,
+            commands::generate_image,
+            commands::save_generated_image,
+            commands::query_usage
         ])
         // .run(...) 启动事件循环，阻塞直到窗口关闭；启动失败直接 panic。
         .run(tauri::generate_context!())

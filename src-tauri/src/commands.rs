@@ -15,6 +15,9 @@ use crate::rtf_scanner::{
 };
 use crate::templates::{self, RuleConfig};
 use crate::xml_parser::{self, MappingEntry, SnapshotEntry, SnapshotQuery};
+use crate::image_ai::{self, Config};
+use crate::json_store;                 // save_generated_image 用其 copy_atomic（既有代码亦用全限定写法）
+use std::collections::HashMap; // AppState.image_keys；commands.rs 原本没有这条 use
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +41,8 @@ pub struct AppState {
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存（同上；两者切档/切组/换名单一律清空）
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>,   // 「扫描头像」的包索引缓存（替换可复用）
     pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
+    pub image: Arc<Mutex<Config>>,                            // 生图生效配置（image_ai.json + 默认双来源）
+    pub image_keys: Arc<Mutex<HashMap<String, String>>>,      // 会话内 API Key（不落盘）
     pub data_dir: PathBuf, // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
@@ -1752,4 +1757,114 @@ mod tests {
         assert!(broken.lock().unwrap().is_empty(), "中毒的缓存应被清空");
         assert!(!broken.is_poisoned(), "清空后应解除中毒");
     }
+}
+
+// ===================== AI 文生图命令（实现统一在 image_ai；与既有命令同居本文件）=====================
+
+#[tauri::command]
+pub fn get_image_ai_state(state: State<'_, AppState>) -> Result<Config, String> {
+    Ok(state.image.lock().unwrap().clone())
+}
+
+/// 渲染 `{{变量|默认值}}` 模板文本（P1 无数据源，vars 恒为空 → 全部取默认值）。
+/// 入参刻意用**文本**而非模板 ID：选中模板时对模板 body 渲染一次，生成前对用户编辑后的文本再渲染一次，
+/// 这样用户的手工编辑不会被模板原文覆盖。返回 `missing` 非空表示存在「既无默认值、又无数据源」的占位符。
+#[tauri::command]
+pub fn render_prompt(
+    body: String,
+    vars: Option<HashMap<String, String>>,
+) -> Result<image_ai::RenderOutcome, String> {
+    Ok(image_ai::render(&body, &vars.unwrap_or_default()))
+}
+
+#[tauri::command]
+pub fn save_provider(
+    state: State<'_, AppState>,
+    provider: image_ai::ProviderConfig,
+) -> Result<Config, String> {
+    let mut cfg = state.image.lock().unwrap();
+    image_ai::upsert_provider(&mut cfg, provider)?;
+    cfg.save_providers(&state.data_dir)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<Config, String> {
+    let mut cfg = state.image.lock().unwrap();
+    image_ai::remove_provider(&mut cfg, &id)?;
+    cfg.save_providers(&state.data_dir)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Result<(), String> {
+    let mut keys = state.image_keys.lock().unwrap();
+    if key.trim().is_empty() {
+        keys.remove(&id);
+    } else {
+        keys.insert(id, key);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_prompt_template(
+    state: State<'_, AppState>,
+    template: image_ai::PromptTemplate,
+) -> Result<Config, String> {
+    let mut cfg = state.image.lock().unwrap();
+    image_ai::upsert_template(&mut cfg, template)?;
+    cfg.save_templates(&state.data_dir)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub fn delete_prompt_template(state: State<'_, AppState>, id: String) -> Result<Config, String> {
+    let mut cfg = state.image.lock().unwrap();
+    image_ai::remove_template(&mut cfg, &id)?;
+    cfg.save_templates(&state.data_dir)?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub async fn generate_image(
+    state: State<'_, AppState>,
+    req: image_ai::GenRequest,
+) -> Result<image_ai::GenResult, String> {
+    // await 前把配置 clone 出锁，不跨 await 持锁。
+    let (cfg, key) = {
+        let cfg = state.image.lock().unwrap();
+        image_ai::validate_request(&cfg, &req)?;
+        let key = state
+            .image_keys
+            .lock()
+            .unwrap()
+            .get(&req.provider_id)
+            .cloned()
+            .ok_or("请先输入 API Key（仅本会话记忆，不会保存）")?;
+        (cfg.clone(), key)
+    };
+    image_ai::generate(&state.data_dir, &cfg, &key, req).await
+}
+
+#[tauri::command]
+pub fn save_generated_image(
+    state: State<'_, AppState>,
+    image_id: String,
+    target_path: String,
+) -> Result<String, String> {
+    let src = image_ai::tmp_dir(&state.data_dir).join(format!("{image_id}.png"));
+    if !src.is_file() {
+        return Err("源图片已失效（临时目录已清理）".into());
+    }
+    json_store::copy_atomic(&src, Path::new(&target_path))?;
+    Ok(target_path)
+}
+
+#[tauri::command]
+pub fn query_usage(
+    state: State<'_, AppState>,
+    query: image_ai::UsageQuery,
+) -> Result<PageResult<image_ai::UsageRecord>, String> {
+    image_ai::query_usage(&image_ai::usage_path(&state.data_dir), &query)
 }

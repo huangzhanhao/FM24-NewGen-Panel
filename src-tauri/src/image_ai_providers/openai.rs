@@ -4,7 +4,7 @@
 //! `supports_response_format`（gpt-image-1 不支持该参数，第三方兼容服务多需要它）。
 
 use super::{FetchedImage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{GenRequest, RealUsage};
+use crate::image_ai::GenRequest;
 use base64::Engine;
 use std::future::Future;
 use std::pin::Pin;
@@ -48,10 +48,16 @@ pub(crate) enum ImagePayload {
 /// 解析响应中的图片列表；厂商错误（`error.message`）或缺字段均返回中文错误。
 pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<ImagePayload>, String> {
     if let Some(err) = resp.get("error") {
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
         return Err(format!("服务商返回错误：{msg}"));
     }
-    let items = resp.get("data").and_then(|d| d.as_array()).ok_or("响应缺少 data 数组")?;
+    let items = resp
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or("响应缺少 data 数组")?;
     let mut out = Vec::new();
     for item in items {
         if let Some(b64) = item.get("b64_json").and_then(|x| x.as_str()) {
@@ -68,19 +74,8 @@ pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<ImagePayload>
     Ok(out)
 }
 
-pub(crate) fn parse_real_usage(resp: &serde_json::Value) -> Option<RealUsage> {
-    let u = resp.get("usage")?;
-    Some(RealUsage {
-        input_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-        output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-    })
-}
-
 /// 把单个 payload 变为图片字节：b64 解码；URL 立即下载（链接有时效，不懒加载）。
-async fn fetch_payload(
-    client: &reqwest::Client,
-    payload: ImagePayload,
-) -> Result<Vec<u8>, String> {
+async fn fetch_payload(client: &reqwest::Client, payload: ImagePayload) -> Result<Vec<u8>, String> {
     match payload {
         ImagePayload::B64(b64) => base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
@@ -120,17 +115,21 @@ impl ImageProvider for OpenAiProvider {
                 .await
                 .map_err(|e| format!("请求发送失败: {e}"))?;
             let status = resp.status();
-            let json: serde_json::Value =
-                resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+            let json: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("响应解析失败: {e}"))?;
             let payloads = parse_images(&json).map_err(|e| format!("HTTP {status}：{e}"))?;
-            let real_usage = parse_real_usage(&json);
 
             let mut images = Vec::with_capacity(payloads.len());
             for payload in payloads {
                 let bytes = fetch_payload(client, payload).await?;
-                images.push(FetchedImage { bytes, extension: "png".into() });
+                images.push(FetchedImage {
+                    bytes,
+                    extension: "png".into(),
+                });
             }
-            Ok(ProviderOutcome { images, real_usage })
+            Ok(ProviderOutcome { images })
         })
     }
 }
@@ -152,7 +151,15 @@ mod tests {
             seed: None,
             steps: None,
             uid: None,
+            prompt_extend: None,
+            watermark: None,
             supports_response_format: false,
+            // OpenAI 官方端点不认百炼扩展参数，样本一律置 false。
+            supports_negative_prompt: false,
+            supports_prompt_extend: false,
+            supports_watermark: false,
+            supports_seed: false,
+            supports_n: true,
         }
     }
 
@@ -180,10 +187,9 @@ mod tests {
 
     #[test]
     fn parse_images_accepts_b64_url_and_error() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"data":[{"b64_json":"QUJD"},{"url":"https://x/a.png"}]}"#,
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"data":[{"b64_json":"QUJD"},{"url":"https://x/a.png"}]}"#)
+                .unwrap();
         assert_eq!(parse_images(&v).unwrap().len(), 2);
         let v: serde_json::Value =
             serde_json::from_str(r#"{"error":{"message":"bad key"}}"#).unwrap();
@@ -196,18 +202,5 @@ mod tests {
         assert_eq!(parse_images(&v).unwrap_err(), "响应缺少 data 数组");
         let v: serde_json::Value = serde_json::from_str(r#"{"data":[]}"#).unwrap();
         assert_eq!(parse_images(&v).unwrap_err(), "data 数组为空");
-    }
-
-    #[test]
-    fn parse_real_usage_tokens() {
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"usage":{"input_tokens":120,"output_tokens":2899}}"#)
-                .unwrap();
-        let usage = parse_real_usage(&v).unwrap();
-        assert_eq!(usage.input_tokens, 120);
-        assert_eq!(usage.output_tokens, 2899);
-        // 无 usage 字段时为 None（OpenAI gpt-image 系列不回 usage）。
-        let v: serde_json::Value = serde_json::from_str(r#"{"data":[]}"#).unwrap();
-        assert!(parse_real_usage(&v).is_none());
     }
 }

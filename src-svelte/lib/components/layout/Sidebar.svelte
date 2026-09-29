@@ -6,6 +6,10 @@
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
   import { appStore, applySnapshot } from "../../stores/app.svelte";
+  import {
+    imageaiStore,
+    queueCancel,
+  } from "../../stores/imageai.svelte"; // 队列运行中的作用域切换护栏（S10）
   import { ui, toggleTheme } from "../../stores/ui.svelte";
   import { icons } from "../../ui/icons";
   // Vite 静态资源导入：打包后得到带哈希的图片 URL（app-icon.png 在项目根）。
@@ -29,10 +33,13 @@
   const hasProfile = $derived(
     selectedIsActive && appStore.selectedProfile !== "No Profile",
   );
-  /** 新建存档：调后端创建（会立即激活），成功后选中项同步、清空输入、收起输入行。 */
+  /** 新建存档：调后端创建（会立即激活），成功后选中项同步、清空输入、收起输入行。
+   *  「立即激活」= 作用域变更，故与切档同款护栏（队列运行中先过确认）——新建本身没有别的
+   *  确认框，所以这里是独立的一次询问，不存在双弹。 */
   async function createProfile() {
     const name = newProfileName.trim();
     if (!name) return;
+    if (!(await confirmScopeChange())) return; // 队列运行中新建档（会立即激活）：先过确认
     try {
       await applySnapshot(await api.createProfile(name));
       appStore.selectedProfile = name; // 新建即激活，下拉选中项同步
@@ -68,10 +75,48 @@
     }
   }
 
+  /** 作用域变更的统一确认（唯一实现处）——切档 / 切组 / 关联头像包 / 新建档 / 删档 / 删组都走这里。
+   *
+   * 【为什么合成一个】这些操作对用户来说都是「当前作用域要变了」这一件事，队列跑着的时候
+   * 该说的话完全一样。分散成多份实现，迟早有入口漏掉队列警告——本项目确实漏过
+   * createProfile / deleteProfile / deleteGroup 三处。
+   *
+   * 【只有两处由调用方决定】
+   * - `message`：这次具体要做什么。默认值即切换类口径（切档/切组/新建/关联）的正文；
+   * - `askWhenIdle`：队列**空闲**时要不要也问一句。删除不可逆 → true；切换类空闲无副作用 → false。
+   *
+   * 队列警告（`queueScopeAppend`）与 warning 样式一律由本函数追加，调用方不要自己拼——
+   * 这也保证了「一次操作只弹一次」：删除类把队列警告并进同一个框，而不是先问删除再问队列。
+   * 确认后若队列在跑则先取消队列；**取消失败返回 false**，调用方据此中止后续动作。 */
+  async function confirmScopeChange(opts: {
+    message?: string;
+    title?: string;
+    askWhenIdle?: boolean;
+  } = {}): Promise<boolean> {
+    const message = opts.message ?? t.sidebar.queueScopeConfirm;
+    const title = opts.title ?? t.sidebar.queueScopeTitle;
+    const running = imageaiStore.queueRunning;
+    if (!running && !opts.askWhenIdle) return true; // 空闲的切换类操作：不打扰（S10）
+    const ok = await ask(message + (running ? t.sidebar.queueScopeAppend : ""), {
+      title,
+      ...(running ? { kind: "warning" as const } : {}),
+    });
+    if (!ok) return false;
+    if (!running) return true; // 空闲删除：本就没有队列要取消
+    try {
+      await queueCancel();
+      return true;
+    } catch (e) {
+      await showError(e);
+      return false;
+    }
+  }
+
   /** 激活下拉选中的存档：真正切换后端当前档（快照交换），浏览态结束。 */
   async function activateProfile() {
     const target = appStore.selectedProfile;
     if (!target || target === (appStore.snapshot?.currentProfile ?? "")) return;
+    if (!(await confirmScopeChange())) return; // 队列运行中切档：先过确认
     try {
       await applySnapshot(await api.switchProfile(target));
       appStore.profilePreview = null; // 激活后展示与激活态一致
@@ -80,12 +125,16 @@
     }
   }
 
-  /** 删除下拉选中的存档（先弹确认框）。删除激活档会自动回到 No Profile；删未激活档不影响当前档。 */
+  /** 删除下拉选中的存档。删除激活档会自动回到 No Profile；删未激活档不影响当前档。
+   *  确认统一走 confirmScopeChange：空闲时弹删除确认（askWhenIdle: true），
+   *  队列运行中则把队列警告并进同一个框——一次操作只打扰一次。 */
   async function deleteProfile() {
     const target = appStore.selectedProfile;
     if (!target || target === "No Profile") return;
-    const ok = await ask(t.sidebar.deleteProfileConfirm(target), {
+    const ok = await confirmScopeChange({
+      message: t.sidebar.deleteProfileConfirm(target),
       title: t.sidebar.deleteProfileTitle,
+      askWhenIdle: true,
     });
     if (!ok) return;
     try {
@@ -105,6 +154,7 @@
       title: t.sidebar.linkDialogTitle,
     }); // directory:true 表示选文件夹
     if (typeof dir === "string") {
+      if (!(await confirmScopeChange())) return; // 队列运行中切组：先过确认
       try {
         await applySnapshot(await api.selectImageDirectory(dir));
       } catch (e) {
@@ -115,6 +165,7 @@
 
   /** 选中某个已有组（切为当前组）。 */
   async function selectGroup(imgDir: string) {
+    if (!(await confirmScopeChange())) return; // 队列运行中切组：先过确认
     try {
       await applySnapshot(await api.setCurrentGroup(imgDir));
     } catch (e) {
@@ -122,10 +173,13 @@
     }
   }
 
-  /** 删除组（先弹确认框）。 */
+  /** 删除组。与 deleteProfile 同款：确认统一走 confirmScopeChange，
+   *  空闲弹删除确认、运行中把队列警告并进同一个框。 */
   async function deleteGroup(imgDir: string) {
-    const ok = await ask(t.sidebar.deleteGroupConfirm(imgDir), {
+    const ok = await confirmScopeChange({
+      message: t.sidebar.deleteGroupConfirm(imgDir),
       title: t.sidebar.deleteGroupTitle,
+      askWhenIdle: true,
     });
     if (!ok) return;
     try {

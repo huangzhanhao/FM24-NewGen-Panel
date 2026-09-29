@@ -25,9 +25,19 @@ export const t = {
     brandVer: 'v2.0',
   },
 
-  /** 顶部五步旅程引导（纯展示，不可点击，随快照状态点亮） */
-  stepper: {
-    steps: ['选档与头像包', '校验与名单', '选模式', '执行替换', '查看与微调'],
+  /** 顶栏三工作台（由原五步旅程引导改造：chip 可点击切换，右侧状态点随就绪度变色） */
+  workbench: {
+    archive: '存档资料',
+    replace: '批量/单人头像替换',
+    ai: 'AI 生成头像',
+    /** 顶栏右端作用域回显：档名与组名之间的分隔符（组为空时只显示档名） */
+    scopeSep: ' · ',
+    /** 无头像包组时的回显占位（侧栏还没关联目录） */
+    scopeNoGroup: '未选头像包',
+    /** chip 状态点的悬停说明（三档：绿 / 琥珀 / 灰） */
+    stateOk: '条件已满足',
+    stateWarn: '还差几项，点进去看提示',
+    stateIdle: '尚未开始',
   },
 
   /** 侧栏底部主题切换 */
@@ -62,6 +72,12 @@ export const t = {
     deleteGroupBtn: '删除组',
     deleteGroupConfirm: (dir: string) => `删除组及其映射备份？\n${dir}`,
     deleteGroupTitle: '删除组',
+    /** 队列运行中的切档/切组护栏（S10）：空闲切换不弹窗不打断，运行中才问这一句 */
+    queueScopeTitle: 'AI 头像队列正在运行',
+    queueScopeConfirm: '切换存档或头像包后，未完成的生成任务将被取消。确定要切换吗？',
+    /** 队列运行中执行删除时追加在删除确认文案后的那一段。删除本身已有确认框，
+     *  这里并入同一段正文，避免「先问删除、再问队列」连弹两个框（一次操作只打扰一次）。 */
+    queueScopeAppend: '\n\nAI 头像队列正在运行，继续将取消未完成的生成任务。',
     rtfSet: 'RTF ✓',
     rtfUnset: '未设置 RTF',
     emptyGroups: '暂无头像包。点上方 ＋ 关联头像包目录。',
@@ -117,20 +133,50 @@ export const t = {
   },
 
   gen: {
-    // 结果区第 4 个 Tab
-    tabGenerate: 'AI 生图',
     // 工作台顶部与面板
     provider: '服务商',
     model: '模型',
     providerSettings: '服务商设置',
-    tabWorkbench: '生成工作台',
-    tabUsage: '用量台账',
+    /** 服务配置条就绪状态灯（S6）：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
+    statusReady: '已就绪',
+    statusNoKey: '未设置 Key',
+    statusNoModel: '未选模型',
+    statusReadyTitle: 'Key 已设置且模型已选（连通性以实际生成为准）',
+    /** 就绪卡：Key 未设置时条件出现（「去设置」聚焦配置条 Key 输入框） */
+    keyMissingHint: '生成前需先设置当前服务商的 API Key（仅本会话记忆，不落盘）',
+    keyGoSet: '去设置',
+    cardSource: '球员源 · 单人',
+    cardContent: '生成内容',
+    cardCanvas: '画面参数',
+    cardRepro: '复现控制',
+    resultsTitle: '本次结果',
+    resultsCount: (n: number) => `${n} 张`,
+    clearResults: '清空',
+    clearResultsTitle: '清空本次会话的全部生成结果',
+    clearResultsConfirm: (n: number) => `清空本次会话的 ${n} 张生成结果？临时图片将被删除，未手动保存的无法恢复。`,
+    keySubmit: '提交 Key',
     template: '提示词模板',
     manageTemplate: '管理模板',
     variables: '可用变量（点击追加占位符）',
+    variablesSource: '将按数据源球员记录填充的变量：',
+    promptPreview: '提示词预览（按数据源渲染）',
+    promptPreviewing: '正在按数据源渲染提示词…',
     prompt: '提示词（可手动编辑）',
     toggleNegative: '负向提示词',
     negative: '负向提示词（模型不支持时仅记录不发送）',
+    negativeNotSent: '当前模型不发送',
+    regenTitle: '用当前参数再生成',
+    // 连接卡下方的模型能力摘要（与参数控件显隐同一能力集口径）
+    capNoModel: '未选择模型明细行：仅可填写接口参数，高级能力不可用',
+    capPresetSizes: (n: number) => `${n} 个预设尺寸`,
+    capFreeSize: '自由尺寸',
+    capMaxN: (n: number) => `单次最多 ${n} 张`,
+    capNAny: '张数不限',
+    capQuality: '质量可选',
+    capSeed: '支持 Seed',
+    capNegative: '负向提示词',
+    capPromptExtend: '智能改写',
+    capWatermark: '水印可选',
     size: '尺寸',
     // 尺寸下拉末尾的「自定义…」项 + 宽高输入与提醒（选中后显示）
     sizeCustom: '自定义…',
@@ -138,11 +184,40 @@ export const t = {
     sizeHLabel: '高',
     sizeCustomHint: '自定义尺寸厂商可能拒绝，生成失败时请改用上方预设尺寸。',
     n: '张数',
+    nSingle: '该模型每次仅生成 1 张',
+    nMaxHint: (n: number) => `单次最多 ${n} 张`,
     quality: '质量',
+    qualityAuto: '自动',
+    qualityLow: '低',
+    qualityMedium: '标准',
+    qualityHigh: '高',
+    promptExtend: '智能改写提示词',
+    promptExtendHint: '由大模型优化提示词，出图更慢；z-image 开启后为思考模式，按更高单价计费；遇版权审核拦截可关闭重试',
+    watermark: '添加「AI生成」水印',
+    watermarkHint: '水印位于图片右下角',
     seed: 'Seed',
+    seedRandomTitle: '清空 Seed，使用随机种子',
+    sizeError: {
+      format: '尺寸格式不正确，应为 宽×高（如 1280×1280）',
+      minSide: (v: number) => `宽/高不能小于 ${v} 像素`,
+      maxSide: (v: number) => `宽/高不能超过 ${v} 像素`,
+      totalMin: (v: number) => `总像素过小，建议约 ${v}×${v} 以上`,
+      totalMax: (v: number) => `总像素过大，建议约 ${v}×${v} 以内`,
+      ratio: (lo: number, hi: number) => `宽高比需在 ${lo}:1 至 ${hi}:1 之间`,
+    },
+    promptTooLong: (limit: number) => `提示词超出该模型 ${limit} 字上限，超出部分不会生效`,
     seedPlaceholder: '留空=随机',
     generate: '生成图片',
     generating: '生成中…',
+    genSec: (n: number) => `生成中 · ${n}s`,
+    genErrorTitle: '生成失败',
+    retry: '重试',
+    closeAlert: '关闭错误提示',
+    closePreview: '关闭预览',
+    viewLarge: '查看大图',
+    sourceReadonlyNote: '已选择数据源：提示词由该球员数据渲染，仅供预览；如需手改请先清除数据源',
+    metaSeed: (s: string) => `Seed ${s}`,
+    skeletonHint: '正在生成，通常 10–30 秒，智能改写开启时可能更久',
     empty: '填写提示词后点「生成图片」，结果会显示在这里；图片仅存于会话临时目录，手动保存才会落盘。',
     save: '保存',
     saved: '图片已保存',
@@ -152,10 +227,20 @@ export const t = {
     missingPlaceholders: (keys: string[]) => `占位符未填充：${keys.join('、')}`,
     // P3 数据源：名单/单人预览入口把球员设为生图数据源，模板变量按名单记录自动填充
     source: {
-      /** 数据源条：无数据源时的灰字提示 */
-      none: '未选择球员，变量走默认值',
       clear: '清除',
       clearTitle: '清除数据源，恢复手动提示词',
+      /** 档案卡（S7）：无数据源时的台内 UID 查询（球员源第三来源） */
+      queryHint: '输入 UID 查询球员并设为数据源',
+      queryPlaceholder: '如 r-2000472008',
+      queryBtn: '查询',
+      queryMiss: (uid: string) => `未找到 UID ${uid} 的资料`,
+      /** 名单未扫描时的就绪卡：直达存档资料台 */
+      scanFirst: '名单尚未扫描：请先在「存档资料」台扫描 RTF，才能按球员生成',
+      goArchive: '去存档资料台',
+      /** 资料降级：uid 不在当前名单（可能来自上一次扫描），仅姓名/UID 可信 */
+      noProfile: '未在当前名单中找到该球员的资料，生成时变量可能取不到值',
+      /** 把当前数据源球员单独投进队列（多人批量走名单工具行） */
+      enqueue: '加入队列',
       /** 名单预览行尾按钮：把该行球员设为生图数据源并跳到 AI 生图 */
       sendBtn: '送生图',
       sendTitle: (name: string) => `以 ${name} 为数据源生成头像`,
@@ -203,26 +288,12 @@ export const t = {
     remove: '删除',
     back: '返回',
     done: '完成',
-    // 用量台账
-    filterAllProviders: '全部服务商',
-    filterAllStatus: '全部状态',
-    filterModelPlaceholder: '按模型筛选…',
-    filterDatePlaceholder: '按日期筛选（YYYY-MM-DD）…',
-    statusSuccess: '成功',
-    statusFailed: '失败',
-    colTs: '时间',
-    colModel: '模型',
-    colSize: '尺寸',
-    colN: '张数',
-    colSeed: 'Seed',
-    colPrompt: '提示词 / 错误',
-    colCost: '估算费用',
     colStatus: '状态',
-    ledgerTotal: '本页估算合计',
-    count: (total: number) => `共 ${total} 条`,
     // 生成队列（批量）
     queue: {
       tabQueue: '生成队列',
+      /** 队列坞标题的入队作用域标注（S9）：显示最近一次入队时的「档 · 组」 */
+      scopeTitle: (scope: string) => `入队时 ${scope}`,
       startBtn: '启动生成',
       cancelBtn: '取消生成',
       clearBtn: '清空队列',
@@ -245,7 +316,16 @@ export const t = {
       progressLabel: '批量生成进度',
       finishedSummary: (finished: number, failed: number, total: number) =>
         `批量生成结束：成功 ${finished} · 失败 ${failed} · 共 ${total} 条`,
-      // 复选框的读屏文案：队列条目（QueuePanel）与名单表格（PlayersTable）各一套
+      // 队列坞（贴结果区底部的可折叠批量面板）
+      queuedBadge: (n: number) => `${n} 排队`,
+      runningBadge: (n: number) => `${n} 生成中`,
+      expandTitle: '展开生成队列',
+      collapseTitle: '收起队列',
+      retryEntry: '重试本条',
+      viewImages: '查看图片',
+      collapseImages: '收起图片',
+      saveImage: '另存',
+      // 复选框的读屏文案：队列条目（QueueDock）与名单表格（PlayersTable）各一套
       selectRowAria: (name: string) => `选择 ${name}`,
       selectAllAria: '全选或取消本页条目',
       selectPlayerAria: (name: string) => `选择球员 ${name}`,
@@ -290,10 +370,9 @@ export const t = {
       `会用空表覆盖本档现有的 ${existing} 条映射。\n\n确认仍要这样执行？`,
   },
 
-  /** 结果区顶部 Tab */
+  /** 结果区顶部 Tab（替换台读视图：名单/快照；单人替换已常驻替换台左栏，AI 生图已独立成台） */
   results: {
     tabTable: '名单预览',
-    tabViewer: '单人替换',
     tabSnapshot: '快照预览',
   },
 
@@ -344,11 +423,15 @@ export const t = {
     emptyHint: '执行「替换头像」或「扫描RTF」后可在此预览名单（最近一次解析结果）。',
     /** 缓存里没有匹配当前筛选条件的记录（与快照预览的 noMatchHint 同款语义）。 */
     noMatchHint: '没有匹配的球员。',
+    /** 替换台精简列集（S11 dense）的次要列开关 */
+    secondaryCols: '次要列',
   },
 
   /** 单人预览/微调（PlayerViewer） */
   viewer: {
     title: '球员预览',
+    /** 替换台左栏单人替换卡的标题（读写分栏后常驻左栏，不属于结果区读视图） */
+    section: '单人替换',
     hint: '输入 UID 回车预览',
     /** UID 输入框 placeholder（示例教格式，全称说明在右侧 uidTip） */
     uidPlaceholder: '如 r-2000472008',

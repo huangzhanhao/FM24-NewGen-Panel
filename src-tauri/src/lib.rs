@@ -353,7 +353,6 @@ pub fn run() {
             commands::generate_image,
             commands::save_generated_image,
             commands::save_and_replace, // 保存并替换：生成图落盘 _generated 后复用单人换脸链
-            commands::query_usage,
             commands::add_to_queue,      // 批量生成：追加条目（返回快照）
             commands::remove_from_queue, // 批量生成：按 id 移除条目
             commands::clear_queue,       // 批量生成：清空队列

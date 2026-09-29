@@ -10,8 +10,6 @@
         {
           "model": "gpt-image-1",
           "label": "gpt-image-1",
-          "currency": "USD",
-          "prices": { "1024x1024": 0.042, "1024x1536": 0.055, "1536x1024": 0.055 },
           "capabilities": {
             "sizes": ["1024x1024", "1024x1536", "1536x1024"],
             "maxN": 10,
@@ -43,8 +41,6 @@
         {
           "model": "seedream-5.0-flash",
           "label": "seedream-5.0-flash",
-          "currency": "CNY",
-          "prices": { "1024x1024": 0.12 },
           "capabilities": {
             "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
             "maxN": 1,
@@ -59,8 +55,6 @@
         {
           "model": "seedream-5.0-lite",
           "label": "seedream-5.0-lite",
-          "currency": "CNY",
-          "prices": { "1024x1024": 0.22 },
           "capabilities": {
             "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
             "maxN": 1,
@@ -75,8 +69,6 @@
         {
           "model": "seedream-4.0",
           "label": "seedream-4.0",
-          "currency": "CNY",
-          "prices": { "1024x1024": 0.20 },
           "capabilities": {
             "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
             "maxN": 1,
@@ -89,49 +81,9 @@
           }
         }
       ]
-    },
-    {
-      "id": "dashscope",
-      "kind": "dashscope",
-      "name": "百炼通义万相",
-      "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
-      "defaultModel": "wanx2.1-t2i-turbo",
-      "models": [
-        {
-          "model": "wanx2.1-t2i-turbo",
-          "label": "wanx2.1-t2i-turbo",
-          "currency": "CNY",
-          "prices": { "1024*1024": 0.14 },
-          "capabilities": {
-            "sizes": ["1024*1024", "720*1280", "1280*720"],
-            "maxN": 4,
-            "supportsQuality": false,
-            "supportsSeed": true,
-            "supportsSteps": false,
-            "supportsNegativePrompt": true,
-            "supportsResponseFormat": false,
-            "qualities": []
-          }
-        },
-        {
-          "model": "wanx2.1-t2i-plus",
-          "label": "wanx2.1-t2i-plus",
-          "currency": "CNY",
-          "prices": { "1024*1024": 0.20 },
-          "capabilities": {
-            "sizes": ["1024*1024", "720*1280", "1280*720"],
-            "maxN": 4,
-            "supportsQuality": false,
-            "supportsSeed": true,
-            "supportsSteps": false,
-            "supportsNegativePrompt": true,
-            "supportsResponseFormat": false,
-            "qualities": []
-          }
-        }
-      ]
     }
   ],
+  "_comment": "dashscope（阿里云百炼）服务商与三系列模型目录由 Rust 代码内置（image_ai_providers/dashscope.rs），不在本文件维护；运行时自动注入并迁移旧版本块。",
   "settings": {
     "defaultProviderId": "openai",
     "historyLimit": 20,

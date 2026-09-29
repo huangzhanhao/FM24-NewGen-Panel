@@ -1,15 +1,14 @@
-//! AI 文生图：提示词模板 → 用户编辑确认 → 调用文生图 API → 会话临时图片 → 手动保存/用量台账。
+//! AI 文生图：提示词模板 → 用户编辑确认 → 调用文生图 API → 会话临时图片 → 手动保存/保存并替换。
 //!
 //! 【与既有模块的复用关系，不另起一套】
 //! - 命令统一写在 commands.rs，本模块只提供被命令调用的类型与函数；
 //! - 出厂默认是 assets/ 三份 JSON（assets.rs include_str! 内嵌），用户可编辑副本在 data/；
 //!   Config::builtin/load/ensure_user_files 仿 templates::RuleConfig；
-//! - 原子写复用 json_store、分页复用 paging::PageResult。
+//! - 原子写复用 json_store。
 //! P2 起多家协议适配成「族」拆在 image_ai_providers/（openai 迁入 + volcano + dashscope），
-//! 本模块只保留契约/配置/渲染/台账与生成编排，生成时按 ProviderKind 经 registry 分发。
+//! 本模块只保留契约/配置/渲染与生成编排，生成时按 ProviderKind 经 registry 分发。
 
 use crate::json_store::{self, LoadError};
-use crate::paging::PageResult;
 use rand::Rng; // new_id() 用 rand::rng().random()（本项目既有模块同样显式导入，见 templates/mod.rs）
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,19 +28,34 @@ pub enum ProviderKind {
     Custom,
 }
 
-impl ProviderKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProviderKind::OpenAI => "openai",
-            ProviderKind::Volcano => "volcano",
-            ProviderKind::Dashscope => "dashscope",
-            ProviderKind::Custom => "custom",
-        }
-    }
+/// 自由尺寸规则（万相 2.5/2.6 等无固定尺寸枚举的模型）：0 表示该条约束不检查。
+/// 尺寸字符串仍为 `宽*高`/`宽x高` 形态，约束含义逐字对齐官方文档：
+/// 2.5/2.6 为总像素 [1280², 1440²]、宽高比 [1:4, 4:1]；2.2 及更早为单边 [512, 1440]。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizeRules {
+    /// 单边下限像素（宽/高各自，0 = 不检查）。
+    #[serde(default)]
+    pub min_side: u32,
+    /// 单边上限像素（0 = 不检查）。
+    #[serde(default)]
+    pub max_side: u32,
+    /// 总像素（宽×高）下限（0 = 不检查）。
+    #[serde(default)]
+    pub total_min: u64,
+    /// 总像素上限（0 = 不检查）。
+    #[serde(default)]
+    pub total_max: u64,
+    /// 宽高比下限（短边/长边口径，如 1:4 = 0.25；0 = 不检查）。
+    #[serde(default)]
+    pub ratio_min: f32,
+    /// 宽高比上限（如 4:1 = 4.0；0 = 不检查）。
+    #[serde(default)]
+    pub ratio_max: f32,
 }
 
 /// 模型能力集：UI 按此显隐参数，适配器按此决定是否传参。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
     #[serde(default)]
@@ -63,6 +77,27 @@ pub struct Capabilities {
     pub supports_response_format: bool,
     #[serde(default)]
     pub qualities: Vec<String>,
+    /// 百炼 `prompt_extend`：大模型智能改写正向提示词（+3–4 秒；关闭可规避版权审核拦截）。
+    #[serde(default)]
+    pub supports_prompt_extend: bool,
+    /// `prompt_extend` 的官方默认开关：千问/万相为开，z-image 为关（开启即思考模式、单价翻倍）。
+    /// 前端切模型时按此初始化开关；缺省 true 兼容旧配置。
+    #[serde(default = "yes")]
+    pub prompt_extend_default: bool,
+    /// 百炼 `watermark`：右下角固定「AI生成」水印。
+    #[serde(default)]
+    pub supports_watermark: bool,
+    /// 请求体是否携带 `n` 参数：z-image 无此参数（固定 1 张）必须省略；其余百炼模型为 true。
+    /// 缺省 true 兼容 OpenAI/火山与旧配置（它们一律发 n）。
+    #[serde(default = "yes")]
+    pub supports_n: bool,
+    /// 正向提示词字符/Token 上限（0 = 不展示计数、不校验；
+    /// qwen3.0=4500/qwen2.0=1300/wan2.7=5000/wan2.6=2100/z-image=800）。
+    #[serde(default)]
+    pub max_prompt_chars: u32,
+    /// 自由尺寸规则；None = 仅允许 sizes 枚举值（自定义走软警告，不做硬校验）。
+    #[serde(default)]
+    pub size_rules: Option<SizeRules>,
 }
 
 fn one() -> u32 {
@@ -73,21 +108,18 @@ fn yes() -> bool {
     true
 }
 
-/// 一个模型行；prices 的 key 为尺寸标签、value 为单张估算单价。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 一个模型行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub model: String,
     pub label: String,
-    pub currency: String,
-    #[serde(default)]
-    pub prices: HashMap<String, f64>,
     #[serde(default)]
     pub capabilities: Capabilities,
 }
 
 /// 服务商配置（不含 API Key）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
     pub id: String,
@@ -176,6 +208,12 @@ pub struct GenRequest {
     pub steps: Option<u32>,
     #[serde(default)]
     pub uid: Option<String>,
+    /// 万相智能改写开关（仅百炼适配器消费；None = 按官方默认 true）。
+    #[serde(default)]
+    pub prompt_extend: Option<bool>,
+    /// 万相「AI生成」水印开关（仅百炼适配器消费；None = 按官方默认 false）。
+    #[serde(default)]
+    pub watermark: Option<bool>,
     /// 内部字段（前端不传，serde 缺省为空）：`generate` 解析出服务商后填入 base_url，
     /// 适配器据此拼 endpoint。
     #[serde(default)]
@@ -184,6 +222,20 @@ pub struct GenRequest {
     /// OpenAI 协议适配器据此决定是否传 response_format。
     #[serde(default)]
     pub supports_response_format: bool,
+    /// 内部字段：`generate` 从模型能力集拷入，百炼适配器据此决定是否发送对应参数
+    /// （OpenAI 官方端点不认这些字段，门控为 false 时一律不带，避免 400）。
+    #[serde(default)]
+    pub supports_negative_prompt: bool,
+    #[serde(default)]
+    pub supports_prompt_extend: bool,
+    #[serde(default)]
+    pub supports_watermark: bool,
+    #[serde(default)]
+    pub supports_seed: bool,
+    /// 内部字段：`generate` 从模型能力集拷入，百炼适配器据此决定请求体是否携带 n
+    /// （z-image 无 n 参数，必须省略）。
+    #[serde(default = "yes")]
+    pub supports_n: bool,
 }
 
 /// 一张临时图片元信息。
@@ -202,63 +254,6 @@ pub struct GenImage {
 #[serde(rename_all = "camelCase")]
 pub struct GenResult {
     pub images: Vec<GenImage>,
-    pub record_id: String,
-    pub estimated_cost: f64,
-    pub currency: String,
-}
-
-/// 厂商真实 token 用量。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RealUsage {
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-}
-
-/// 一条用量台账。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageRecord {
-    pub id: String,
-    pub ts: String,
-    pub provider_id: String,
-    pub provider_name: String,
-    pub kind: String,
-    pub model: String,
-    pub size: String,
-    pub n: u32,
-    #[serde(default)]
-    pub seed: Option<i64>,
-    #[serde(default)]
-    pub quality: Option<String>,
-    pub prompt: String,
-    #[serde(default)]
-    pub negative_prompt: String,
-    pub estimated_cost: f64,
-    pub currency: String,
-    pub status: String,
-    #[serde(default)]
-    pub error: String,
-    #[serde(default)]
-    pub real_usage: Option<RealUsage>,
-}
-
-/// 台账分页查询。
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageQuery {
-    pub offset: usize,
-    pub limit: usize,
-    #[serde(default)]
-    pub provider_id: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub date: String,
 }
 
 /// 一条会话历史索引：指向 `.imgtmp` 里的一张临时图（文件名为 `{id}.{扩展名}`）。
@@ -280,9 +275,6 @@ pub fn templates_path(d: &Path) -> PathBuf {
 }
 pub fn dictionary_path(d: &Path) -> PathBuf {
     d.join("prompts").join("code_translation.json")
-}
-pub fn usage_path(d: &Path) -> PathBuf {
-    d.join("usage").join("usage.jsonl")
 }
 pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
@@ -308,8 +300,10 @@ impl Config {
     pub fn builtin() -> Self {
         let f: ImageAiFile =
             serde_json::from_str(crate::assets::IMAGE_AI_RAW).expect("内置 image_ai.json 格式错误");
+        let mut providers = f.providers;
+        reconcile_builtin_providers(&mut providers);
         Config {
-            providers: f.providers,
+            providers,
             settings: f.settings,
             templates: serde_json::from_str(crate::assets::IMAGE_AI_TEMPLATES_RAW)
                 .expect("内置 image_ai_templates.json 格式错误"),
@@ -322,7 +316,8 @@ impl Config {
     pub fn load(d: &Path) -> Result<Self, String> {
         let mut cfg = Self::builtin();
         match json_store::load::<ImageAiFile>(&providers_path(d)) {
-            Ok(f) => {
+            Ok(mut f) => {
+                reconcile_builtin_providers(&mut f.providers);
                 cfg.providers = f.providers;
                 cfg.settings = f.settings;
             }
@@ -360,7 +355,6 @@ impl Config {
     /// 首次运行导出用户文件（已存在不覆盖）；同时把新版本新增的内置服务商/模板补进用户文件。
     pub fn ensure_user_files(d: &Path) -> Result<(), String> {
         fs::create_dir_all(d.join("prompts")).map_err(|e| e.to_string())?;
-        fs::create_dir_all(d.join("usage")).map_err(|e| e.to_string())?;
         let builtin = Self::builtin();
 
         // image_ai.json：缺失整份导出；存在则补入缺失的内置服务商并校正默认服务商。
@@ -383,6 +377,11 @@ impl Config {
             Err(LoadError::Corrupt(e)) => return Err(format!("{}（{e}）", pp.display())),
         };
         let mut changed = false;
+        // 百炼模型目录代码托管：旧用户文件里的 dashscope 块在此迁移（模型行整表替换，
+        // 仅保留显示名/base_url），新模型随版本自动推送。
+        if reconcile_builtin_providers(&mut file.providers) {
+            changed = true;
+        }
         for p in &builtin.providers {
             if !file.providers.iter().any(|x| x.id == p.id) {
                 file.providers.push(p.clone());
@@ -465,10 +464,10 @@ impl Config {
 
     /// 查模型明细行；查不到时按「默认模型」兜底合成一行通用模型。
     /// 【为什么兜底】custom（OpenAI 兼容服务）服务商只有 default_model 一个字符串，
-    /// 模型明细行（尺寸/价格/能力）要手工编辑 image_ai.json 才有——若校验死盯明细行，
+    /// 模型明细行（尺寸/能力）要手工编辑 image_ai.json 才有——若校验死盯明细行，
     /// 用户填了默认模型也会被「请先选择模型」拦住（实测反馈）。合成的行为：
-    /// 不限张数（max_n=0）、不发 response_format/seed 等高级参数（能力默认 false）、
-    /// 无价格表（估价 0，台账照记）；要精细控制就在 JSON 里补明细行，明细行优先。
+    /// 不限张数（max_n=0）、不发 response_format/seed 等高级参数（能力默认 false）；
+    /// 要精细控制就在 JSON 里补明细行，明细行优先。
     pub fn model(&self, provider_id: &str, model: &str) -> Option<ModelInfo> {
         let p = self.provider(provider_id)?;
         if let Some(m) = p.models.iter().find(|m| m.model == model) {
@@ -478,12 +477,50 @@ impl Config {
             return Some(ModelInfo {
                 model: model.to_string(),
                 label: model.to_string(),
-                currency: "USD".into(),
-                prices: HashMap::new(),
                 capabilities: Capabilities::default(),
             });
         }
         None
+    }
+}
+
+/// 把代码内置的百炼服务商目录并入一份服务商列表（builtin/load/ensure 三处同口径）。
+///
+/// 百炼模型目录代码托管（不写 assets/image_ai.json），故：
+/// - 列表中没有 dashscope：整块补入内置服务商；
+/// - 已有（含旧版本写入的 wanx/wan2.x 旧模型行）：**只保留用户可编辑的显示名与 base_url**
+///   （base_url 可能指向代理平台，绝不能丢），kind 归位、模型行整表替换、
+///   默认模型失效（旧模型已下线）时校正为内置默认。
+///
+/// 返回是否发生需要落盘的变更（内容已一致时不重写，避免每次启动无谓写文件）。
+fn reconcile_builtin_providers(providers: &mut Vec<ProviderConfig>) -> bool {
+    let builtin = crate::image_ai_providers::dashscope::builtin_provider();
+    match providers
+        .iter_mut()
+        .find(|p| p.id == crate::image_ai_providers::dashscope::PROVIDER_ID)
+    {
+        Some(slot) => {
+            let mut changed = false;
+            if slot.kind != ProviderKind::Dashscope {
+                slot.kind = ProviderKind::Dashscope;
+                changed = true;
+            }
+            if slot.models != builtin.models {
+                slot.models = builtin.models.clone();
+                changed = true;
+            }
+            let default_valid = slot.models.iter().any(|m| m.model == slot.default_model);
+            if !default_valid {
+                slot.default_model = builtin.default_model.clone();
+                changed = true;
+            }
+            // name / base_url 刻意不动：用户改名或指向代理平台是合法定制。
+            changed
+        }
+        None => {
+            providers.push(builtin);
+            true
+        }
     }
 }
 
@@ -555,6 +592,71 @@ pub fn validate_request(cfg: &Config, req: &GenRequest) -> Result<(), String> {
         .ok_or("请先选择模型，或在服务商设置中为该服务添加模型")?;
     if model.capabilities.max_n > 0 && req.n > model.capabilities.max_n {
         return Err(format!("该模型单次最多 {} 张", model.capabilities.max_n));
+    }
+    // 提示词长度：官方口径是「超长自动截断」，这里改为显式报错，避免用户以为全文生效。
+    if model.capabilities.max_prompt_chars > 0
+        && req.prompt.chars().count() > model.capabilities.max_prompt_chars as usize
+    {
+        return Err(format!(
+            "提示词超出该模型 {} 字上限（当前 {} 字），请精简后再生成",
+            model.capabilities.max_prompt_chars,
+            req.prompt.chars().count()
+        ));
+    }
+    // 自由尺寸模型（万相 2.5/2.6、2.2）：尺寸不在预设枚举时按规则硬校验。
+    if let Some(rules) = &model.capabilities.size_rules {
+        if !model.capabilities.sizes.iter().any(|s| s == &req.size) {
+            validate_size(&req.size, rules)?;
+        }
+    }
+    Ok(())
+}
+
+/// 解析 `宽*高`/`宽x高` 尺寸并按模型自由尺寸规则校验；0 值字段表示该约束不检查。
+pub fn validate_size(size: &str, rules: &SizeRules) -> Result<(), String> {
+    let caps: Vec<u32> = size
+        .split(['*', 'x'])
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .collect();
+    let (w, h) = match caps.as_slice() {
+        [w, h] if *w > 0 && *h > 0 => (*w, *h),
+        _ => {
+            return Err(format!(
+                "尺寸「{size}」格式不正确，应为 宽*高（如 1280*1280）"
+            ))
+        }
+    };
+    if rules.min_side > 0 && (w < rules.min_side || h < rules.min_side) {
+        return Err(format!("尺寸宽/高不能小于 {} 像素", rules.min_side));
+    }
+    if rules.max_side > 0 && (w > rules.max_side || h > rules.max_side) {
+        return Err(format!("尺寸宽/高不能超过 {} 像素", rules.max_side));
+    }
+    let total = w as u64 * h as u64;
+    if rules.total_min > 0 && total < rules.total_min {
+        return Err(format!(
+            "总像素不能小于 {}（约 {}²）",
+            rules.total_min,
+            (rules.total_min as f64).sqrt() as u32
+        ));
+    }
+    if rules.total_max > 0 && total > rules.total_max {
+        return Err(format!(
+            "总像素不能超过 {}（约 {}²）",
+            rules.total_max,
+            (rules.total_max as f64).sqrt() as u32
+        ));
+    }
+    if rules.ratio_min > 0.0 || rules.ratio_max > 0.0 {
+        let ratio = w as f32 / h as f32;
+        if (rules.ratio_min > 0.0 && ratio + 1e-4 < rules.ratio_min)
+            || (rules.ratio_max > 0.0 && ratio - 1e-4 > rules.ratio_max)
+        {
+            return Err(format!(
+                "宽高比需在 {:.2}:1 至 {:.2}:1 之间（当前 {:.2}:1）",
+                rules.ratio_min, rules.ratio_max, ratio
+            ));
+        }
     }
     Ok(())
 }
@@ -710,148 +812,47 @@ pub async fn generate(
     // 协议适配所需的服务商/能力信息随请求内部字段带入适配器（前端无需传）。
     req.base_url = provider.base_url.clone();
     req.supports_response_format = model.capabilities.supports_response_format;
-    let record_id = new_id();
-    let ts = now_ts();
+    req.supports_negative_prompt = model.capabilities.supports_negative_prompt;
+    req.supports_prompt_extend = model.capabilities.supports_prompt_extend;
+    req.supports_watermark = model.capabilities.supports_watermark;
+    req.supports_seed = model.capabilities.supports_seed;
+    req.supports_n = model.capabilities.supports_n;
 
-    let outcome: Result<(Vec<GenImage>, f64, Option<RealUsage>), String> = async {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(180))
-            .build()
-            .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
-        let adapter = crate::image_ai_providers::for_kind(provider.kind);
-        // 适配器内部完成 POST/解析/（异步厂商的 submit→poll→fetch），图片已为字节。
-        let fetched = adapter.generate(&client, key, &req).await?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        // 百炼三系列文生图统一为同步长连接（千问 3.0 多图/思考模式官方建议客户端超时 600s 起），
+        // 该 client 四家共用，放宽上限不影响 OpenAI/火山的正常返回（它们本就秒级完成）。
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+    let adapter = crate::image_ai_providers::for_kind(provider.kind);
+    // 适配器内部完成 POST/解析/（异步厂商的 submit→poll→fetch），图片已为字节。
+    let fetched = adapter.generate(&client, key, &req).await?;
 
-        let tmp = tmp_dir(data_dir);
-        fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-        let mut images = Vec::new();
-        for img in fetched.images {
-            let id = new_id();
-            let path = tmp.join(format!("{id}.{}", img.extension));
-            fs::write(&path, &img.bytes).map_err(|e| format!("临时图片写入失败: {e}"))?;
-            images.push(GenImage {
-                id,
-                path: path.to_string_lossy().to_string(),
-                bytes: img.bytes.len() as u64,
-            });
-        }
-        let unit = model.prices.get(&req.size).copied().unwrap_or(0.0);
-        let cost = (unit * req.n as f64 * 1000.0).round() / 1000.0;
-        Ok((images, cost, fetched.real_usage))
-    }
-    .await;
-
-    match outcome {
-        Ok((images, cost, real_usage)) => {
-            let rec = UsageRecord {
-                id: record_id.clone(),
-                ts,
-                provider_id: provider.id.clone(),
-                provider_name: provider.name.clone(),
-                kind: provider.kind.as_str().into(),
-                model: req.model.clone(),
-                size: req.size.clone(),
-                n: req.n,
-                seed: req.seed,
-                quality: req.quality,
-                prompt: req.prompt.clone(),
-                negative_prompt: req.negative_prompt.clone(),
-                estimated_cost: cost,
-                currency: model.currency.clone(),
-                status: "success".into(),
-                error: String::new(),
-                real_usage,
-            };
-            append_usage(&usage_path(data_dir), &rec)?;
-            // 会话历史只是临时图索引：记录/裁剪失败不应掩盖已成功的生成（图片与台账均已落盘）。
-            if let Err(e) = record_history(data_dir, &images, cfg.settings.history_limit) {
-                log::warn!(target: "image_ai", "记录会话历史失败（不影响本次生成）: {e}");
-            }
-            Ok(GenResult {
-                images,
-                record_id,
-                estimated_cost: cost,
-                currency: model.currency,
-            })
-        }
-        Err(e) => {
-            let rec = UsageRecord {
-                id: record_id.clone(),
-                ts,
-                provider_id: provider.id.clone(),
-                provider_name: provider.name.clone(),
-                kind: provider.kind.as_str().into(),
-                model: req.model.clone(),
-                size: req.size.clone(),
-                n: req.n,
-                seed: req.seed,
-                quality: req.quality,
-                prompt: req.prompt.clone(),
-                negative_prompt: req.negative_prompt.clone(),
-                estimated_cost: 0.0,
-                currency: model.currency.clone(),
-                status: "failed".into(),
-                error: e.clone(),
-                real_usage: None,
-            };
-            let _ = append_usage(&usage_path(data_dir), &rec);
-            Err(e)
-        }
-    }
-}
-
-// ===================== 用量台账 JSONL =====================
-
-pub fn append_usage(path: &Path, rec: &UsageRecord) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let line = serde_json::to_string(rec).map_err(|e| e.to_string())?;
-    use std::io::Write;
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| format!("台账打开失败: {e}"))?;
-    writeln!(f, "{line}").map_err(|e| e.to_string())
-}
-
-pub fn query_usage(path: &Path, q: &UsageQuery) -> Result<PageResult<UsageRecord>, String> {
-    if !path.is_file() {
-        return Ok(PageResult {
-            total: 0,
-            items: vec![],
+    let tmp = tmp_dir(data_dir);
+    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let mut images = Vec::new();
+    for img in fetched.images {
+        let id = new_id();
+        let path = tmp.join(format!("{id}.{}", img.extension));
+        fs::write(&path, &img.bytes).map_err(|e| format!("临时图片写入失败: {e}"))?;
+        images.push(GenImage {
+            id,
+            path: path.to_string_lossy().to_string(),
+            bytes: img.bytes.len() as u64,
         });
     }
-    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut recs: Vec<UsageRecord> = Vec::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(r) = serde_json::from_str::<UsageRecord>(line) else {
-            continue;
-        };
-        if (!q.provider_id.is_empty() && r.provider_id != q.provider_id)
-            || (!q.model.is_empty() && r.model != q.model)
-            || (!q.status.is_empty() && r.status != q.status)
-            || (!q.date.is_empty() && !r.ts.starts_with(&q.date))
-        {
-            continue;
-        }
-        recs.push(r);
+    // 会话历史只是临时图索引：记录/裁剪失败不应掩盖已成功的生成（图片已落盘）。
+    if let Err(e) = record_history(data_dir, &images, cfg.settings.history_limit) {
+        log::warn!(target: "image_ai", "记录会话历史失败（不影响本次生成）: {e}");
     }
-    let total = recs.len();
-    recs.reverse();
-    let items = recs.into_iter().skip(q.offset).take(q.limit).collect();
-    Ok(PageResult { total, items })
+    Ok(GenResult { images })
 }
 
 // ===================== 会话历史：LRU 裁剪（清单在 .imgtmp/history.json，随会话清理）=====================
 
 /// 读历史清单。缺失（首次生成）按空表；损坏同样按空表并告警——历史只是临时图索引，
-/// 不值得为它阻断生成（对齐台账「坏行跳过」的宽容口径），下次保存即完成重建。
+/// 不值得为它阻断生成（坏数据跳过的宽容口径），下次保存即完成重建。
 fn read_history(path: &Path) -> Vec<HistoryEntry> {
     match json_store::load::<Vec<HistoryEntry>>(path) {
         Ok(v) => v,
@@ -866,7 +867,7 @@ fn read_history(path: &Path) -> Vec<HistoryEntry> {
 /// 把本次生成的每张图记入历史（每图一条：裁剪粒度是图片文件，而非一次生成），
 /// 再按上限裁剪。仅 generate() 成功路径调用——失败路径图片未落盘，不产生历史。
 pub fn record_history(data_dir: &Path, images: &[GenImage], limit: usize) -> Result<(), String> {
-    // 目录可能不存在（极端情况下被外部清走）：对齐 append_usage「自建父目录」的惯例，不让索引写盘因目录缺失而失败。
+    // 目录可能不存在（极端情况下被外部清走）：自建父目录，不让索引写盘因目录缺失而失败。
     fs::create_dir_all(tmp_dir(data_dir)).map_err(|e| e.to_string())?;
     let path = history_path(data_dir);
     let ts = now_ts();
@@ -937,8 +938,15 @@ mod tests {
             seed: None,
             steps: None,
             uid: None,
+            prompt_extend: None,
+            watermark: None,
             base_url: String::new(),
             supports_response_format: false,
+            supports_negative_prompt: false,
+            supports_prompt_extend: false,
+            supports_watermark: false,
+            supports_seed: false,
+            supports_n: true,
         }
     }
 
@@ -1065,7 +1073,6 @@ mod tests {
         .unwrap();
         let m = cfg.model("my-relay", "qwen-image-3.0").unwrap();
         assert_eq!(m.model, "qwen-image-3.0");
-        assert!(m.prices.is_empty(), "无价格表 → 估价 0，不阻断");
         assert_eq!(m.capabilities.max_n, 0, "0 = 不限张数");
         // 请求的不是默认模型：仍然拒绝（提示用户去设置）。
         assert!(cfg.model("my-relay", "other-model").is_none());
@@ -1075,62 +1082,6 @@ mod tests {
     fn ids_are_unique() {
         assert_ne!(new_id(), new_id());
         assert_eq!(new_id().len(), 16);
-    }
-
-    #[test]
-    fn append_and_query_usage() {
-        let p = tempfile::tempdir().unwrap().path().join("usage.jsonl");
-        let mut rec = UsageRecord {
-            id: "a".into(),
-            ts: "2026-09-26 10:00:00".into(),
-            provider_id: "openai".into(),
-            provider_name: "OpenAI".into(),
-            kind: "openai".into(),
-            model: "gpt-image-1".into(),
-            size: "1024x1024".into(),
-            n: 1,
-            seed: None,
-            quality: None,
-            prompt: "p".into(),
-            negative_prompt: String::new(),
-            estimated_cost: 0.04,
-            currency: "USD".into(),
-            status: "success".into(),
-            error: String::new(),
-            real_usage: None,
-        };
-        append_usage(&p, &rec).unwrap();
-        rec.id = "b".into();
-        rec.ts = "2026-09-27 09:00:00".into();
-        rec.status = "failed".into();
-        append_usage(&p, &rec).unwrap();
-        let q = UsageQuery {
-            offset: 0,
-            limit: 10,
-            provider_id: String::new(),
-            model: String::new(),
-            status: String::new(),
-            date: String::new(),
-        };
-        let page = query_usage(&p, &q).unwrap();
-        assert_eq!(page.total, 2);
-        assert_eq!(page.items[0].id, "b"); // 最新在前
-    }
-
-    #[test]
-    fn query_usage_filters_and_skips_corrupt_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("usage.jsonl");
-        fs::write(&p, "not json\n").unwrap();
-        let q = UsageQuery {
-            offset: 0,
-            limit: 10,
-            provider_id: String::new(),
-            model: String::new(),
-            status: String::new(),
-            date: String::new(),
-        };
-        assert_eq!(query_usage(&p, &q).unwrap().total, 0); // 坏行不报错
     }
 
     #[test]
@@ -1149,6 +1100,39 @@ mod tests {
     }
 
     #[test]
+    fn size_rules_match_wan25_26_official_constraints() {
+        // 官方 2.5/2.6：总像素 [1280², 1440²]，宽高比 [1:4, 4:1]。
+        let rules = SizeRules {
+            total_min: 1280 * 1280,
+            total_max: 1440 * 1440,
+            ratio_min: 0.25,
+            ratio_max: 4.0,
+            ..Default::default()
+        };
+        assert!(validate_size("1280*1280", &rules).is_ok());
+        assert!(validate_size("768x2700", &rules).is_ok()); // 文档举例的极端竖版（总像素恰为上限）
+                                                            // 注：官方推荐档 960*1696 总像素略小于 1280²，属文档近似边界；它在预设枚举里走豁免，不经规则校验。
+        assert!(validate_size("1024*1024", &rules).is_err()); // 总像素不足
+        assert!(validate_size("1440*1441", &rules).is_err()); // 总像素超限
+        assert!(validate_size("768*3100", &rules).is_err()); // 比例越界
+        assert!(validate_size("abc", &rules).is_err()); // 格式错误
+    }
+
+    #[test]
+    fn size_rules_side_bounds_for_wan22() {
+        // 2.2 及更早：宽高均在 [512, 1440]。
+        let rules = SizeRules {
+            min_side: 512,
+            max_side: 1440,
+            ..Default::default()
+        };
+        assert!(validate_size("1024*1024", &rules).is_ok());
+        assert!(validate_size("512*1440", &rules).is_ok());
+        assert!(validate_size("500*1024", &rules).is_err());
+        assert!(validate_size("1024*1441", &rules).is_err());
+    }
+
+    #[test]
     fn builtin_has_four_providers_p2() {
         let cfg = Config::builtin();
         let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
@@ -1158,12 +1142,114 @@ mod tests {
         assert_eq!(flash.capabilities.max_n, 1);
         assert!(flash.capabilities.supports_seed);
         assert!(!flash.capabilities.supports_quality);
-        assert_eq!(flash.prices["1024x1024"], 0.12);
-        // 百炼能力抽查：n=4、负向提示词、size 用 * 形态
-        let turbo = cfg.model("dashscope", "wanx2.1-t2i-turbo").unwrap();
-        assert_eq!(turbo.capabilities.max_n, 4);
-        assert!(turbo.capabilities.supports_negative_prompt);
-        assert!(turbo.capabilities.sizes.contains(&"1024*1024".to_string()));
+        // 百炼模型目录代码内置：三系列 8 个模型抽查关键差异。
+        let qwen = cfg.model("dashscope", "qwen-image-3.0-pro").unwrap();
+        assert_eq!(qwen.capabilities.max_n, 6);
+        assert!(qwen.capabilities.supports_negative_prompt);
+        assert!(qwen.capabilities.prompt_extend_default);
+        assert!(qwen.capabilities.sizes.contains(&"2048*2048".to_string()));
+        let wan27 = cfg.model("dashscope", "wan2.7-image-pro").unwrap();
+        assert!(wan27.capabilities.sizes.contains(&"4K".to_string()));
+        assert!(!wan27.capabilities.supports_negative_prompt);
+        assert!(!wan27.capabilities.supports_prompt_extend);
+        let z = cfg.model("dashscope", "z-image-turbo").unwrap();
+        assert_eq!(z.capabilities.max_n, 1);
+        assert!(!z.capabilities.supports_n);
+        assert!(!z.capabilities.prompt_extend_default);
+        // 旧模型（wanx2.1）已下线：目录中查不到。
+        assert!(cfg.model("dashscope", "wanx2.1-t2i-turbo").is_none());
+    }
+
+    #[test]
+    fn dashscope_catalog_is_injected_even_when_json_has_no_entry() {
+        // assets/image_ai.json 已不含 dashscope 块：builtin 仍须注入代码内置目录。
+        let cfg = Config::builtin();
+        let p = cfg.provider("dashscope").expect("内置百炼服务商必须存在");
+        assert_eq!(p.default_model, "qwen-image-3.0-pro");
+        assert_eq!(p.models.len(), 8);
+    }
+
+    #[test]
+    fn reconcile_migrates_legacy_dashscope_block_keeping_user_edits() {
+        // 模拟旧版本用户文件：dashscope 块带旧模型行、自定义显示名与代理 base_url、
+        // 已失效的默认模型。
+        let mut providers = vec![
+            ProviderConfig {
+                id: "openai".into(),
+                kind: ProviderKind::OpenAI,
+                name: "OpenAI".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                default_model: "gpt-image-1".into(),
+                models: vec![],
+            },
+            ProviderConfig {
+                id: "dashscope".into(),
+                kind: ProviderKind::Dashscope,
+                name: "我的百炼代理".into(),
+                base_url: "https://proxy.example.com/api/v1".into(),
+                default_model: "wanx2.1-t2i-turbo".into(), // 已下线 → 须校正
+                models: vec![ModelInfo {
+                    model: "wanx2.1-t2i-turbo".into(),
+                    label: "旧模型".into(),
+                    capabilities: Capabilities::default(),
+                }],
+            },
+        ];
+        assert!(reconcile_builtin_providers(&mut providers));
+        let ds = providers.iter().find(|p| p.id == "dashscope").unwrap();
+        // 用户定制保留
+        assert_eq!(ds.name, "我的百炼代理");
+        assert_eq!(ds.base_url, "https://proxy.example.com/api/v1");
+        // 模型目录与默认模型被代码接管
+        assert_eq!(ds.models.len(), 8);
+        assert!(ds.models.iter().all(|m| m.model != "wanx2.1-t2i-turbo"));
+        assert_eq!(ds.default_model, "qwen-image-3.0-pro");
+        // 再跑一次：内容已一致，不产生变更（不触发无谓写盘）。
+        assert!(!reconcile_builtin_providers(&mut providers));
+        // 用户把默认模型改成新目录内的 wan2.7：不应被校正。
+        providers[1].default_model = "wan2.7-image".into();
+        assert!(!reconcile_builtin_providers(&mut providers));
+        assert_eq!(providers[1].default_model, "wan2.7-image");
+    }
+
+    #[test]
+    fn ensure_migrates_legacy_dashscope_user_file_end_to_end() {
+        // 旧版本用户文件：只有旧 dashscope 服务商、默认模型已下线。ensure 必须就地迁移
+        // 并把迁移结果写回（load 与磁盘两边都是 8 模型新目录）。
+        let root = tempfile::tempdir().unwrap();
+        let legacy = serde_json::json!({
+            "providers": [{
+                "id": "dashscope",
+                "kind": "dashscope",
+                "name": "百炼通义万相",
+                "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
+                "defaultModel": "wanx2.1-t2i-turbo",
+                "models": []
+            }],
+            "settings": {
+                "defaultProviderId": "dashscope",
+                "historyLimit": 20,
+                "concurrency": 2,
+                "namingPattern": "{uid}_{index}"
+            }
+        });
+        fs::write(providers_path(root.path()), legacy.to_string()).unwrap();
+
+        Config::ensure_user_files(root.path()).unwrap();
+
+        let cfg = Config::load(root.path()).unwrap();
+        assert_eq!(cfg.provider("dashscope").unwrap().models.len(), 8);
+        assert_eq!(
+            cfg.provider("dashscope").unwrap().default_model,
+            "qwen-image-3.0-pro"
+        );
+        // 再次 ensure 幂等：迁移已落盘，不重复产生写盘变更。
+        let before = fs::read_to_string(providers_path(root.path())).unwrap();
+        Config::ensure_user_files(root.path()).unwrap();
+        assert_eq!(
+            before,
+            fs::read_to_string(providers_path(root.path())).unwrap()
+        );
     }
 
     // ===================== 会话历史 LRU =====================

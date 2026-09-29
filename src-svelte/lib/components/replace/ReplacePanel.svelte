@@ -14,7 +14,7 @@
   );
 
   // 三个表单选项（与复选框双向绑定）；mode 的取值是发往后端的协议值。
-  // saveBackup 用 appStore 共享：单人微调页读同一个开关，两条路径行为一致。
+  // saveBackup 用 appStore 共享：单人替换页读同一个开关，两条路径行为一致。
   let mode = $state<"Preserve" | "Overwrite" | "Generate">("Preserve");
   let allowDuplicates = $state(true);
   let filterNewgan = $state(true);
@@ -177,6 +177,14 @@
 </div>
 
 <style>
+  /* 本卡是窄栏适配的容器查询参照（container-type 只作用于本组件的这张卡）：
+     左栏 320（内容盒 ≈286）时纵向堆叠；S5 堆叠后本卡变全宽，查询不命中、恢复横向。
+     视口断点区分不了这两种容器宽度，故窄栏规则必须走容器查询；下方 900px 视口断点
+     管的是另一件事（窄窗口下面板级堆叠），两级并存、语义不同。 */
+  .card {
+    container-type: inline-size;
+  }
+
   /* 模式行：分段控件定宽 360，右侧说明文字占用余宽（窄屏自动收缩） */
   .mode-line {
     display: flex;
@@ -196,6 +204,26 @@
     display: flex;
     gap: 22px;
     flex-wrap: wrap;
+  }
+
+  /* 窄栏（左栏 320，内容盒 ≈286）：标签与控件纵向堆叠、分段控件占满整行。
+     置于基础规则之后——容器查询不加分值，同特异性时按源序取胜。 */
+  @container (max-width: 360px) {
+    .path-row.two {
+      grid-template-columns: 1fr;
+      gap: 7px;
+    }
+    .path-row.two .row-label {
+      text-align: left;
+    }
+    .mode-line {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 7px;
+    }
+    .mode-line .seg3 {
+      flex: 1 1 auto;
+    }
   }
 
   /* 窄屏（窗口 ≤900px）：模式行标签与分段控件纵向堆叠，分段占满整行，说明文字自然落在下方 */

@@ -178,6 +178,28 @@ select option { background: var(--bg-surface); color: var(--text-1); }
 }
 
 /* ============================================================
+   替换台两栏（读写分栏）：左栏 320 写 / 右栏弹性读
+   ============================================================ */
+/* 行高锁死为工作台可用高度（minmax(0,1fr)）：右栏结果卡独占全高、内部滚动；
+   左栏写侧若超出则栏内滚动，不把整个工作台撑出高度预算去挤状态栏 */
+.wb-split {
+  flex: 1; min-height: 0; min-width: 0;
+  display: grid; grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr); gap: 10px;
+}
+.wb-write { min-width: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+/* 窄窗口（<1100，内容区 ≈852 装不下 320+670=990）：退化为上下堆叠，写在上、读在下
+   （与左右分栏的「先操作后看结果」同序）。这是布局级断点；ReplacePanel 内部的 900px
+   是面板级——900–1100 区间整体已堆叠而面板内部仍横向（全宽放得下），预期行为勿修。 */
+@media (max-width: 1100px) {
+  .wb-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .wb-write { overflow-y: visible; }
+}
+
+/* ============================================================
    侧栏
    ============================================================ */
 .sidebar {
@@ -275,13 +297,9 @@ select option { background: var(--bg-surface); color: var(--text-1); }
 }
 .card-title .muted { font-weight: 400; }
 .card.grow { flex: 1; min-height: 220px; display: flex; flex-direction: column; min-width: 0; }
-/* flex 列容器：条件渲染的 .table-pane（height:100%）与常驻的 .tab-pane 都能吃满高度链；
+/* flex 列容器：条件渲染的 .table-pane（height:100%）等能吃满高度链；
    min-width:0 保证 18 列宽表格首次挂载时也被 .table-scroll 的内部横滚吸收，不把网格列撑宽 */
 .card-body { flex: 1; min-height: 0; min-width: 0; overflow: auto; display: flex; flex-direction: column; }
-/* tab 保活层（单人替换）：非激活 display:none，不占布局也不进焦点序；激活时吃满剩余高度，
-   内容仍由 .card-body 统一滚动（行为与此前直接渲染时一致）。 */
-.tab-pane { display: none; min-width: 0; }
-.card-body > .tab-pane.active { display: block; flex: 1; min-height: 0; }
 
 /* 完整性状态行（胶囊 + 旁注）与规则配置分隔行 */
 .statusline { display: flex; align-items: center; gap: 9px; margin-top: 8px; font-size: 12.5px; flex-wrap: wrap; }
@@ -334,17 +352,23 @@ select option { background: var(--bg-surface); color: var(--text-1); }
 .path-row .path-actions { display: flex; gap: 7px; }
 .path-row .path-actions .btn { width: 96px; padding: 7px 10px; white-space: nowrap; }
 
-input[type='text'], input[type='search'], select, textarea {
+input[type='text'], input[type='search'], input[type='number'], input[type='password'], select, textarea {
   font-family: inherit;
 }
-input[type='text'], input[type='search'] {
+input[type='text'], input[type='search'], input[type='number'], input[type='password'] {
   padding: 7px 10px; border: 1px solid var(--hairline-2); border-radius: var(--radius-md);
   font-size: 13px; background: var(--bg-inset); color: var(--text-1); outline: none;
   min-height: var(--control-h);
   transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
-input[type='text']:hover:not(:focus), input[type='search']:hover:not(:focus) { border-color: var(--hairline-3); }
-input[type='text']::placeholder, input[type='search']::placeholder { color: var(--text-3); }
+input[type='text']:hover:not(:focus), input[type='search']:hover:not(:focus),
+input[type='number']:hover:not(:focus), input[type='password']:hover:not(:focus) { border-color: var(--hairline-3); }
+input[type='text']::placeholder, input[type='search']::placeholder,
+input[type='number']::placeholder, input[type='password']::placeholder { color: var(--text-3); }
+/* number 输入与文本输入同规格，隐藏原生 spinner（步进交互由自定义控件承担） */
+input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 input[readonly] { background: var(--bg-inset); color: var(--text-2); font-family: var(--mono); font-size: 12px; }
 select {
   width: 100%; padding: 7px 26px 7px 10px; border: 1px solid var(--hairline-2); border-radius: var(--radius-md);
@@ -360,7 +384,20 @@ select {
   background-repeat: no-repeat;
 }
 select:hover:not(:focus) { border-color: var(--hairline-3); }
-input[type='text']:focus, input[type='search']:focus, select:focus, textarea:focus {
+/* 多行文本（提示词 / 负向提示词 / 模板正文）：与文本输入同规格（§5.2）。此前 textarea 只继承
+   字体、其余走浏览器默认亮色外观，深色主题下像贴了块白补丁。纵向可拖拽调高、横向锁死（防撑破卡片） */
+textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--hairline-2); border-radius: var(--radius-md);
+  font-size: 13px; line-height: 1.65; background: var(--bg-inset); color: var(--text-1); outline: none;
+  resize: vertical;
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+textarea:hover:not(:focus) { border-color: var(--hairline-3); }
+textarea::placeholder { color: var(--text-3); }
+/* 只读预览（按球员数据源渲染的提示词正文）：文字降一档，与 input[readonly] 同语义 */
+textarea[readonly] { color: var(--text-2); }
+input[type='text']:focus, input[type='search']:focus, input[type='number']:focus,
+input[type='password']:focus, select:focus, textarea:focus {
   border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring);
 }
 /* 抽屉内的紧凑下拉不撑满（覆盖默认控件高度） */
@@ -627,38 +664,56 @@ table.grid tbody tr:nth-child(even) { background: var(--zebra); }
 table.grid tbody tr:hover { background: var(--bg-raised); }
 
 /* ============================================================
-   Stepper（五步旅程引导，纯展示）
+   TopNav（顶栏：三工作台导航，由原 Stepper 改造，chip 可点击切换）
    ============================================================ */
-.stepper-card {
+.topnav-card {
   background: var(--bg-surface);
-  border: 1px solid var(--hairline); border-radius: var(--radius-lg); padding: 10px 16px;
+  border: 1px solid var(--hairline); border-radius: var(--radius-lg); padding: 5px 12px;
   box-shadow: var(--shadow-1);
+  display: flex; align-items: center; gap: 10px;
 }
-.stepper {
-  display: flex; align-items: center;
-  list-style: none; margin: 0; flex-wrap: wrap; row-gap: 8px;
+.topnav {
+  display: flex; align-items: center; flex: 1; min-width: 0;
+  list-style: none; margin: 0; padding: 0; flex-wrap: wrap; row-gap: 6px;
 }
-.stepper li { list-style: none; }
-.step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); white-space: nowrap; }
-.step .num {
-  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+.topnav li { list-style: none; }
+/* chip 是按钮：显式重置光标与字体（font: inherit 在前、font-size 在后，故仍取 12px） */
+.wb {
+  display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  padding: 3px 9px; border-radius: 99px; border: 1px solid transparent;
+  background: none; font: inherit; font-size: 12px; color: var(--text-3); cursor: pointer;
+  transition: background-color var(--dur) var(--ease-out), color var(--dur) var(--ease-out),
+              border-color var(--dur) var(--ease-out);
+}
+.wb:hover { background: var(--bg-raised); color: var(--text-2); }
+.wb .num {
+  width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
   font-size: 11.5px; font-weight: 600; border: 1.5px solid var(--hairline-2);
   color: var(--text-3); background: var(--bg-base); flex-shrink: 0;
   transition: background-color var(--dur) var(--ease-out), border-color var(--dur) var(--ease-out), color var(--dur) var(--ease-out);
 }
-.step.done { color: var(--text-2); }
-.step.done .num { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
-.step.current { color: var(--text-1); font-weight: 600; }
-.step.current .num {
-  border-color: var(--accent); color: var(--accent); background: var(--accent-soft);
-  box-shadow: 0 0 0 4px var(--accent-soft);
+/* 当前台 = 用户选择（高亮）。与右侧状态点（该做哪一步，派生）各表达一件事 */
+.wb.current { color: var(--text-1); font-weight: 600; background: var(--accent-soft); border-color: var(--accent); }
+.wb.current .num { border-color: var(--accent); color: var(--accent); background: var(--bg-surface); }
+/* 状态点三档：ok=绿（可开工）/ warn=琥珀（有前提但缺项）/ idle=灰（前提未建立） */
+.wb-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--hairline-2); }
+.wb-dot.ok { background: var(--ok); }
+.wb-dot.warn { background: var(--warn); }
+.wb-dot.idle { background: var(--text-3); }
+/* ③chip 的队列数量角标（S9）：队列长任务跑着时切去别的工作台，条数在此可见（不进状态栏） */
+.wb-badge {
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px;
+  background: var(--accent); color: var(--accent-contrast);
+  font-size: 10.5px; font-weight: 600; display: inline-grid; place-items: center; flex-shrink: 0;
 }
-.step-line { flex: 1 1 16px; height: 2px; background: var(--hairline-2); margin: 0 10px; border-radius: 2px; min-width: 16px; transition: background-color var(--dur) var(--ease-out); }
-.step-line.done { background: var(--accent); }
+.wb-line { flex: 1 1 16px; height: 2px; background: var(--hairline-2); margin: 0 8px; border-radius: 2px; min-width: 16px; transition: background-color var(--dur) var(--ease-out); }
+.wb-line.done { background: var(--accent); }
+/* 顶栏右端作用域回显：被左侧 chip 组推到最右，空间不足时优先压缩它 */
+.wb-scope { font-size: 12px; color: var(--text-3); white-space: nowrap; flex-shrink: 0; }
 /* 窄屏：连接线收为定长短段，换行时不再出现横跨长线 */
 @media (max-width: 1024px) {
-  .step-line { flex-basis: 20px; margin: 0 6px; }
-  .stepper { row-gap: 10px; }
+  .wb-line { flex-basis: 20px; margin: 0 6px; }
+  .topnav { row-gap: 8px; }
 }
 
 /* ============================================================
@@ -688,6 +743,9 @@ table.grid tbody tr:hover { background: var(--bg-raised); }
    球员卡（单人替换，B3）
    ============================================================ */
 .player-card { display: flex; gap: 22px; flex-wrap: wrap; }
+/* 容器放在外层卡（替换台左栏的单人替换卡）上：容器查询不能样式化容器自身，
+   而 .player-card 自身的列向需要在窄栏下改掉，故参照物上移一层 */
+.viewer-card { container-type: inline-size; }
 .face-col { flex-shrink: 0; display: flex; flex-direction: column; gap: 7px; align-items: flex-start; }
 .face { width: 168px; height: 168px; border-radius: var(--radius-xl); object-fit: cover; box-shadow: 0 0 0 1px var(--hairline-2), var(--shadow-2); }
 .face-empty {
@@ -729,8 +787,28 @@ input.uid-chip {
   .player-head { flex-wrap: wrap; }
   .uid-tip { flex-basis: 100%; margin-left: 0; }
 }
-/* 三行信息胶囊：作为 player-info 直接子级，左缘与 UID 输入框对齐；行间距小于卡片级 gap */
-.capsule-rows { display: flex; flex-direction: column; gap: 7px; }
+/* 窄栏（替换台左栏 320，内容盒 ≈286）：球员卡整体改纵向堆叠。
+   【为什么显式改 column 而不靠 flex-wrap】min-width:0 会让资料列缩进头像右侧 ~100px 的窄条里
+   （不触发换行），UID 输入框/提示/路径输入全部被裁——实测截图即此形态。
+   布局自上而下：头像行（112px 头像 + 映射路径靠右）→ UID 搜索行 → 姓名 → 提示 → 资料胶囊 → 替换行。
+   置于基础规则之后——容器查询不加分值，同特异性时按源序取胜。
+   用容器查询而非视口断点——同一台 1280 窗口里本卡在窄栏是 286、堆叠后（S5）变全宽，
+   视口断点区分不了这两种容器宽度；全宽时查询不命中、自动回到横排（与 900px 视口断点两级并存）。 */
+@container (max-width: 360px) {
+  .player-card { flex-direction: column; gap: 12px; }
+  .face-col { flex-direction: row; align-items: center; gap: 12px; }
+  .face, .face-empty { width: 112px; height: 112px; }
+  /* 映射路径可能长过头像右侧余量：允许逐字符折行（min-content 否则会顶破窄列） */
+  .face-col .mapping { min-width: 0; word-break: break-all; }
+  .player-info { min-width: 0; }
+  .player-head { flex-wrap: wrap; }
+  /* UID 搜索组独占一行；提示用 order 提到姓名前（DOM 里它在姓名之后）——
+     提示讲的是输入框的用法，被姓名隔开就断了；宽布局不设 order、不受影响 */
+  .uid-search { flex-basis: 100%; }
+  .uid-tip { flex-basis: 100%; margin-left: 0; order: 1; }
+  .player-head h2 { order: 2; flex: 1 1 auto; }
+}
+/* 信息胶囊（单池）：.meta-row 直接承载，flex-wrap 按容器宽度自动折行；空值显示 — 不坍缩 */
 .meta-row { display: flex; gap: 7px; flex-wrap: wrap; }
 .meta {
   display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2);
@@ -746,7 +824,7 @@ input.uid-chip {
 .gen-src-btn.on { border-color: var(--accent); color: var(--accent); }
 
 /* 表格工具栏（B3） */
-.table-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; min-width: 0; }
+.table-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; min-width: 0; flex-wrap: wrap; }
 /* 总条数：数字与「条」必须同行，空间不足时由搜索框收缩让位 */
 .table-toolbar .record-count { white-space: nowrap; flex-shrink: 0; }
 /* 搜索框：基准 320px，空间不足时先收缩自己（min-width 兜底），给右侧分页器让位，

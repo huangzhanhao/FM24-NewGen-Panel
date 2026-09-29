@@ -1,7 +1,10 @@
 /**
- * 一组头像图的 blob URL 加载器 —— 「名单预览 / 快照预览 / 单人替换」三个标签页共用。
+ * 头像缩略图的两层数据管线 —— 「名单预览 / 快照预览 / 单人替换」等位点共用。
+ * - createAvatarBlobs：底层「读字节 → 建 URL → 回收」的加载器；
+ * - createAvatarSource：上层「按 uid 批量查路径 + 装载缩略图」的数据源（名单头像列、
+ *   队列坞条目行、生图球员源卡三处共用，见文件尾注释）。
  *
- * 【为什么需要它】WebView 不能直接用磁盘路径当 <img> 源，图片必须由后端读成字节（read_image）
+ * 【为什么需要加载器】WebView 不能直接用磁盘路径当 <img> 源，图片必须由后端读成字节（read_image）
  * 再包成 blob URL；而 blob URL 不会随组件消失自动回收，必须显式 revoke。
  * 这套「读字节 → 建 URL → 回收」的账原先在三个组件里各写一遍（两个预览表格还各自维护了
  * 令牌 + 在用清单 + 卸载清理），此处单点维护：
@@ -67,5 +70,83 @@ export function createAvatarBlobs(): AvatarBlobs {
     },
     load,
     clear,
+  };
+}
+
+// ---------------- 按 uid 批量展示头像的数据源（路径查询 + 缩略图装载） ----------------
+
+/** 一处「按 uid 批量展示头像」位点的数据源（名单预览页 / 队列坞条目行 / 生图球员源卡共用）。
+ *
+ *  【为什么抽它】「query_avatars 批量查路径 → 滤 null → 交给 blob 加载器 → 令牌作废在途响应」
+ *  这套骨架原先在三个组件里各写一遍（令牌、paths 记账、失败降级的细节各有出入），
+ *  是「三处修一处漏两处」的典型面，此处单点维护。
+ *  【为什么按 UID 查】RTF 名单「头像」列原文导出时恒为空（见 rtf_scanner 的 EXT_AVATAR_COL），
+ *  头像只能按球员 UID 反查映射；解析（映射缓存 → 存档快照 → 快照文件）由后端 query_avatars
+ *  完成，出处与单人预览同源。
+ *
+ *  语义：
+ *   - load(uids)：令牌自增后批量查路径；成功整份写 paths（响应式）并把非空路径交给内置
+ *     blob 加载器覆盖式装载（上一批 URL 自动回收）；在途旧响应回来直接丢弃。批量失败清空
+ *     paths 与 blob（不留上一批旧图）并把原因记入 error——头像列是辅助展示，不弹窗，
+ *     调用方自行决定展示（名单预览挂在列头）或忽略（队列坞/球员源卡静默降级）。
+ *   - clear()：立即作废在途查询并清空全部状态（切名单/换数据源等需要就地清白的时机由调用方定）。
+ *
+ *  【须在组件初始化期调用】内部有 $state/$effect（卸载自动回收），一个实例对应一处头像位点。 */
+export interface AvatarSource {
+  /** uid → 头像绝对路径（null = 无映射或图片不在包内；新一批响应到达前保留上一批）。 */
+  readonly paths: Record<string, string | null>;
+  /** uid → 已就绪的缩略图 blob URL（未就绪/无图的 uid 不存在）。 */
+  readonly urls: Record<string, string>;
+  /** 最近一次批量查询失败的原因（'' = 无错）。 */
+  readonly error: string;
+  /** 批量查一组 uid 的头像路径并装载缩略图（同实例的在途旧响应自相作废）。 */
+  load(uids: string[]): Promise<void>;
+  /** 作废在途查询并清空 paths/URL/error。 */
+  clear(): void;
+}
+
+/** 创建一个头像数据源（用法与生命周期见 AvatarSource 注释）。 */
+export function createAvatarSource(): AvatarSource {
+  let token = 0; // 查询令牌：新一批开始/清空后，在途的旧响应作废
+  const blobs = createAvatarBlobs();
+  let paths = $state<Record<string, string | null>>({});
+  let error = $state('');
+
+  return {
+    get paths() {
+      return paths;
+    },
+    get urls() {
+      return blobs.urls;
+    },
+    get error() {
+      return error;
+    },
+    clear() {
+      token++;
+      paths = {};
+      error = '';
+      blobs.clear();
+    },
+    async load(uids: string[]) {
+      const mine = ++token;
+      let got: Record<string, string | null>;
+      try {
+        got = await api.queryAvatars(uids);
+      } catch (e) {
+        if (mine !== token) return; // 已被更新的查询/清空取代：过期失败不落状态
+        paths = {};
+        error = String(e);
+        blobs.clear();
+        return;
+      }
+      if (mine !== token) return; // 期间已换批/清空：过期结果不写不装
+      error = '';
+      paths = got;
+      // 只有确实找到图的条目才交给加载器；无映射/图片不在包内的留在占位。
+      const wanted: Record<string, string> = {};
+      for (const [uid, p] of Object.entries(got)) if (p) wanted[uid] = p;
+      void blobs.load(wanted); // 覆盖式装载：空表也会回收上一批（load({}) 先 clear）
+    },
   };
 }

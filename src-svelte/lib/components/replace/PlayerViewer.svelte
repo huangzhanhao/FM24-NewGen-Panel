@@ -1,16 +1,18 @@
 <!-- 单人预览/替换：输入 UID 查看其头像与资料，或选一张新图单独替换。
-     外观为「球员卡」：左列头像 + 映射路径，右列 UID 输入框 + 姓名 + 信息胶囊 + 替换行。
+     常驻于替换台左栏（读写分栏的写侧下半；切去别的工作台即卸载，预览现场不留存），
+     与上方批量替换共用 saveBackup 开关。
      信息区统一为胶囊，按名单格式动态组合：Basic 只有基础 7 字段；ExtPlayer/ExtStaff
      追加详细字段（球员取「所在地」，职员取「偏好工作」），空值字段不渲染。
-     头像图的「读字节 → 建 blob → 回收」走三个标签页共用的 createAvatarBlobs
+     头像图的「读字节 → 建 blob → 回收」走与名单/快照两视图共用的 createAvatarBlobs
      （换人自动换代、卸载自动回收）。 -->
 <script lang="ts">
   import { open, message } from "@tauri-apps/plugin-dialog";
   import { api } from "../../services/api";
-  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
+  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（名单/快照/本卡共用）
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
   import { appStore } from "../../stores/app.svelte";
+  import { ui } from "../../stores/ui.svelte"; // 「用此球员生成」要切到 AI 生成头像工作台
   import { imageaiStore, setSourcePlayer } from "../../stores/imageai.svelte"; // P3 数据源入口
   import { icons } from "../../ui/icons";
   import type { PlayerPreview } from "../../types";
@@ -90,7 +92,7 @@
     // 写入目标取自预览结果（数据源里的原始 UID），不再读那个随时可能被用户改动的输入框。
     const writeUid = previewedUid;
     try {
-      // 备份开关读「替换执行」面板的同一共享值：关掉后单人微调也不备份。
+      // 备份开关读「替换执行」面板的同一共享值：关掉后单人替换也不备份。
       const hit = await api.replaceSingleFace(
         writeUid,
         imgPathInput,
@@ -117,13 +119,14 @@
   const isSource = $derived(
     !!previewedUid && imageaiStore.sourcePlayer?.uid === previewedUid,
   );
-  /** 把当前预览的球员设为生图数据源并切到 AI 生图 Tab（appStore.resultsView 是
-   *  结果区 Tab 的全局态，与名单预览行尾「送生图」同一机制）。 */
+  /** 把当前预览的球员设为生图数据源，并切到「AI 生成头像」工作台。
+   *  与名单预览行尾「送生图」同一机制（详见 PlayersTable.sendToGenerate 的注释）：
+   *  写 resultsView='generate' 会把本组件的预览结果换掉，改切工作台则不动这里的上下文。 */
   function useForGenerate() {
     if (!previewedUid) return;
     // 姓名取名单记录（仅命中映射表时没有姓名，退回 UID 展示）。
     setSourcePlayer(previewedUid, rec?.name?.trim() || previewedUid);
-    appStore.resultsView = "generate";
+    ui.workbench = "ai";
   }
 
   // 第 15 列语义：按后端结构化协议码区分球员/职员，与名单预览表同一口径（不依赖中文文案）。
@@ -139,8 +142,8 @@
     mono?: boolean;
   };
 
-  // 第一行固定的五个基础字段标签（顺序对齐「名单预览」表头：国籍、第二国籍、发长、发色、种族；
-  // 值缺失时用 — 占位，保证该行结构恒定）。
+  // 固定的五个基础字段标签（顺序对齐「名单预览」表头：国籍、第二国籍、发长、发色、种族；
+  // 值缺失时用 — 占位，保证基础名单也有胶囊可看）。
   const BASE_FIELDS = [
     { label: t.table.colNat, key: "primaryNat" },
     { label: t.table.col2ndNat, key: "secNat" },
@@ -149,10 +152,7 @@
     { label: t.table.colEth, key: "ethnicityCode" },
   ] as const;
 
-  /**
-   * 第一行：国籍、第二国籍、发长、发色、种族（固定五枚，Basic/Ext 都有）。
-   * 左边界对齐 UID 输入框；空值显示 — 不坍缩。
-   */
+  /** 基础五枚：国籍、第二国籍、发长、发色、种族（Basic/Ext 名单都有）；空值显示 — 不坍缩。 */
   const baseCapsules = $derived.by<Capsule[]>(() => {
     const r = preview?.record;
     if (!r) return [];
@@ -163,9 +163,9 @@
   });
 
   /**
-   * 第二行：拓展字段，顺序对齐「名单预览」表头列序——
+   * 拓展字段，顺序对齐「名单预览」表头列序——
    * 肤色 / 随机人 / 性别 / 年龄 / 身高 / 俱乐部 / 所在地(球员)或偏好工作(职员) / 能力 / 潜力 / R.C.A / 自定义列。
-   * 仅拓展名单有此行；空值字段跳过。随机人胶囊（是/否）保持青绿强调色。
+   * 仅拓展名单有；空值字段跳过。随机人胶囊（是/否）保持青绿强调色。
    */
   const extCapsules = $derived.by<Capsule[]>(() => {
     const d = preview?.record?.detailed;
@@ -198,7 +198,7 @@
     return out;
   });
 
-  // 第三行：当前映射（等宽胶囊，独占一行；无映射时该行不渲染，头像下方另有占位简示）。
+  // 当前映射（等宽胶囊；无映射时不渲染，头像下方另有占位简示）。
   const mappingCapsule = $derived.by<Capsule | null>(() => {
     const m = preview?.mapping;
     if (!m) return null;
@@ -209,6 +209,15 @@
     };
   });
 
+  /** 全部胶囊并成一个池子（用户定稿）：不再按「基础/拓展/映射」手动分行——分组边界在
+   *  320 窄栏下会留出成片空白；单池交给 .meta-row 的 flex-wrap 按容器宽度自然折行，
+   *  映射胶囊的「独占一行」语义一并取消（长路径靠 break-all 在胶囊内自折）。 */
+  const capsules = $derived.by<Capsule[]>(() => {
+    const out = [...baseCapsules, ...extCapsules];
+    if (mappingCapsule) out.push(mappingCapsule);
+    return out;
+  });
+
   // 当前映射的「种族\图片名」展示串（头像下方简示用；无映射时为空串）。
   const mappingText = $derived(
     preview?.mapping
@@ -217,131 +226,120 @@
   );
 </script>
 
-<div class="player-card">
-  <!-- 左列：圆角头像 + 映射路径（有映射时小圆点着青绿）。 -->
-  <div class="face-col">
-    <!-- 有 blob URL 就显示图片，否则显示虚线占位。 -->
-    {#if face.urls[FACE]}
-      <img src={face.urls[FACE]} alt={t.viewer.title} class="face" />
-    {:else}
-      <div class="face-empty">{t.viewer.noImage}</div>
-    {/if}
-    <span class="mapping" class:set={!!preview?.mapping} title={mappingText}>
-      {mappingText || t.viewer.noMappingPlaceholder}
-    </span>
-  </div>
+<!-- 卡片外壳收进本组件（与 ReplacePanel/SetupCard 同一模式），App 不再包壳；
+     .viewer-card 同时是窄栏容器查询的锚点（app.css 的 .viewer-card + @container 块），动模板别丢类名。 -->
+<div class="card viewer-card">
+  <div class="card-title">{t.viewer.section}</div>
+  <div class="player-card">
+    <!-- 左列：圆角头像 + 映射路径（有映射时小圆点着青绿）。 -->
+    <div class="face-col">
+      <!-- 有 blob URL 就显示图片，否则显示虚线占位。 -->
+      {#if face.urls[FACE]}
+        <img src={face.urls[FACE]} alt={t.viewer.title} class="face" />
+      {:else}
+        <div class="face-empty">{t.viewer.noImage}</div>
+      {/if}
+      <span class="mapping" class:set={!!preview?.mapping} title={mappingText}>
+        {mappingText || t.viewer.noMappingPlaceholder}
+      </span>
+    </div>
 
-  <!-- 右列：头部（UID 输入框在最左 + 姓名）、三行信息胶囊、替换行。 -->
-  <div class="player-info">
-    <div class="player-head">
-      <!-- UID 搜索组：标准尺寸输入框 + 搜索按钮成组等高；回车与点按钮等价。 -->
-      <div class="uid-search">
-        <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）；标准输入框尺寸、等宽 semibold，置于最左。 -->
-        <input
-          id="pv-uid"
-          class="uid-chip"
-          type="text"
-          bind:value={uid}
-          placeholder={t.viewer.uidPlaceholder}
-          aria-label={t.viewer.hint}
-          onkeydown={(e) => e.key === "Enter" && showPreview()}
-        />
-        <button
-          type="button"
-          class="btn uid-search-btn"
-          onclick={showPreview}
-          disabled={!uid.trim()}
-          title={t.viewer.hint}
-        >
+    <!-- 右列：头部（UID 输入框在最左 + 姓名）、三行信息胶囊、替换行。 -->
+    <div class="player-info">
+      <div class="player-head">
+        <!-- UID 搜索组：标准尺寸输入框 + 搜索按钮成组等高；回车与点按钮等价。 -->
+        <div class="uid-search">
+          <!-- UID 必须保持为可输入框：输入后回车即预览（不可改成只读标签）；标准输入框尺寸、等宽 semibold，置于最左。 -->
+          <input
+            id="pv-uid"
+            class="uid-chip"
+            type="text"
+            bind:value={uid}
+            placeholder={t.viewer.uidPlaceholder}
+            aria-label={t.viewer.hint}
+            onkeydown={(e) => e.key === "Enter" && showPreview()}
+          />
+          <button
+            type="button"
+            class="btn uid-search-btn"
+            onclick={showPreview}
+            disabled={!uid.trim()}
+            title={t.viewer.hint}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              aria-hidden="true">{@html icons.search.body}</svg
+            >
+            {t.viewer.searchBtn}
+          </button>
+        </div>
+        <!-- 姓名为头部视觉主体；极端窄宽下由省略号收口（title 悬停看全名），不再把右侧提示挤换行。 -->
+        <h2 title={rec?.name ?? undefined}>{rec?.name || "—"}</h2>
+        <!-- 文本提示安静靠右：说明回车快捷键与 r- 前缀可省略；默认单行，仅 ≤900px 窄窗折到下一行（见 app.css）。 -->
+        <span class="uid-tip">{t.viewer.uidTip}</span>
+      </div>
+
+      <!-- 信息胶囊单池：不再按「基础/拓展/映射」分三个 div，交给 .meta-row 的 flex-wrap
+           按容器宽度自动折行（320 窄栏与堆叠全宽同一套流动逻辑）；空值显示 — 不坍缩。 -->
+      {#if capsules.length}
+        <div class="meta-row">
+          {#each capsules as c (c.label + c.value)}
+            <span class="meta" class:accent={c.accent} class:mono={c.mono}>
+              {c.label} <b>{c.value}</b>
+            </span>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- 替换行沉底：图片路径输入框（文件夹图标）+ 浏览 + 替换。无组禁用浏览；输入不全禁用替换。 -->
+      <div class="replace-row">
+        <div class="input-wrap">
           <svg
-            width="14"
-            height="14"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
             stroke-width="2"
             stroke-linecap="round"
-            aria-hidden="true">{@html icons.search.body}</svg
+            stroke-linejoin="round"
+            aria-hidden="true">{@html icons.folder.body}</svg
           >
-          {t.viewer.searchBtn}
-        </button>
-      </div>
-      <!-- 姓名为头部视觉主体；极端窄宽下由省略号收口（title 悬停看全名），不再把右侧提示挤换行。 -->
-      <h2 title={rec?.name ?? undefined}>{rec?.name || "—"}</h2>
-      <!-- 文本提示安静靠右：说明回车快捷键与 r- 前缀可省略；默认单行，仅 ≤900px 窄窗折到下一行（见 app.css）。 -->
-      <span class="uid-tip">{t.viewer.uidTip}</span>
-    </div>
-
-    <!-- 三行胶囊：整体作为 player-info 直接子级，左缘与 UID 输入框对齐（不跟随姓名缩进）。
-         第一行固定五枚基础字段（国籍、第二国籍、发长、发色、种族）；第二行拓展字段（顺序对齐名单预览列序）；第三行当前映射。 -->
-    {#if baseCapsules.length}
-      <div class="capsule-rows">
-        <div class="meta-row">
-          {#each baseCapsules as c (c.label)}
-            <span class="meta">{c.label} <b>{c.value}</b></span>
-          {/each}
+          <input
+            type="text"
+            placeholder={t.viewer.imgPlaceholder}
+            bind:value={imgPathInput}
+            aria-label={t.viewer.imgPathAria}
+          />
         </div>
-        {#if extCapsules.length}
-          <div class="meta-row">
-            {#each extCapsules as c (c.label + c.value)}
-              <span class="meta" class:accent={c.accent}>
-                {c.label} <b>{c.value}</b>
-              </span>
-            {/each}
-          </div>
-        {/if}
-        {#if mappingCapsule}
-          <div class="meta-row">
-            <span class="meta mono">
-              {mappingCapsule.label} <b>{mappingCapsule.value}</b>
-            </span>
-          </div>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- 替换行沉底：图片路径输入框（文件夹图标）+ 浏览 + 替换。无组禁用浏览；输入不全禁用替换。 -->
-    <div class="replace-row">
-      <div class="input-wrap">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.folder.body}</svg
+        <!-- 批量替换进行中禁用这两个按钮：本卡与批量替换同栏常驻，替换跑着时用户可就地操作；
+             后端也已加同样的拒绝（见 replace_single_face），这里先挡一层免得用户撞错误框。 -->
+        <button
+          class="btn"
+          onclick={browseImage}
+          disabled={!snap?.currentGroup || busy}>{t.viewer.browseBtn}</button
         >
-        <input
-          type="text"
-          placeholder={t.viewer.imgPlaceholder}
-          bind:value={imgPathInput}
-          aria-label={t.viewer.imgPathAria}
-        />
+        <button
+          class="btn primary"
+          onclick={replaceIt}
+          disabled={!uid.trim() || !imgPathInput.trim() || busy}
+          >{t.viewer.replaceBtn}</button
+        >
+        <!-- 用此球员生成（P3）：把当前预览的球员设为生图数据源并切到 AI 生图；
+             已是该数据源时按钮文字/描边变化作为反馈。 -->
+        <button
+          class="btn gen-src-btn"
+          class:on={isSource}
+          onclick={useForGenerate}
+          disabled={!previewedUid || busy}
+          title={isSource ? t.gen.source.selected : t.gen.source.useForGen}
+          >{isSource ? t.gen.source.selected : t.gen.source.useForGen}</button
+        >
       </div>
-      <!-- 批量替换进行中禁用这两个按钮：本标签页是 keep-alive 常驻挂载的，切过去就能在替换跑着时
-           操作；后端也已加同样的拒绝（见 replace_single_face），这里先挡一层免得用户撞错误框。 -->
-      <button
-        class="btn"
-        onclick={browseImage}
-        disabled={!snap?.currentGroup || busy}>{t.viewer.browseBtn}</button
-      >
-      <button
-        class="btn primary"
-        onclick={replaceIt}
-        disabled={!uid.trim() || !imgPathInput.trim() || busy}
-        >{t.viewer.replaceBtn}</button
-      >
-      <!-- 用此球员生成（P3）：把当前预览的球员设为生图数据源并切到 AI 生图；
-           已是该数据源时按钮文字/描边变化作为反馈。 -->
-      <button
-        class="btn gen-src-btn"
-        class:on={isSource}
-        onclick={useForGenerate}
-        disabled={!previewedUid || busy}
-        title={isSource ? t.gen.source.selected : t.gen.source.useForGen}
-        >{isSource ? t.gen.source.selected : t.gen.source.useForGen}</button
-      >
     </div>
   </div>
 </div>

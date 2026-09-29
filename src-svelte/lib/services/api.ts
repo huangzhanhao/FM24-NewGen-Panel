@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, GenImage, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
   PageResult, PlayerPreview, PlayerQuery, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
-  QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery, UsageQuery, UsageRecord,
+  QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
@@ -86,7 +86,6 @@ export const api = {
   // P3 保存并替换：生成图复制到 <头像包>/_generated/ 并走单人换脸全链；批量替换进行中返回中文错误。
   saveAndReplace: (imageId: string, uid: string, saveBackup: boolean) =>
     invoke<GenImage>('save_and_replace', { imageId, uid, saveBackup }),
-  queryUsage: (query: UsageQuery) => invoke<PageResult<UsageRecord>>('query_usage', { query }),
   // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
   addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),
   removeFromQueue: (ids: string[]) => invoke<QueueEntry[]>('remove_from_queue', { ids }),

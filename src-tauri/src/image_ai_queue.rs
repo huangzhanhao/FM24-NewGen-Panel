@@ -1,6 +1,6 @@
 //! AI 文生图批量生成队列：条目状态机 + 并发调度执行器。
 //!
-//! 【与既有模块的复用关系】生成动作直接复用 `image_ai::generate`（写盘 + 台账 + 历史），
+//! 【与既有模块的复用关系】生成动作直接复用 `image_ai::generate`（写盘 + 会话历史），
 //! 本模块只负责「把一批请求按并发上限跑完」：条目在 Queued → Running → Success/Failed
 //! 之间流转，全程通过事件把进度推给前端（仿 replace 流水线的 emit 先例）。
 //!
@@ -157,7 +157,7 @@ pub trait GenExecutor: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, String>> + Send + 'a>>;
 }
 
-/// 真实执行器：直接调 `image_ai::generate`（写盘 + 台账 + 历史都在那一条链上）。
+/// 真实执行器：直接调 `image_ai::generate`（写盘 + 会话历史都在那一条链上）。
 pub struct RealExecutor;
 
 impl GenExecutor for RealExecutor {
@@ -363,8 +363,15 @@ mod tests {
                 seed: None,
                 steps: None,
                 uid: Some(uid.into()),
+                prompt_extend: None,
+                watermark: None,
                 base_url: String::new(),
                 supports_response_format: false,
+                supports_negative_prompt: false,
+                supports_prompt_extend: false,
+                supports_watermark: false,
+                supports_seed: false,
+                supports_n: true,
             },
             status: QueueStatus::Queued,
             images: vec![],
@@ -380,9 +387,6 @@ mod tests {
                 path: "p.png".into(),
                 bytes: 1,
             }],
-            record_id: "rec".into(),
-            estimated_cost: 0.0,
-            currency: "USD".into(),
         }
     }
 

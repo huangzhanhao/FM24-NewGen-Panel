@@ -113,15 +113,33 @@ export interface LogLine { ts: string; level: string; module: string; message: s
 
 export type ProviderKindCode = 'openai' | 'volcano' | 'dashscope' | 'custom';
 
+/** 自由尺寸规则（万相 2.5/2.6 等）；0/缺省 = 该条约束不检查。字段缺省兼容旧配置。 */
+export interface SizeRules {
+  minSide?: number;
+  maxSide?: number;
+  totalMin?: number;
+  totalMax?: number;
+  ratioMin?: number;
+  ratioMax?: number;
+}
+
 export interface Capabilities {
   sizes: string[]; maxN: number;
   supportsQuality: boolean; supportsSeed: boolean; supportsSteps: boolean;
   supportsNegativePrompt: boolean; supportsResponseFormat: boolean; qualities: string[];
+  /** 以下为 V2 新增字段：旧用户配置可能没有，消费侧一律按「缺省=false/0」处理。 */
+  supportsPromptExtend?: boolean;
+  supportsWatermark?: boolean;
+  maxPromptChars?: number;
+  sizeRules?: SizeRules | null;
+  /** 请求体是否携带 n（z-image 无此参数，固定出 1 张；缺省按 true 处理）。 */
+  supportsN?: boolean;
+  /** 智能改写开关的官方默认值：千问/万相=true，z-image=false（开启即思考模式、单价翻倍）。 */
+  promptExtendDefault?: boolean;
 }
 
 export interface ModelInfo {
-  model: string; label: string; currency: string;
-  prices: Record<string, number>; capabilities: Capabilities;
+  model: string; label: string; capabilities: Capabilities;
 }
 
 export interface ProviderConfig {
@@ -149,6 +167,10 @@ export interface GenRequest {
   steps?: number | null;
   /** P3 生效（uid 依赖名单数据源）；字段先落下，P1 恒不传。 */
   uid?: string | null;
+  /** 万相智能改写开关（null/缺省 = 按官方默认 true）。 */
+  promptExtend?: boolean | null;
+  /** 万相「AI生成」水印开关（null/缺省 = 按官方默认 false）。 */
+  watermark?: boolean | null;
   /** 内部字段（serde 缺省为空）：后端 generate 解析出服务商后回填 base_url，前端提交（单张/批量）
    *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。 */
   baseUrl?: string;
@@ -162,23 +184,16 @@ export interface RenderOutcome { text: string; missing: string[]; }
 export interface GenImage { id: string; path: string; bytes: number; }
 
 export interface GenResult {
-  images: GenImage[]; recordId: string; estimatedCost: number; currency: string;
+  images: GenImage[];
 }
 
-export interface GeneratedImage { id: string; path: string; url: string; }
-
-export interface RealUsage { inputTokens: number; outputTokens: number; }
-
-export interface UsageRecord {
-  id: string; ts: string; providerId: string; providerName: string; kind: string;
-  model: string; size: string; n: number; seed: number | null; quality: string | null;
-  prompt: string; negativePrompt: string; estimatedCost: number; currency: string;
-  status: 'success' | 'failed'; error: string; realUsage: RealUsage | null;
-}
-
-export interface UsageQuery {
-  offset: number; limit: number; providerId: string; model: string;
-  status: string; date: string;
+/** 会话内生成结果（视图模型）：id/path/url 来自后端，size/seed 是生成时快照，供结果卡展示。 */
+export interface GeneratedImage {
+  id: string;
+  path: string;
+  url: string;
+  size?: string;
+  seed?: string | null;
 }
 
 // ---------------- 批量生成队列（对应 image_ai_queue.rs，serde 均为 camelCase） ----------------

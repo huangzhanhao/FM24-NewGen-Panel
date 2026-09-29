@@ -3,7 +3,8 @@
 //! 【族内分工】
 //! - [`openai`]：OpenAI Images 协议（P1 协议纯函数迁入），custom（OpenAI 兼容服务）同协议；
 //! - [`volcano`]：火山方舟 Seedream，同步 Bearer，响应形态与 OpenAI 同构；
-//! - [`dashscope`]：百炼通义万相，异步任务（submit → poll → 立即下载结果 URL）。
+//! - [`dashscope`]：阿里云百炼（千问/万相/Z-Image 三系列），同步多模态消息式调用 +
+//!   代码内置模型目录（模型能力不读 image_ai.json）。
 //!
 //! 【对象安全】trait 用「返回 `Pin<Box<dyn Future>>`」形式而非 `async fn`，
 //! 故 [`for_kind`] 能返回 `Box<dyn ImageProvider>`。所有协议单测均为纯函数测试，不触网。
@@ -12,7 +13,7 @@ pub(crate) mod dashscope;
 pub(crate) mod openai;
 pub(crate) mod volcano;
 
-use crate::image_ai::{GenRequest, ProviderKind, RealUsage};
+use crate::image_ai::{GenRequest, ProviderKind};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -22,10 +23,9 @@ pub struct FetchedImage {
     pub extension: String,
 }
 
-/// 一次生成的适配器结果：图片字节序列 + 厂商真实用量（无则 None）。
+/// 一次生成的适配器结果：图片字节序列。
 pub struct ProviderOutcome {
     pub images: Vec<FetchedImage>,
-    pub real_usage: Option<RealUsage>,
 }
 
 /// 统一适配器：一次 async 调用内含 POST → 解析 →（b64 解码 / URL 立即下载）；

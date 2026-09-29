@@ -92,7 +92,7 @@ impl ImageProvider for VolcanoProvider {
                 };
                 images.push(FetchedImage { bytes, extension: "png".into() });
             }
-            Ok(ProviderOutcome { images, real_usage: None })
+            Ok(ProviderOutcome { images })
         })
     }
 }
@@ -114,7 +114,15 @@ mod tests {
             seed: None,
             steps: None,
             uid: None,
+            prompt_extend: None,
+            watermark: None,
             supports_response_format: true,
+            // 火山 Seedream 只支持 seed；负向/改写/水印字段不发送。
+            supports_negative_prompt: false,
+            supports_prompt_extend: false,
+            supports_watermark: false,
+            supports_seed: true,
+            supports_n: true,
         }
     }
 

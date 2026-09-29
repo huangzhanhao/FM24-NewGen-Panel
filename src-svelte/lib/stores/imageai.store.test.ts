@@ -12,12 +12,13 @@ vi.mock('../services/api', () => ({
     // P3 数据源：按 uid 拼一句可区分的渲染结果（个别用例会 mockResolvedValueOnce 覆盖）
     previewPrompt: vi.fn(async (uid: string) => ({ text: `${uid} 的渲染结果`, missing: [] })),
     // images 留空：generate 的 blob 加载循环不执行，无需替身 readImage
-    generateImage: vi.fn(async () => ({ images: [], recordId: 'rec1', estimatedCost: 0, currency: 'CNY' })),
+    generateImage: vi.fn(async () => ({ images: [] })),
     saveAndReplace: vi.fn(async () => ({ id: 'g1', path: '/tmp/x.png', bytes: 1 })),
     addToQueue: vi.fn(async (entries: QueueEntry[]) =>
       entries.map((e, i) => ({ ...e, id: `q${i + 1}` })),
     ),
     queryQueue: vi.fn(async () => []),
+    removeFromQueue: vi.fn(async () => []),
   },
 }));
 
@@ -39,9 +40,11 @@ import {
   saveAndReplace,
   selectProvider,
   setQueue,
+  queueRetry,
   setSourcePlayer,
   toggleSelect,
   toggleSelectPage,
+  validateSizeRules,
 } from './imageai.svelte';
 import type { ImageConfig, QueueEntry } from '../types';
 
@@ -51,7 +54,7 @@ const cfg: ImageConfig = {
       id: 'p1', kind: 'custom', name: 'P1', baseUrl: 'http://x/v1', defaultModel: 'm2',
       models: [
         {
-          model: 'm2', label: 'M2', currency: 'CNY', prices: {},
+          model: 'm2', label: 'M2',
           capabilities: {
             sizes: ['768x768'], maxN: 4, supportsQuality: false, supportsSeed: true,
             supportsSteps: false, supportsNegativePrompt: true, supportsResponseFormat: true,
@@ -267,5 +270,50 @@ describe('P3 数据源与保存并替换', () => {
   it('saveAndReplace without a source player throws', async () => {
     await expect(saveAndReplace('img1')).rejects.toThrow();
     expect(api.saveAndReplace).not.toHaveBeenCalled();
+  });
+});
+
+describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
+  const wan25Rules = {
+    totalMin: 1280 * 1280,
+    totalMax: 1440 * 1440,
+    ratioMin: 0.25,
+    ratioMax: 4,
+  };
+
+  it('validateSizeRules 接受官方约束内尺寸（x 与 * 两种分隔符）', () => {
+    expect(validateSizeRules('1280*1280', wan25Rules)).toBeNull();
+    expect(validateSizeRules('768x2700', wan25Rules)).toBeNull();
+  });
+
+  it('validateSizeRules 拒绝总像素/比例/格式违规', () => {
+    expect(validateSizeRules('1024*1024', wan25Rules)).not.toBeNull();
+    expect(validateSizeRules('768*3100', wan25Rules)).not.toBeNull();
+    expect(validateSizeRules('abc', wan25Rules)).not.toBeNull();
+  });
+
+  it('validateSizeRules 单边规则（wan2.2：512–1440）', () => {
+    expect(validateSizeRules('512*1440', { minSide: 512, maxSide: 1440 })).toBeNull();
+    expect(validateSizeRules('500*1024', { minSide: 512, maxSide: 1440 })).not.toBeNull();
+    expect(validateSizeRules('1024*1441', { minSide: 512, maxSide: 1440 })).not.toBeNull();
+  });
+
+  it('queueRetry 移除旧条目并用同参数重新排队', async () => {
+    const failed: QueueEntry = {
+      id: 'q9', uid: 'u1', name: '甲',
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'failed', images: [], error: 'boom',
+    };
+    await queueRetry(failed);
+    expect(api.removeFromQueue).toHaveBeenCalledWith(['q9']);
+    const sent = vi.mocked(api.addToQueue).mock.calls.at(-1)?.[0];
+    expect(sent).toHaveLength(1);
+    expect(sent?.[0].id).toBe('');
+    expect(sent?.[0].status).toBe('queued');
+    expect(sent?.[0].error).toBe('');
+    expect(sent?.[0].req).toEqual(failed.req);
   });
 });

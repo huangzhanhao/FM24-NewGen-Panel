@@ -7,6 +7,7 @@
   import { pinScrollEnd } from "../../ui/actions"; // 把长路径钉到最右的 action
   import { icons } from "../../ui/icons";
   import { appStore, applySnapshot, runTask } from "../../stores/app.svelte";
+  import { ui } from "../../stores/ui.svelte"; // 本卡已在存档资料台：扫描结果切的是**本台**的验证视图
   import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
 
@@ -91,7 +92,7 @@
     try {
       await runTask(t.setup.viewConfigBtn, () => api.readSnapshot(xmlPath));
       appStore.snapshotReadPath = xmlPath;
-      appStore.resultsView = "snapshot";
+      ui.verifyView = "snapshot"; // 就地看到刚读进来的快照，不出台
       appStore.snapshotVersion++;
     } catch (e) {
       await showError(e);
@@ -125,7 +126,7 @@
       appStore.lastRtfScan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
       appStore.rosterReady = true; // 名单缓存已填充：名单预览据此渲染工具条
       appStore.rosterVersion++;
-      appStore.resultsView = 'table'; // 扫描成功：结果区切到「名单预览」，让用户直接看到扫描结果
+      ui.verifyView = 'table'; // 扫描成功：存档资料台的验证视图切到「名单预览」，就地看到扫描结果
     } catch (e) {
       await showError(e);
     }

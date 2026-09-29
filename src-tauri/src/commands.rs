@@ -2113,14 +2113,6 @@ pub fn save_and_replace(
     })
 }
 
-#[tauri::command]
-pub fn query_usage(
-    state: State<'_, AppState>,
-    query: image_ai::UsageQuery,
-) -> Result<PageResult<image_ai::UsageRecord>, String> {
-    image_ai::query_usage(&image_ai::usage_path(&state.data_dir), &query)
-}
-
 // ---------------- 批量生成队列（image_ai_queue::run_queue 承担实际调度） ----------------
 
 /// 追加一批生成任务，返回追加后的全量快照（条目 id 由后端统一生成，前端以此为准）。

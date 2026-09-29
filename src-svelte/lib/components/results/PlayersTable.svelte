@@ -6,6 +6,7 @@
   import { showError } from "../../ui/dialog"; // 查询失败要弹窗（原来裸 await 的 rejection 会静默吞掉错误）
   import { message } from "@tauri-apps/plugin-dialog"; // 「加入队列」成功提示（与 ImageAiPanel 保存成功同款）
   import { appStore } from "../../stores/app.svelte";
+  import { ui } from "../../stores/ui.svelte"; // 「送生图」要切到 AI 生成头像工作台
   import {
     enqueuePlayers,
     imageaiStore,
@@ -13,12 +14,21 @@
     toggleSelect,
     toggleSelectPage,
   } from "../../stores/imageai.svelte"; // 勾选与批量入队（队列动作转发见 store）
-  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（三个标签页共用）
+  import { createAvatarSource } from "../../avatarBlobs.svelte"; // 头像路径查询+缩略图装载（与队列坞/球员源卡共用）
   import { t } from "../../text"; // 全局文案常量
   import { icons } from "../../ui/icons";
   import TablePager from "./TablePager.svelte"; // 分页器（与快照预览共用）
   import AvatarThumb from "../shared/AvatarThumb.svelte"; // 头像缩略图 + 放大气泡（与快照预览共用）
   import type { PageResult, PlayerRecord } from "../../types";
+
+  // ---- 列集模式（S11）：同一份组件两处职责分化 ----
+  // 存档资料台全宽（≈940）= 完整 18 列审阅名单；替换台右栏（≈670）传 dense = 精简列看结果
+  // （勾选/UID/姓名/头像/年龄/所在地/送生图）。列集必须用 prop 区分——同一个 1280 窗口里
+  // 两处容器宽度不同，视口断点区分不了（设计方案 §3.3 / R1）。
+  let { dense = false }: { dense?: boolean } = $props();
+  // 精简模式下可勾选展开次要列（国籍/发色/肤色/随机人/性别/身高/俱乐部/能力等）
+  let showSecondary = $state(false);
+  const showAll = $derived(!dense || showSecondary);
 
   const PAGE_SIZE = 8; // 每页条数（单页最多 8 行）
   let page = $state(0); // 当前页码（从 0 开始）
@@ -71,7 +81,9 @@
       await showError(e);
       return;
     }
-    void loadAvatars(); // 本页头像另走一次批量查询（路径出处是后端快照/映射缓存）
+    // 本页头像另走一次批量查询（路径出处是后端快照/映射缓存）；空页或基础名单只清场不查询。
+    if (result?.items.some((r) => r.detailed)) void avatars.load(result.items.map((r) => r.uid));
+    else avatars.clear();
   }
   // 名单版本变化（「扫描RTF」成功 / 替换结束）：回到第 1 页并清空搜索、排序、随机人筛选。
   // 与 SnapshotPreview 同款口径——新名单从头看，旧页码/旧筛选不残留；下方加载 effect
@@ -84,10 +96,8 @@
     sortKey = "uid";
     sortDesc = false;
     newganFilter = "any";
-    blobs.clear(); // 旧名单的缩略图一并回收（新名单的图在 load() 后重取）
-    avatarPaths = {};
+    avatars.clear(); // 旧名单的头像路径与缩略图一并作废回收（新名单的图在 load() 后重取）
     queryToken++; // 使仍在途的旧名单分页响应作废（换名单后它不该再把上一页塞回表体）
-    avatarToken++; // 使仍在途的旧名单路径响应作废（不能只靠 clear，它在途完成还会回写）
   });
 
   // 参数变化自动刷新：显式读取依赖以建立追踪，请求做 300ms 防抖。
@@ -177,11 +187,14 @@
   }
 
   // ---------------- 行尾「送生图」（P3 数据源入口） ----------------
-  /** 把该行球员设为生图数据源并切到 AI 生图 Tab。切 Tab 走 appStore.resultsView
-   *  （结果区 Tab 的全局态，「读取快照」后跨组件切换用的同一机制，最小侵入）。 */
+  /** 把该行球员设为生图数据源，并切到「AI 生成头像」工作台。
+   *  【为什么是切工作台而不是切结果区 Tab】原实现写 appStore.resultsView='generate'，
+   *  结果区整个被换成 AI 面板——用户勾了半天的搜索/页码/排序随组件卸载一起没了，
+   *  而 Tab 还在同一个容器里，回不去。切工作台是顺着用户意图走：点了「送生图」就是要去生图，
+   *  且顶栏三点之间可自由跳回，不会再被"半路劫持"。 */
   function sendToGenerate(r: PlayerRecord) {
     setSourcePlayer(r.uid, r.name);
-    appStore.resultsView = "generate";
+    ui.workbench = "ai";
   }
 
   // 第 15 列语义：按后端结构化协议码区分球员（所在地）/职员（偏好工作），不依赖中文展示文案。
@@ -195,52 +208,13 @@
   const basedValue = (r: PlayerRecord) =>
     (isStaffRoster ? r.detailed?.preferredJob : r.detailed?.based) ?? "";
 
-  // ---------------- 头像列：按球员 UID 从后端快照/映射缓存取头像图 ----------------
-  // 【为什么按 UID 查】RTF 名单的「头像」列原文导出时恒为空（见 rtf_scanner 的 EXT_AVATAR_COL），
-  // 头像只能按球员 UID 反查映射；解析（映射缓存 → 存档快照 → 快照文件）由命令层 query_avatars
-  // 完成，出处与单人预览同源。
-  // 【分工】本组件只负责「查这一页的路径」；读字节/建 blob/回收交共用的 createAvatarBlobs，
-  // 缩略图与放大气泡交共用的 AvatarThumb（两处能力都与快照预览同一份实现）。
-  let avatarPaths = $state<Record<string, string | null>>({}); // uid → 头像图片绝对路径（null = 无头像）
-  let avatarToken = 0; // 路径查询令牌：翻页/换名单后使在途的旧响应作废
-  const blobs = createAvatarBlobs(); // 本页缩略图的 blob 账（翻页换代、卸载回收都在其内部）
-
-  let avatarError = $state(""); // 批量取路径失败的原因（挂在「头像」列头提示，见 loadAvatars）
-  /** 取当前页头像：批量问后端要路径，再交给 blob 加载器读成可显示的缩略图。 */
-  async function loadAvatars() {
-    const token = ++avatarToken;
-    const items = result?.items ?? [];
-    // 空页或基础名单（非拓展格式，表格不渲染头像列）：只回收上一批，不必往返。
-    if (items.length === 0 || !items.some((r) => r.detailed)) {
-      avatarPaths = {};
-      avatarError = "";
-      blobs.clear();
-      return;
-    }
-    let paths: Record<string, string | null>;
-    try {
-      paths = await api.queryAvatars(items.map((r) => r.uid));
-    } catch (e) {
-      // 头像列是辅助展示：取数失败就留白（也不弹窗抢焦点），但不留上一批的旧图。
-      // 【批级失败必须留痕】单张图取不到本来就静默，所以「命令挂了/载荷形状变了/没选头像包」
-      // 与「这份名单真的没脸」绝不能长成同一个样子——否则整列空了，用户没有任何线索可查。
-      // 逐图静默保留，只在列头上挂一句原因。
-      avatarPaths = {};
-      avatarError = String(e);
-      blobs.clear();
-      return;
-    }
-    if (token !== avatarToken) return; // 期间已翻页/换名单：过期结果直接丢弃，不建 URL
-    avatarError = "";
-    avatarPaths = paths;
-    // 只有确实找到图的条目才交给加载器；无映射/图片不在包内的留在占位。
-    const wanted: Record<string, string> = {};
-    for (const it of items) {
-      const p = paths[it.uid];
-      if (p) wanted[it.uid] = p;
-    }
-    void blobs.load(wanted);
-  }
+  // ---------------- 头像列：按球员 UID 批量取路径 + 装载缩略图（共用 AvatarSource） ----------------
+  // 查路径/令牌作废/blob 装载的骨架在 createAvatarSource 单点维护，本组件只剩两条本地策略：
+  // 空页或基础名单（非拓展格式，表格不渲染头像列）不查询、只清场；
+  // 批级失败的原因（avatars.error）挂在「头像」列头 title 上——单张图取不到本来就静默，
+  // 「命令挂了/载荷形状变了/没选头像包」与「这份名单真的没脸」绝不能长成同一个样子，
+  // 否则整列空了，用户没有任何线索可查。
+  const avatars = createAvatarSource();
 </script>
 
 {#snippet sortIcon(key: string)}
@@ -306,6 +280,13 @@
           </select>
         </label>
       {/if}
+      <!-- 精简列集（dense）下的次要列开关：勾上展开完整列，取消收回精简列 -->
+      {#if dense}
+        <label class="switch">
+          <input type="checkbox" bind:checked={showSecondary} />
+          <span class="track"></span>{t.table.secondaryCols}
+        </label>
+      {/if}
       {#if result}<span class="muted small record-count"
           >{t.table.recordCount(result.total)}</span
         >{/if}
@@ -334,28 +315,37 @@
       <table class="grid">
         <!-- 列宽：长文本列（姓名/俱乐部/所在地）给宽余量吃剩余空间；码值/数值列收窄并居中。
              首列是勾选框（P2 Task5）：不可排序、不参与筛选，宽度固定；
-             末列是「送生图」（P3 数据源入口）：基础/拓展名单都有，固定窄列。 -->
+             末列是「送生图」（P3 数据源入口）：基础/拓展名单都有，固定窄列。
+             列槽位与下方 thead/tbody 的 {#if} 条件一一对应（dense 精简模式收起次要列，R2）。 -->
         <colgroup>
           <col class="w-sel" />
           <col class="w-uid" />
-          <col class="w-nat" />
-          <col class="w-nat2" />
+          {#if showAll}
+            <col class="w-nat" />
+            <col class="w-nat2" />
+          {/if}
           <col class="w-name" />
-          <col class="w-code" />
-          <col class="w-code" />
-          <col class="w-code" />
+          {#if showAll}
+            <col class="w-code" />
+            <col class="w-code" />
+            <col class="w-code" />
+          {/if}
           {#if hasDetailed}
-            <col class="w-code" />
-            <col class="w-avatar" />
-            <col class="w-tag" />
-            {#if hasGender}<col class="w-code" />{/if}
-            <col class="w-code" />
-            <col class="w-height" />
-            <col class="w-club" />
-            <col class="w-based" />
-            <col class="w-code" />
-            <col class="w-code" />
-            <col class="w-rca" />
+            {#if showAll}<col class="w-code" />{/if}
+            {#if showAll || dense}<col class="w-avatar" />{/if}
+            {#if showAll}<col class="w-tag" />{/if}
+            {#if showAll && hasGender}<col class="w-code" />{/if}
+            {#if showAll || dense}<col class="w-code" />{/if}
+            {#if showAll}
+              <col class="w-height" />
+              <col class="w-club" />
+            {/if}
+            {#if showAll || dense}<col class="w-based" />{/if}
+            {#if showAll}
+              <col class="w-code" />
+              <col class="w-code" />
+              <col class="w-rca" />
+            {/if}
           {/if}
           <col class="w-gen" />
         </colgroup>
@@ -384,15 +374,17 @@
               title={t.table.colUid}
               >{t.table.colUid}{@render sortIcon("uid")}</th
             >
-            <th
-              role="button"
-              tabindex="0"
-              onclick={() => sortBy("primaryNat")}
-              onkeydown={(e) => onSortKey(e, "primaryNat")}
-              title={t.table.colNat}
-              >{t.table.colNat}{@render sortIcon("primaryNat")}</th
-            >
-            <th class="static">{t.table.col2ndNat}</th>
+            {#if showAll}
+              <th
+                role="button"
+                tabindex="0"
+                onclick={() => sortBy("primaryNat")}
+                onkeydown={(e) => onSortKey(e, "primaryNat")}
+                title={t.table.colNat}
+                >{t.table.colNat}{@render sortIcon("primaryNat")}</th
+              >
+              <th class="static">{t.table.col2ndNat}</th>
+            {/if}
             <th
               role="button"
               tabindex="0"
@@ -401,40 +393,55 @@
               title={t.table.colName}
               >{t.table.colName}{@render sortIcon("name")}</th
             >
-            <th class="static c">{t.table.colHair}</th>
-            <th class="static c">{t.table.colColor}</th>
-            <th
-              role="button"
-              tabindex="0"
-              class="c"
-              onclick={() => sortBy("ethnicityCode")}
-              onkeydown={(e) => onSortKey(e, "ethnicityCode")}
-              title={t.table.colEth}
-              >{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
-            >
-            <!-- 仅拓展名单渲染第 8 列起；顺序：肤色/头像/随机人/性别/年龄/身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A。 -->
-            {#if hasDetailed}
-              <th class="static c">{t.table.colSkin}</th>
+            {#if showAll}
+              <th class="static c">{t.table.colHair}</th>
+              <th class="static c">{t.table.colColor}</th>
               <th
-                class="static c"
-                title={avatarError
-                  ? t.table.avatarFailHint(avatarError)
-                  : undefined}
+                role="button"
+                tabindex="0"
+                class="c"
+                onclick={() => sortBy("ethnicityCode")}
+                onkeydown={(e) => onSortKey(e, "ethnicityCode")}
+                title={t.table.colEth}
+                >{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
               >
-                {t.table.colAvatar}{#if avatarError}<span
-                    class="avatar-warn"
-                    aria-hidden="true">!</span
-                  >{/if}
-              </th>
-              <th class="static c">{t.table.colNewgan}</th>
-              {#if hasGender}<th class="static c">{t.table.colGender}</th>{/if}
-              <th class="static c">{t.table.colAge}</th>
-              <th class="static c">{t.table.colHeight}</th>
-              <th class="static">{t.table.colClub}</th>
-              <th class="static">{basedHeader}</th>
-              <th class="static c">{t.table.colCa}</th>
-              <th class="static c">{t.table.colPa}</th>
-              <th class="static c">{t.table.colRca}</th>
+            {/if}
+            <!-- 详细列（拓展名单）：顺序 肤色/头像/随机人/性别/年龄/身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A。
+                 dense 精简模式只留 头像/年龄/所在地 三列（次要列开关展开后恢复全部）。 -->
+            {#if hasDetailed}
+              {#if showAll}<th class="static c">{t.table.colSkin}</th>{/if}
+              {#if showAll || dense}
+                <th
+                  class="static c"
+                  title={avatars.error
+                    ? t.table.avatarFailHint(avatars.error)
+                    : undefined}
+                >
+                  {t.table.colAvatar}{#if avatars.error}<span
+                      class="avatar-warn"
+                      aria-hidden="true">!</span
+                    >{/if}
+                </th>
+              {/if}
+              {#if showAll}<th class="static c">{t.table.colNewgan}</th>{/if}
+              {#if showAll && hasGender}
+                <th class="static c">{t.table.colGender}</th>
+              {/if}
+              {#if showAll || dense}
+                <th class="static c">{t.table.colAge}</th>
+              {/if}
+              {#if showAll}
+                <th class="static c">{t.table.colHeight}</th>
+                <th class="static">{t.table.colClub}</th>
+              {/if}
+              {#if showAll || dense}
+                <th class="static">{basedHeader}</th>
+              {/if}
+              {#if showAll}
+                <th class="static c">{t.table.colCa}</th>
+                <th class="static c">{t.table.colPa}</th>
+                <th class="static c">{t.table.colRca}</th>
+              {/if}
             {/if}
             <!-- 末列「送生图」操作列：基础/拓展名单都有，表头留白（按钮自带读屏文案） -->
             <th class="static c" title={t.gen.source.sendBtn}></th>
@@ -453,39 +460,53 @@
                 />
               </td>
               <td class="mono">{r.uid}</td>
-              <td>{r.primaryNat}</td>
-              <td>{r.secNat}</td>
+              {#if showAll}
+                <td>{r.primaryNat}</td>
+                <td>{r.secNat}</td>
+              {/if}
               <td>{r.name}</td>
-              <td class="c">{r.hairLength}</td>
-              <td class="c">{r.hairColor}</td>
-              <td class="c">{r.ethnicityCode}</td>
+              {#if showAll}
+                <td class="c">{r.hairLength}</td>
+                <td class="c">{r.hairColor}</td>
+                <td class="c">{r.ethnicityCode}</td>
+              {/if}
               <!-- 详细列：空值显示 —。头像列按 UID 从后端快照/映射缓存取图：有图显示缩略图
                    （本身即触发器），无映射或图片不在包内则显示 —。 -->
               {#if hasDetailed}
                 {@const d = r.detailed}
-                <td class="c">{d?.skinCode || "—"}</td>
-                <td class="c imgcell">
-                  <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里，这里只交路径与图片 URL。 -->
-                  <AvatarThumb
-                    itemKey={r.uid}
-                    url={blobs.urls[r.uid]}
-                    path={avatarPaths[r.uid] ?? undefined}
-                    groupKey={appStore.snapshot?.currentGroup}
-                  />
-                </td>
-                <td class="c">
-                  {#if d?.isNewgan}
-                    <span class={newganCls(d.isNewgan)}>{d.isNewgan}</span>
-                  {:else}—{/if}
-                </td>
-                {#if hasGender}<td class="c">{d?.gender || "—"}</td>{/if}
-                <td class="c">{d?.age || "—"}</td>
-                <td class="c">{d?.height || "—"}</td>
-                <td title={d?.club ?? ""}>{d?.club || "—"}</td>
-                <td title={basedValue(r)}>{basedValue(r) || "—"}</td>
-                <td class="c">{d?.ca || "—"}</td>
-                <td class="c">{d?.pa || "—"}</td>
-                <td class="c">{d?.rca || "—"}</td>
+                {#if showAll}<td class="c">{d?.skinCode || "—"}</td>{/if}
+                {#if showAll || dense}
+                  <td class="c imgcell">
+                    <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里，这里只交路径与图片 URL。 -->
+                    <AvatarThumb
+                      itemKey={r.uid}
+                      url={avatars.urls[r.uid]}
+                      path={avatars.paths[r.uid] ?? undefined}
+                      groupKey={appStore.snapshot?.currentGroup}
+                    />
+                  </td>
+                {/if}
+                {#if showAll}
+                  <td class="c">
+                    {#if d?.isNewgan}
+                      <span class={newganCls(d.isNewgan)}>{d.isNewgan}</span>
+                    {:else}—{/if}
+                  </td>
+                {/if}
+                {#if showAll && hasGender}<td class="c">{d?.gender || "—"}</td>{/if}
+                {#if showAll || dense}<td class="c">{d?.age || "—"}</td>{/if}
+                {#if showAll}
+                  <td class="c">{d?.height || "—"}</td>
+                  <td title={d?.club ?? ""}>{d?.club || "—"}</td>
+                {/if}
+                {#if showAll || dense}
+                  <td title={basedValue(r)}>{basedValue(r) || "—"}</td>
+                {/if}
+                {#if showAll}
+                  <td class="c">{d?.ca || "—"}</td>
+                  <td class="c">{d?.pa || "—"}</td>
+                  <td class="c">{d?.rca || "—"}</td>
+                {/if}
               {/if}
               <!-- 行尾「送生图」（P3）：设为数据源并切到 AI 生图；已是数据源的球员按钮变「已选」描边高亮 -->
               <td class="c">

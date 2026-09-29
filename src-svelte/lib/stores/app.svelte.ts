@@ -33,21 +33,22 @@ export const appStore = $state({
   /** 是否有轻量任务在跑：由 runTask 包住命令调用置位。状态栏据此优先显示 task 进度。 */
   taskRunning: false,
   lastResult: '' as ReplaceResult, // 最近一次替换结果
-  /** 「保存备份」开关：批量替换与单人微调共用（两处写 config.xml 前是否先备份）。
+  /** 「保存备份」开关：批量替换与单人替换共用（两处写 config.xml 前是否先备份）。
    *  只在本会话内存活（mode 等其余替换选项也都是组件内会话态），不做持久化。 */
   saveBackup: true,
   rosterVersion: 0,                     // 名单预览版本号：名单缓存被填充/清空时 +1（「扫描RTF」成功、替换结束），触发 PlayersTable 重载
   /** 最近一次解析名单的摘要（null=手上没有名单）。两条来源：「扫描RTF」成功、替换成功
-   *  （摘要随 replace:finished 回传，无需用户再点一次扫描）。名单预览/单人微调据此判断名单格式
+   *  （摘要随 replace:finished 回传，无需用户再点一次扫描）。名单预览/单人替换据此判断名单格式
    *  ——拓展格式才有「随机人」筛选，且 formatCode 为 extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
   /** 名单缓存可读标记：后端名单缓存里有没有数据。对应快照预览的 snapshotReadPath。
    *  两处会填充后端缓存：「扫描RTF」成功 → true；替换结束 → 成功为 true、失败/取消为 false
    *  （后端失败/取消时会把缓存写回空表）。名单预览据此决定是否渲染工具条。 */
   rosterReady: false,
-  /** 结果区当前 Tab：'table'=名单预览 / 'viewer'=单人微调 / 'snapshot'=快照预览。
-   *  放全局态：「读取快照」成功后要跨组件（当前任务卡 → 结果区）切换到快照预览。 */
-  resultsView: 'table' as 'table' | 'viewer' | 'snapshot' | 'generate',
+  /** 替换台读视图当前 Tab：'table'=名单预览 / 'snapshot'=快照预览。
+   *  放全局态：「读取快照」成功后要跨组件（当前任务卡 → 结果区）切换到快照预览。
+   *  原来的 'viewer'（单人替换）已常驻替换台左栏、'generate'（AI 生图）已独立成第三个工作台。 */
+  resultsView: 'table' as 'table' | 'snapshot',
   /** 最近一次「读取快照」的快照文件路径（null=尚未读取过）。
    *  快照预览只认这份：当前展示的快照路径与它一致才拉数据，切档/切组后自动回到引导空态。
    *  两处会置它：「读取快照」成功；替换成功（后端把新 config.xml 同步到该档快照位置并刷新缓存）。 */
@@ -96,10 +97,19 @@ export async function applySnapshot(s: AppSnapshot) {
     (prev.currentProfile !== s.currentProfile ||
       prev.currentGroup !== s.currentGroup ||
       prev.currentRtf !== s.currentRtf);
-  if (scopeChanged) {
+  if (scopeChanged && prev) {
     appStore.rosterReady = false; // 后端名单缓存已作废 → 名单预览回到引导空态
     appStore.lastRtfScan = null; // 摘要同上（它是「这份名单解析出来的」，名单换了就作废）
     appStore.rosterVersion++; // 触发名单预览重载：按清空后的空态重画
+    // 快照读态跟着「档/组」走、不跟 RTF 走：快照文件是档+组的 config.xml 副本，换 RTF 不作废它
+    // （此时清零会白白把芯片打回琥珀、逼用户重读一次）。但换档/组后旧路径必然不属于当前作用域，
+    // 只判非空会让芯片跨组记忆「读过」——A 组读过 → 切到没读过的 B 组仍显示绿（虚绿），故清零。
+    if (
+      prev.currentProfile !== s.currentProfile ||
+      prev.currentGroup !== s.currentGroup
+    ) {
+      appStore.snapshotReadPath = null;
+    }
   }
   appStore.snapshot = s;
 }

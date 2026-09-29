@@ -11,7 +11,7 @@
     queueCancel,
   } from "../../stores/imageai.svelte"; // 队列运行中的作用域切换护栏（S10）
   import { ui, toggleTheme } from "../../stores/ui.svelte";
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
   // Vite 静态资源导入：打包后得到带哈希的图片 URL（app-icon.png 在项目根）。
   import brandLogo from "../../../../app-icon.png";
 
@@ -207,19 +207,7 @@
           onclick={toggleTheme}
           title={t.theme.switchTo(ui.theme === "dark" ? "light" : "dark")}
         >
-          <svg
-            viewBox="0 0 22 22"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-            width="11"
-            height="11"
-          >
-            {@html (ui.theme === "dark" ? icons.moon : icons.sun).body}
-          </svg>
+          <Icon name={ui.theme === "dark" ? "moon" : "sun"} />
           <span>{ui.theme === "dark" ? t.theme.dark : t.theme.light}</span>
         </button>
       </div>
@@ -236,15 +224,7 @@
         title={t.sidebar.newProfileBtn}
         onclick={() => (creating = !creating)}
       >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.plus.body}</svg
-        >
+        <Icon name="plus" />
       </button>
     </div>
     <!-- 新建行：仅当 creating 为真时显示（输入框 + 创建按钮）。 -->
@@ -325,15 +305,7 @@
         onclick={linkFacepack}
         disabled={busy || !hasProfile}
       >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.plus.body}</svg
-        >
+        <Icon name="plus" />
       </button>
     </div>
     <!-- 有组时渲染列表；否则显示空状态提示。 -->
@@ -363,15 +335,7 @@
               onclick={() => deleteGroup(g.imgDir)}
               disabled={busy || browseMode}
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true">{@html icons.x.body}</svg
-              >
+              <Icon name="x" />
             </button>
           </li>
         {/each}

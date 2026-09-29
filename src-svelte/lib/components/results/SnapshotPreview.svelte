@@ -10,16 +10,12 @@
   import { createAvatarBlobs } from '../../avatarBlobs.svelte'; // 头像 blob 加载器（三个标签页共用）
   import { t } from '../../text'; // 全局文案常量
   import { showError } from '../../ui/dialog';
-  import { icons } from '../../ui/icons';
+  import { createPagedResource } from '../../ui/pagedResource.svelte'; // 分页骨架（D1 收敛）
+  import Icon from '../../ui/Icon.svelte';
   import TablePager from './TablePager.svelte'; // 分页器（与名单预览共用）
   import AvatarThumb from '../shared/AvatarThumb.svelte'; // 头像缩略图 + 放大气泡（与名单预览共用）
-  import type { PageResult, SnapshotEntry } from '../../types';
+  import type { SnapshotEntry } from '../../types';
 
-  const PAGE_SIZE = 8;        // 每页条数（头像图同页加载：一次最多 8 张）
-  let page = $state(0);       // 当前页码（从 0 开始）
-  let search = $state('');    // UID 筛选词
-  let result = $state<PageResult<SnapshotEntry> | null>(null); // 当前页结果
-  let searchTimer: ReturnType<typeof setTimeout> | undefined; // 防抖定时器句柄
   const blobs = createAvatarBlobs(); // 本页头像图的 blob 账（翻页换代、卸载回收都在其内部）
 
   const snap = $derived(appStore.displaySnapshot); // 展示层：浏览态优先（统一取自 store getter）
@@ -27,58 +23,39 @@
   const imgDir = $derived(snap?.currentGroup ?? '');     // 头像相对路径的根（当前展示组的头像包）
   // 可读态：当前展示的快照正是最近一次「读取快照」的那份。切档/切组后路径不一致，回到引导空态。
   const readable = $derived(!!xmlPath && xmlPath === appStore.snapshotReadPath);
-  const totalPages = $derived(result ? Math.max(1, Math.ceil(result.total / PAGE_SIZE)) : 1);
 
-  let queryToken = 0; // 分页查询令牌：切档/翻页的在途响应不得写回当前展示的结果
-  // 快照路径变化或重新「读取快照」：回到第 1 页、清空筛选并释放图片（新数据从头看）。
-  // 只读这两个依赖，刻意不读 readable——读取成功瞬间不能把刚要展示的数据清掉。
-  $effect(() => {
-    void xmlPath; void appStore.snapshotVersion;
-    queryToken++; // 上一个快照的分页查询若在途，回来时直接作废
-    result = null;
-    page = 0;
-    search = '';
-    blobs.clear();
+  // 分页骨架（D1 收敛）：页码/搜索/令牌/防抖/换代在 createPagedResource 单点维护；
+  // 本组件只剩快照特有语义：readable 门控、快照路径过期（wantPath）与头像装载。
+  const paged = createPagedResource<SnapshotEntry>({
+    fetch: async ({ offset, limit, search }) => {
+      const wantPath = xmlPath; // 发出请求时的快照路径：返回时展示档可能已经换了
+      const got = await api.querySnapshot(xmlPath, imgDir, { offset, limit, search });
+      // 【为什么要再判 wantPath】切档连点时两个 querySnapshot 会乱序返回：晚到的旧档结果
+      // 会盖在新档的表格上，而头像又按这份结果去读——展示的会是别档的映射。
+      return wantPath === xmlPath ? got : null; // 展示档已换：作废不写（令牌防乱序由骨架兜底）
+    },
+    deps: () => {
+      void readable; // 「读取快照」成功 → readable 翻 true，据此发起首次拉取
+      void xmlPath;
+      void imgDir;
+      void appStore.snapshotVersion; // 替换收尾同步快照缓存 → 重取当前页（头像路径可能已变）
+    },
+    resetKey: () => `${xmlPath}|${appStore.snapshotVersion}`, // 换路径/重读快照都算换代
+    shouldLoad: () => readable, // 未读取时只留引导空态，不查询
+    onReset: () => blobs.clear(), // 换快照：旧头像图一并作废回收
+    onLoaded: (r) => {
+      // 把本页条目的头像路径交给共用的 blob 加载器（先回收上一页，再并发读图、就绪一张出现一张）。
+      const wanted: Record<string, string> = {};
+      for (const it of r.items) {
+        if (it.imagePath) wanted[it.uid] = it.imagePath; // 包内找不到图片的条目不发请求，留无图占位
+      }
+      void blobs.load(wanted);
+    },
+    onError: (e) => {
+      showError(e);
+      return { total: 0, items: [] }; // 错误态显示空结果（与原行为一致：落到无匹配提示）
+    },
   });
-
-  // 页码/筛选/读取状态任一变化后拉取当前页（筛选做 300ms 防抖，避免边输入边请求）。
-  $effect(() => {
-    void page; void search; void readable; void xmlPath; void imgDir; void appStore.snapshotVersion;
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(load, 300);
-    return () => clearTimeout(searchTimer);
-  });
-
-  /** 拉当前页数据（UID 筛选 + 分页），随后只为本页条目加载头像图。 */
-  async function load() {
-    if (!readable) return;
-    const token = ++queryToken;
-    const wantPath = xmlPath; // 发出请求时的快照路径：返回时展示档可能已经换了
-    try {
-      const got = await api.querySnapshot(xmlPath, imgDir, {
-        offset: page * PAGE_SIZE, limit: PAGE_SIZE, search,
-      });
-      // 【为什么要令牌】切档连点时两个 querySnapshot 会乱序返回：晚到的旧档结果会盖在
-      // 新档的表格上，而头像又按这份结果去读——展示的会是别档的映射。
-      if (token !== queryToken || wantPath !== xmlPath) return;
-      result = got;
-    } catch (e) {
-      if (token !== queryToken || wantPath !== xmlPath) return;
-      await showError(e);
-      result = { total: 0, items: [] };
-      return;
-    }
-    loadImages();
-  }
-
-  /** 把本页条目的头像路径交给共用的 blob 加载器（先回收上一页，再并发读图、就绪一张出现一张）。 */
-  function loadImages() {
-    const wanted: Record<string, string> = {};
-    for (const it of result?.items ?? []) {
-      if (it.imagePath) wanted[it.uid] = it.imagePath; // 包内找不到图片的条目不发请求，留无图占位
-    }
-    void blobs.load(wanted);
-  }
 </script>
 
 <!-- 与名单预览同款布局：工具条 + 滚动表格；未读取时只显示引导空态。 -->
@@ -86,25 +63,23 @@
   {#if readable}
     <div class="table-toolbar">
       <div class="search">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" aria-hidden="true">{@html icons.search.body}</svg>
-        <input type="search" placeholder={t.snapshot.searchPlaceholder} bind:value={search}
-               oninput={() => (page = 0)} aria-label={t.snapshot.searchPlaceholder} />
+        <Icon name="search" />
+        <input type="search" placeholder={t.snapshot.searchPlaceholder} bind:value={paged.search}
+               oninput={() => (paged.page = 0)} aria-label={t.snapshot.searchPlaceholder} />
       </div>
-      {#if result}<span class="muted small record-count">{t.snapshot.recordCount(result.total)}</span>{/if}
+      {#if paged.result}<span class="muted small record-count">{t.snapshot.recordCount(paged.result.total)}</span>{/if}
       <span class="spacer"></span>
       <!-- 分页器（含快速跳页）与名单预览共用同一组件，样式/行为单点维护。 -->
-      <TablePager bind:page={page} {totalPages} />
+      <TablePager bind:page={paged.page} totalPages={paged.totalPages} />
     </div>
   {/if}
 
   {#if !readable}
     <div class="empty">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html icons.file.body}</svg>
+      <Icon name="file" stroke={1.8} />
       <p>{t.snapshot.readHint}</p>
     </div>
-  {:else if result && result.items.length > 0}
+  {:else if paged.result && paged.result.items.length > 0}
     <div class="table-scroll">
       <table class="grid">
         <thead>
@@ -116,7 +91,7 @@
         </thead>
         <tbody>
           <!-- 以行索引为键：快照里理论上可能出现重复 UID，UID 作键会撞键。 -->
-          {#each result.items as { uid, relPath, imagePath }, i (i)}
+          {#each paged.result.items as { uid, relPath, imagePath }, i (i)}
             <tr>
               <td class="mono">{uid}</td>
               <td class="mono path" title={relPath}>{relPath}</td>
@@ -135,13 +110,10 @@
         </tbody>
       </table>
     </div>
-  {:else if result}
+  {:else if paged.result}
     <div class="empty">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" aria-hidden="true">
-        {@html (search ? icons.search : icons.file).body}
-      </svg>
-      <p>{search ? t.snapshot.noMatchHint : t.snapshot.emptyHint}</p>
+      <Icon name={paged.search ? "search" : "file"} stroke={1.8} />
+      <p>{paged.search ? t.snapshot.noMatchHint : t.snapshot.emptyHint}</p>
     </div>
   {/if}
 </div>

@@ -6,9 +6,8 @@
   import TopNav from "./lib/components/layout/TopNav.svelte";
   import SetupCard from "./lib/components/setup/SetupCard.svelte";
   import ReplacePanel from "./lib/components/replace/ReplacePanel.svelte";
-  import ResultsSection from "./lib/components/results/ResultsSection.svelte";
   import PlayerViewer from "./lib/components/replace/PlayerViewer.svelte";
-  import VerifyViews from "./lib/components/results/VerifyViews.svelte";
+  import RosterSnapshotTabs from "./lib/components/results/RosterSnapshotTabs.svelte";
   import ImageAiPanel from "./lib/components/imageai/ImageAiPanel.svelte";
   import StatusBar from "./lib/components/layout/StatusBar.svelte";
   import LogDrawer from "./lib/components/layout/LogDrawer.svelte";
@@ -58,7 +57,7 @@
     {#if ui.workbench === "archive"}
       <SetupCard />
       <!-- 验证视图：扫描 RTF / 读取快照后就地看结果，不必跳去别的工作台 -->
-      <VerifyViews />
+      <RosterSnapshotTabs bind:view={ui.verifyView} />
     {:else if ui.workbench === "replace"}
       {#if appStore.browseMode}
         <p class="hint muted small">
@@ -78,7 +77,7 @@
           <!-- 单人替换卡自带外壳（.viewer-card 同时是窄栏容器查询锚点），与 ReplacePanel 同栏常驻。 -->
           <PlayerViewer />
         </div>
-        <ResultsSection />
+        <RosterSnapshotTabs bind:view={appStore.resultsView} dense />
       </div>
     {:else}
       <ImageAiPanel />

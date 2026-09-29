@@ -334,6 +334,7 @@ pub fn run() {
             commands::start_replace,   // 启动批量替换（后台线程）
             commands::cancel_replace,  // 请求取消正在进行的替换
             commands::query_players,   // 分页查询名单（预览）
+            commands::query_players_by_uids, // 按 uid 批量取球员记录（队列坞条目行身份信息）
             commands::read_snapshot,   // 读取快照：解析存档 XML 快照并缓存（快照预览数据源）
             commands::query_snapshot,  // 快照预览分页查询（UID 筛选 + 按页解析图片路径）
             commands::preview_player,  // 预览单个球员的映射与头像

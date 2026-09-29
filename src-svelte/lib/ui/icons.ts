@@ -2,12 +2,12 @@
  * SVG 图标集中管理（不引入任何图标库依赖）。
  *
  * 所有图标都是 24×24 的线性 SVG，stroke 使用 currentColor（跟随文字颜色），便于统一线宽与圆角风格，
- * 一处改图标全站生效。用法（在 .svelte 文件里）：
- *   import { icons } from '../../ui/icons';
- *   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
- *        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
- *        aria-hidden="true">{@html icons.folder.body}</svg>
- * filled=true 的图标（如播放）需把外层 svg 的 fill 设为 currentColor 且不描边。
+ * 一处改图标全站生效。组件层一律经共享的 <Icon> 消费（lib/ui/Icon.svelte）：
+ *   import Icon from '../../ui/Icon.svelte';
+ *   <Icon name="folder" />              线宽默认 2；filled 图标自动切实心
+ *   <Icon name="x" size={13} />         传 size 渲染 width/height，否则由调用方 CSS 类定尺寸
+ *   <Icon name="alert" stroke={1.8} />
+ * satisfies 让本表键名是字面量集合：Icon 的 name 拼错在编译期报错。
  */
 export interface IconDef {
   /** 放进 <svg> 内部的路径/形状标记 */
@@ -16,7 +16,7 @@ export interface IconDef {
   filled?: boolean;
 }
 
-export const icons: Record<string, IconDef> = {
+export const icons = {
   plus: { body: '<path d="M12 5v14M5 12h14" />' },
   folder: { body: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />' },
   file: {
@@ -52,4 +52,4 @@ export const icons: Record<string, IconDef> = {
   alert: {
     body: '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.2" r="0.6" fill="currentColor"/>',
   },
-};
+} satisfies Record<string, IconDef>;

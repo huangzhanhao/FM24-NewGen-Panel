@@ -7,6 +7,8 @@ import { t } from '../text';
 import type {
   GeneratedImage,
   ImageConfig,
+  PromptTemplate,
+  ProviderConfig,
   QueueEntry,
   QueueFinished,
   QueueProgress,
@@ -168,6 +170,47 @@ export async function setProviderKey(id: string, key: string) {
   imageaiStore.keysSet[id] = true;
 }
 
+// ---------------- 服务商 / 模板的写入出口（config 整包替换单点化） ----------------
+/** 保存/删除服务商与模板：后端返回全量 ImageConfig，config 由 store 单点写回
+ *  （原先 ProviderDialog / TemplateDialog 四处直写）。写回后各兜一层一致性：
+ *  当前 providerId / templateId 若已不在新配置中（删的正是当前项、后端清理），就地回退——
+ *  否则下拉悬空，生图会带着指向已删条目的脏参数发出去。 */
+export async function saveProvider(provider: ProviderConfig) {
+  imageaiStore.config = await api.saveProvider(provider);
+  ensureProviderValid();
+}
+
+export async function deleteProvider(id: string) {
+  imageaiStore.config = await api.deleteProvider(id);
+  ensureProviderValid();
+}
+
+/** providerId 悬空的回退走 selectProvider：模型/尺寸/改写开关等派生值一并归位到默认服务商口径。 */
+function ensureProviderValid() {
+  const cfg = imageaiStore.config;
+  if (!cfg || cfg.providers.some((p) => p.id === imageaiStore.providerId)) return;
+  selectProvider(cfg.settings.defaultProviderId || 'openai');
+}
+
+export async function saveTemplate(template: PromptTemplate) {
+  imageaiStore.config = await api.savePromptTemplate(template);
+  await ensureTemplateValid();
+}
+
+export async function deleteTemplate(id: string) {
+  imageaiStore.config = await api.deletePromptTemplate(id);
+  await ensureTemplateValid();
+}
+
+/** templateId 悬空的回退走 applyTemplate：negative/prompt 一并归位到第一个模板
+ *  （渲染失败向上抛给调用方弹窗；此时 templateId/negative 已切换、prompt 已退回模板原文，状态一致）。 */
+async function ensureTemplateValid() {
+  const cfg = imageaiStore.config;
+  if (!cfg || cfg.templates.some((t) => t.id === imageaiStore.templateId)) return;
+  const fallback = cfg.templates[0];
+  if (fallback) await applyTemplate(fallback.id);
+}
+
 export function selectModel(model: string) {
   imageaiStore.model = model;
   const caps = imageaiStore.modelInfo?.capabilities;
@@ -208,7 +251,9 @@ export function clearSourcePlayer() {
   imageaiStore.sourcePlayer = null;
 }
 
-export async function generate() {
+/** meta（同参重生）：结果卡传入该图记录的 {size, seed} 按原参重出；不传（CTA/重试）则用工作台当前值。
+ *  meta.seed 为空串 = 原图就是随机种子，重生时同样随机。 */
+export async function generate(meta?: { size?: string; seed?: string }) {
   if (!imageaiStore.model) throw new Error(t.gen.needModel);
   imageaiStore.generating = true;
   try {
@@ -222,29 +267,32 @@ export async function generate() {
     if (rendered.missing.length > 0) throw new Error(t.gen.missingPlaceholders(rendered.missing));
     if (!imageaiStore.sourcePlayer) imageaiStore.prompt = rendered.text; // 回写：所见即所发（仅手填链路）
     const caps = imageaiStore.modelInfo?.capabilities;
+    // 同参重生：meta 提供该图记录的尺寸/Seed（'' = 随机，与原图一致）；不传则用工作台当前值。
+    const size = meta?.size || imageaiStore.size;
+    const seedRaw = meta ? meta.seed ?? '' : imageaiStore.seed;
     const res = await api.generateImage({
       providerId: imageaiStore.providerId,
       model: imageaiStore.model,
       prompt: rendered.text,
       negativePrompt: imageaiStore.negative,
-      size: imageaiStore.size,
+      size,
       n: imageaiStore.n,
       quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
-      seed: imageaiStore.seed === '' ? null : Number(imageaiStore.seed),
+      seed: seedRaw === '' ? null : Number(seedRaw),
       // 百炼开关：仅当前模型声明支持时才带值，否则传 null（如 wan2.7 无改写、z-image 无水印），
       // 后端按同一能力集再门控一遍。
       promptExtend: caps?.supportsPromptExtend ? imageaiStore.promptExtend : null,
       watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
     });
-    // 本次生成参数快照随结果记录（结果卡 meta 与同参重生用；失败不产生结果）。
-    const meta = { size: imageaiStore.size, seed: imageaiStore.seed };
+    // 本次实发参数快照随结果记录（结果卡展示 + 同参重生的入参来源；失败不产生结果）。
+    const used = { size, seed: seedRaw };
     const imgs: GeneratedImage[] = [];
     for (const im of res.images) {
       imgs.push({
         id: im.id,
         path: im.path,
         url: await loadImageBlobUrl(im.path),
-        ...meta,
+        ...used,
       });
     }
     imageaiStore.results = [...imgs, ...imageaiStore.results];

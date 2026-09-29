@@ -1304,6 +1304,25 @@ pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResu
     rtf_scanner::query_page(rows, &query)
 }
 
+/// 按 uid 批量取球员记录（队列坞条目行的身份信息：年龄/所在地帮认出同名同姓者）。
+/// 【为什么批量】队列坞原先对每个 uid 单独发一次 query_players(search=uid, limit=1)：
+/// N 个条目 = N 次 IPC + N×M 线扫；批量一次 IPC、一遍哈希命中。语义与逐条等价——
+/// 队列条目的 uid 来自名单记录本身（规范形），精确相等是逐条「全名包含」的子集。
+/// 在锁内过滤、只克隆命中行（N 条），避免 clone 整份大名单；未命中的 uid 直接缺席，
+/// 缓存未填上时返回空表（前端降级为仅姓名/UID 展示）。
+#[tauri::command]
+pub fn query_players_by_uids(state: State<'_, AppState>, uids: Vec<String>) -> Vec<PlayerRecord> {
+    let want: std::collections::HashSet<&str> = uids.iter().map(|s| s.as_str()).collect();
+    state
+        .rtf_cache
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| want.contains(r.uid.as_str()))
+        .cloned()
+        .collect()
+}
+
 // ---------------- 快照预览（「读取快照」按钮 → 结果区「快照预览」Tab） ----------------
 
 /// 「读取快照」：解析存档 XML 快照（.user/<存档>/<组>_snapshot.xml，config.xml 的存档副本）

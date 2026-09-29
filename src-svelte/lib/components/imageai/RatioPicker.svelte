@@ -2,6 +2,8 @@
      用真实比例的矩形轮廓单选；点选即把该比例对应的官方推荐尺寸写入。
      预设里一个可识别比例都没有时（如纯自由尺寸未给预设）调用方不渲染本组件。 -->
 <script lang="ts">
+  import { t } from "../../text"; // 全局文案常量
+
   interface Props {
     sizes: string[];
     value: string;
@@ -56,7 +58,7 @@
 </script>
 
 {#if groups.length > 0}
-  <div class="ratio-row" role="radiogroup" aria-label="画面方向">
+  <div class="ratio-row" role="radiogroup" aria-label={t.gen.ratioAria}>
     {#each groups as g (g.label)}
       <button
         type="button"

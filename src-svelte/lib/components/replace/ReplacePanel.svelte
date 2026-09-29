@@ -5,7 +5,7 @@
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
   import { appStore, refreshSnapshot, runTask } from "../../stores/app.svelte";
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
 
   // 三个模式的取值/标签/说明统一在 text.ts 的 t.replace.modes 维护；
   // value 发往后端（协议值），label 显示在模式按钮上，desc 显示在选中模式旁。
@@ -157,13 +157,7 @@
       {/if}
       <span class="btn-label">
         {#if !busy}
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            aria-hidden="true">{@html icons.play.body}</svg
-          >
+          <Icon name="play" size={15} />
         {/if}
         {busy ? `${t.replace.runningBtn} ${appStore.progress.value}%` : t.replace.startBtn}
       </span>

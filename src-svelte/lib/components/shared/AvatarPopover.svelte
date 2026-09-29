@@ -20,7 +20,7 @@
      气泡状态机/缓存/定位/样式在本组件单点维护。 -->
 <script lang="ts">
   import { t } from "../../text"; // 全局文案常量
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
 
   let {
     resolve,
@@ -160,7 +160,7 @@
     <button
       type="button"
       class="pop-backdrop"
-      aria-label="关闭"
+      aria-label={t.table.avatarClose}
       onclick={close}
     ></button>
   {/if}
@@ -186,15 +186,8 @@
     </div>
     <div class="pop-cap mono" title={pop.key}>{pop.key}</div>
     {#if pop.pin}
-      <button type="button" class="pop-x" aria-label="关闭" onclick={close}>
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.2"
-          stroke-linecap="round"
-          aria-hidden="true">{@html icons.x.body}</svg
-        >
+      <button type="button" class="pop-x" aria-label={t.table.avatarClose} onclick={close}>
+        <Icon name="x" stroke={2.2} />
       </button>
     {/if}
   </div>
@@ -217,6 +210,6 @@
   .pop-cap { margin-top: 6px; font-size: 11px; color: var(--text-3); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* 钉住态关闭钮：20×20 表面色小胶囊，悬停转危险色，两主题均清晰 */
   .pop-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--hairline-2); border-radius: 6px; background: var(--bg-surface); color: var(--text-2); line-height: 1; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; }
-  .pop-x svg { width: 11px; height: 11px; }
+  .pop-x :global(svg) { width: 11px; height: 11px; }
   .pop-x:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 </style>

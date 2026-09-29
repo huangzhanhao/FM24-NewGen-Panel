@@ -3,7 +3,7 @@
      page 从 0 计数、双向绑定；文案复用 t.table.* 的分页文案。 -->
 <script lang="ts">
   import { t } from "../../text"; // 全局文案常量
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
 
   // page：当前页码（从 0 开始，双向绑定）；totalPages：总页数（至少 1，由父组件按总条数算出）。
   let { page = $bindable(0), totalPages = 1 }: { page: number; totalPages?: number } = $props();
@@ -32,17 +32,7 @@
     disabled={page === 0}
     title={t.table.prevPage}
   >
-    <svg
-      viewBox="0 0 24 24"
-      width="14"
-      height="14"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true">{@html icons.chevronLeft.body}</svg
-    >
+    <Icon name="chevronLeft" size={14} />
   </button>
   <span>{t.table.pageOf(page + 1, totalPages)}</span>
   <button
@@ -51,17 +41,7 @@
     disabled={page + 1 >= totalPages}
     title={t.table.nextPage}
   >
-    <svg
-      viewBox="0 0 24 24"
-      width="14"
-      height="14"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true">{@html icons.chevronRight.body}</svg
-    >
+    <Icon name="chevronRight" size={14} />
   </button>
   <!-- 快速跳页：输入 1 基页码后回车或点「跳转」；gotoPage 会夹取到 [1, 总页数]。 -->
   <span class="pager-jump">

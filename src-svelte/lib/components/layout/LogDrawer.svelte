@@ -12,7 +12,7 @@
   } from "../../stores/log.svelte";
   import { ui } from "../../stores/ui.svelte";
   import { t } from "../../text"; // 全局文案常量
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
   import type { LogLine } from "../../types";
 
   // 抽屉打开期间，过滤条件变化 → 从 Rust 环形缓冲重查（前端缓冲仅承接事件增量）。
@@ -126,15 +126,7 @@
         onclick={() => (ui.logOpen = false)}
         aria-label={t.log.closeAria}
       >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.x.body}</svg
-        >
+        <Icon name="x" />
       </button>
     </div>
     <div class="drawer-body">

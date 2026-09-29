@@ -54,6 +54,9 @@ export const api = {
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
   cancelReplace: () => invoke<void>('cancel_replace'),
   queryPlayers: (query: PlayerQuery) => invoke<PageResult<PlayerRecord>>('query_players', { query }),
+  // queryPlayersByUids：按 uid 批量取球员记录（队列坞条目行身份信息：年龄/所在地帮认人）；
+  // 只读后端 rtf_cache（与 query_players 同源），未命中的 uid 不在返回之列。
+  queryPlayersByUids: (uids: string[]) => invoke<PlayerRecord[]>('query_players_by_uids', { uids }),
   previewPlayer: (uid: string) => invoke<PlayerPreview>('preview_player', { uid }),
   // queryAvatars：名单预览头像列按 UID 批量取头像绝对路径（一次拉一页；null = 无映射或图片不在包内）。
   queryAvatars: (uids: string[]) =>

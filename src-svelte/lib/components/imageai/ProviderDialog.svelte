@@ -1,9 +1,13 @@
 <!-- 服务商设置：列表/新建/编辑/删除；Key 掩码输入仅发会话内存。复用全局 modal 类。 -->
 <script lang="ts">
   import { confirm, message } from "@tauri-apps/plugin-dialog";
-  import { api } from "../../services/api";
   import { t } from "../../text";
-  import { imageaiStore, setProviderKey } from "../../stores/imageai.svelte";
+  import {
+    deleteProvider,
+    imageaiStore,
+    saveProvider,
+    setProviderKey,
+  } from "../../stores/imageai.svelte";
   import { showError } from "../../ui/dialog";
   import type { ProviderConfig } from "../../types";
 
@@ -25,10 +29,10 @@
   async function onSave() {
     if (!editing) return;
     try {
-      if (!editing.id) editing.id = `p-${Date.now()}`;
+      if (!editing.id) editing.id = `p-${crypto.randomUUID()}`;
       if (!editing.defaultModel && editing.models[0])
         editing.defaultModel = editing.models[0].model;
-      imageaiStore.config = await api.saveProvider($state.snapshot(editing));
+      await saveProvider($state.snapshot(editing)); // config 整包写回 + 悬空兜底见 store action
       // 走 store 封装：后端记 Key（会话内存）+ 前端 keysSet 标记「已设置」，顶栏徽标同步点亮
       if (keyInput) await setProviderKey(editing.id, keyInput);
       await message(t.gen.providerSaved, { title: t.dialog.info });
@@ -47,7 +51,7 @@
     )
       return;
     try {
-      imageaiStore.config = await api.deleteProvider(p.id);
+      await deleteProvider(p.id);
     } catch (e) {
       await showError(e);
     }

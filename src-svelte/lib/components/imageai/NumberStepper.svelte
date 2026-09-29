@@ -1,6 +1,8 @@
 <!-- 生图张数步进器：30px 高，[−] 数值 [+]；min/max 到界硬禁用。
      max<=1（火山单图模型）时调用方不应渲染本控件（改显示说明文字）。 -->
 <script lang="ts">
+  import { t } from "../../text"; // 全局文案常量
+
   interface Props {
     value: number;
     min?: number;
@@ -20,14 +22,14 @@
   <button
     type="button"
     class="step-btn"
-    aria-label="减少"
+    aria-label={t.gen.nLess}
     disabled={value <= min}
     onclick={() => step(-1)}
   >−</button>
   <input
     class="num"
     type="number"
-    aria-label={ariaLabel ?? '数量'}
+    aria-label={ariaLabel ?? t.gen.nCount}
     {min}
     {max}
     step="1"
@@ -40,7 +42,7 @@
   <button
     type="button"
     class="step-btn"
-    aria-label="增加"
+    aria-label={t.gen.nMore}
     disabled={value >= max}
     onclick={() => step(1)}
   >+</button>

@@ -115,7 +115,7 @@ export const t = {
     tpl1Complete: '标准一：图片直铺，无种族子目录',
     tplComplete: (standard: number, total: number) => `标准${standard}：${total} 个配置目录齐全`,
     integrityOk: (label: string) => `✓ 头像包结构完整（${label}）`,
-    extraDirsNote: (n: number) => (n > 0 ? `；另含 ${n} 个未配置目录（不参与抽图）` : ''),
+    extraDirsNote: (n: number) => (n > 0 ? `另含 ${n} 个未配置目录（不参与抽图）` : ''),
     integrityFixable: (standard: number, missing: number, found: number, total: number, list: string) =>
       `标准${standard}：缺少 ${missing} 个目录（已有 ${found}/${total}）：${list}`,
     createMissingBtn: '一键创建缺失目录',
@@ -165,7 +165,9 @@ export const t = {
     toggleNegative: '负向提示词',
     negative: '负向提示词（模型不支持时仅记录不发送）',
     negativeNotSent: '当前模型不发送',
-    regenTitle: '用当前参数再生成',
+    regenTitle: '按该图生成参数再生成',
+    resultAlt: '生成结果图',
+    previewAlt: '生成图预览',
     // 连接卡下方的模型能力摘要（与参数控件显隐同一能力集口径）
     capNoModel: '未选择模型明细行：仅可填写接口参数，高级能力不可用',
     capPresetSizes: (n: number) => `${n} 个预设尺寸`,
@@ -183,8 +185,12 @@ export const t = {
     sizeWLabel: '宽',
     sizeHLabel: '高',
     sizeCustomHint: '自定义尺寸厂商可能拒绝，生成失败时请改用上方预设尺寸。',
+    ratioAria: '画面方向',
     n: '张数',
     nSingle: '该模型每次仅生成 1 张',
+    nLess: '减少',
+    nMore: '增加',
+    nCount: '数量',
     nMaxHint: (n: number) => `单次最多 ${n} 张`,
     quality: '质量',
     qualityAuto: '自动',
@@ -413,6 +419,7 @@ export const t = {
     /** 头像列缩略图 + 悬停/点击气泡的状态文案。 */
     avatarBtn: '预览',
     avatarAria: '预览该球员的头像图片',
+    avatarClose: '关闭头像预览',
     avatarLoading: '加载中…',
     avatarNotFound: '未找到头像图片',
     /** 随机人筛选（仅拓展名单显示）：标签 + 三个选项的文案。 */
@@ -472,6 +479,7 @@ export const t = {
   status: {
     ready: '就绪',
     noGroup: '未选择头像包',
+    log: '日志',
   },
 
   /** 日志抽屉 */

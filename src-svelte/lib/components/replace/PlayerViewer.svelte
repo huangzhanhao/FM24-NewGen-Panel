@@ -11,10 +11,10 @@
   import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（名单/快照/本卡共用）
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
-  import { appStore } from "../../stores/app.svelte";
+  import { appStore, basedValue } from "../../stores/app.svelte";
   import { ui } from "../../stores/ui.svelte"; // 「用此球员生成」要切到 AI 生成头像工作台
   import { imageaiStore, setSourcePlayer } from "../../stores/imageai.svelte"; // P3 数据源入口
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
   import type { PlayerPreview } from "../../types";
 
   const FACE = "face"; // 单人只有一张图：加载器里的固定 key
@@ -129,10 +129,7 @@
     ui.workbench = "ai";
   }
 
-  // 第 15 列语义：按后端结构化协议码区分球员/职员，与名单预览表同一口径（不依赖中文文案）。
-  const isStaffRoster = $derived(
-    appStore.lastRtfScan?.formatCode === "extStaff",
-  );
+  // 第 15 列口径单点见 appStore（isStaffRoster/basedLabel/basedValue）。
 
   /** 一个信息胶囊：标签 + 值；accent=强调色（随机人），mono=等宽（映射路径）。 */
   type Capsule = {
@@ -186,10 +183,7 @@
     push(t.table.colAge, d.age);
     push(t.table.colHeight, d.height);
     push(t.table.colClub, d.club);
-    push(
-      isStaffRoster ? t.table.colJob : t.table.colBased,
-      isStaffRoster ? d.preferredJob : d.based,
-    );
+    push(appStore.basedLabel, basedValue(d));
     push(t.table.colCa, d.ca);
     push(t.table.colPa, d.pa);
     push(t.table.colRca, d.rca);
@@ -266,16 +260,7 @@
             disabled={!uid.trim()}
             title={t.viewer.hint}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              aria-hidden="true">{@html icons.search.body}</svg
-            >
+            <Icon name="search" size={14} />
             {t.viewer.searchBtn}
           </button>
         </div>
@@ -300,15 +285,7 @@
       <!-- 替换行沉底：图片路径输入框（文件夹图标）+ 浏览 + 替换。无组禁用浏览；输入不全禁用替换。 -->
       <div class="replace-row">
         <div class="input-wrap">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true">{@html icons.folder.body}</svg
-          >
+          <Icon name="folder" />
           <input
             type="text"
             placeholder={t.viewer.imgPlaceholder}

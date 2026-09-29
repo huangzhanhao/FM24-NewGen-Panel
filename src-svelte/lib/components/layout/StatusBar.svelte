@@ -57,6 +57,6 @@
   <span class="flex-1"></span>
   <!-- 日志按钮：切换 ui.logOpen；有错误时显示红色数量徽章。 -->
   <button class="link" onclick={() => (ui.logOpen = !ui.logOpen)}>
-    日志{#if errorCount > 0}<span class="badge">{errorCount}</span>{/if}
+    {t.status.log}{#if errorCount > 0}<span class="badge">{errorCount}</span>{/if}
   </button>
 </footer>

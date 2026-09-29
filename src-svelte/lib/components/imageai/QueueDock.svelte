@@ -5,13 +5,15 @@
      事件订阅是进程级的：gen:queue:* 由 imageai store 的 initQueueListeners（App 挂载调一次）统一接收，
      进度/收尾载荷写在 store 里——切走 AI 台期间事件不丢、回台无需重新 query，本组件只负责展示。 -->
 <script lang="ts">
-  import { confirm, message, save } from "@tauri-apps/plugin-dialog";
+  import { onDestroy, untrack } from "svelte";
+  import { confirm } from "@tauri-apps/plugin-dialog";
   import { t } from "../../text";
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
+  import { saveGeneratedImageAs } from "../../ui/generatedImageSave"; // 生成图另存为（与画廊共用）
   import { showError } from "../../ui/dialog";
   import { api } from "../../services/api";
   import { loadImageBlobUrl } from "../../services/images";
-  import { appStore } from "../../stores/app.svelte"; // 名单格式码（所在地/偏好工作列语义）+ 气泡失效键
+  import { appStore, basedValue } from "../../stores/app.svelte"; // 第 15 列口径（basedLabel/basedValue）+ 气泡失效键
   import AvatarThumb from "../shared/AvatarThumb.svelte"; // 条目行头像缩略图 + 放大气泡
   import { createAvatarSource } from "../../avatarBlobs.svelte"; // 头像路径查询+缩略图装载（与名单预览/球员源卡共用）
   import {
@@ -65,7 +67,7 @@
           : t.gen.queue.statusFailed;
   }
   /** 详情列：失败显示原因，成功显示张数，其余留 —。 */
-  function detailText(e: (typeof entries)[number]) {
+  function detailText(e: QueueEntry) {
     if (e.status === "failed") return e.error || "—";
     if (e.status === "success")
       return t.gen.queue.imagesDone(e.images?.length ?? 0);
@@ -74,46 +76,68 @@
 
   // ---- 条目行身份信息（S9）：头像 + 年龄/所在地，帮认出同名同姓的球员 ----
   // 头像路径/缩略图走共用的 createAvatarSource（与名单预览同一实现，取失败静默降级为无图）。
-  // 资料走 query_players(search=uid)：只读后端 rtf_cache（线性扫，无 XML 兜底解析，逐条 IPC 可控）；
-  // 不用 preview_player——它的映射兜底会在缓存未命中时整表解析存档快照（秒级且堵主线程）。
-  // 条目来自上一次扫描时资料可能查不到：该行降级为仅姓名/UID，不报错。
+  // 资料走 query_players_by_uids 批量取（暂缓①）：一次 IPC 替代原先逐 uid 的
+  // query_players(search=uid, limit=1)——N 个条目 = N 次 IPC + N×M 线扫；批量失败整批
+  // 降级为仅姓名/UID，不报错。不用 preview_player——它的映射兜底会在缓存未命中时
+  // 整表解析存档快照（秒级且堵主线程）。条目来自上一次扫描时资料可能查不到：该行降级。
   const rowAvatars = createAvatarSource();
   let rowInfo = $state<Record<string, PlayerRecord | null>>({});
   const infoCache = new Map<string, PlayerRecord | null>(); // 非响应式缓存：避免逐条写入触发 effect 重跑
   let infoToken = 0;
+  let loadedUidKey = ""; // 已拉过身份信息的 uid 稳定键（非响应式，仅 effect 内读写）
   $effect(() => {
-    if (!open || entries.length === 0) return; // 收起状态条不需要身份信息，不拉
+    if (!open || entries.length === 0) {
+      loadedUidKey = ""; // 收起/清空后再展开：重新拉一次
+      return;
+    }
     const uids = [...new Set(entries.map((e) => e.uid))];
+    // 【护栏】队列运行中快照被节流刷新（store 的 scheduleQueueRefresh，最密约 120ms 一次）整组
+    // 替换，条目集合其实没变；不挡的话 rowAvatars.load 每次都 revoke 全部旧 URL 并逐张重读
+    // read_image——IPC/磁盘抖动 + 缩略图闪烁。uid 集合不变即跳过（资料侧本就有 infoCache 去重）。
+    const uidKey = uids.join("|");
+    if (uidKey === loadedUidKey) return;
+    loadedUidKey = uidKey;
     void rowAvatars.load(uids); // 头像与资料并行查：各自的令牌防过期回写
     const token = ++infoToken;
     const missing = uids.filter((u) => !infoCache.has(u));
     for (const u of missing) infoCache.set(u, null); // 先占位，防并发期间重复查询
     void (async () => {
       if (missing.length > 0) {
-        await Promise.all(
-          missing.map(async (u) => {
-            try {
-              const page = await api.queryPlayers({
-                offset: 0,
-                limit: 1,
-                search: u,
-                sortKey: "",
-                sortDesc: false,
-                newgan: null,
-              });
-              infoCache.set(u, page.items[0] ?? null);
-            } catch {
-              infoCache.set(u, null);
-            }
-          }),
-        );
+        try {
+          const got = await api.queryPlayersByUids(missing);
+          const byUid = new Map(got.map((r) => [r.uid, r]));
+          for (const u of missing) infoCache.set(u, byUid.get(u) ?? null);
+        } catch {
+          for (const u of missing) infoCache.set(u, null); // 批量失败：该批降级为仅姓名/UID
+        }
       }
       if (token !== infoToken) return; // 期间条目已变：过期结果整批作废
       rowInfo = Object.fromEntries(uids.map((u) => [u, infoCache.get(u) ?? null]));
     })();
   });
-  // 第 15 列语义与名单预览/单人替换同口径：extStaff 名单的「所在地」列实为「偏好工作」
-  const dockIsStaff = $derived(appStore.lastRtfScan?.formatCode === "extStaff");
+
+  // ---- 展开缩略图的 blob 回收（泄漏防线）----
+  // 条目从快照消失（重试换新 id / 移除 / 清空）时，其展开缩略图的 blob URL 立即回收——
+  // blob URL 不随组件卸载自动释放，漏掉就是长会话的内存增长；读取侧（toggleThumbs）只管装载。
+  // untrack：只跟踪 entries 的 id 集合，thumbs 自身的删键不回触本 effect。
+  $effect(() => {
+    const ids = new Set(entries.map((e) => e.id));
+    untrack(() => {
+      for (const [id, arr] of Object.entries(thumbs)) {
+        if (!ids.has(id)) {
+          for (const im of arr) URL.revokeObjectURL(im.url);
+          delete thumbs[id];
+        }
+      }
+    });
+  });
+  // 切工作台即卸载：兜底全量回收（含上方 effect 不覆盖的「卸载瞬间仍存活」的条目）。
+  onDestroy(() => {
+    for (const arr of Object.values(thumbs)) {
+      for (const im of arr) URL.revokeObjectURL(im.url);
+    }
+  });
+  // 第 15 列口径单点见 appStore（isStaffRoster/basedLabel/basedValue）。
   /** 行的年龄（拓展名单才有；缺资料/基础名单显示 —）。 */
   function rowAge(e: QueueEntry): string {
     return rowInfo[e.uid]?.detailed?.age?.trim() || "—";
@@ -122,7 +146,7 @@
   function rowWhere(e: QueueEntry): string {
     const d = rowInfo[e.uid]?.detailed;
     if (!d) return "—";
-    return (dockIsStaff ? d.preferredJob : d.based).trim() || "—";
+    return basedValue(d).trim() || "—";
   }
 
   function toggleAll(v: boolean) {
@@ -199,8 +223,9 @@
     }
   }
 
-  /** 展开/收起成功行：首次展开时按 images[].path 懒载 blob URL（卸载/收起不主动回收，
-   *  队列条目存活期内重复展开复用缓存；清空队列随条目消失由 LRU 临时目录兜底）。 */
+  /** 展开/收起成功行：首次展开时按 images[].path 懒载 blob URL。收起不回收是刻意的——
+   *  条目存活期内重复展开直接复用；条目从快照消失或组件卸载时由上方 effect / onDestroy
+   *  统一 revoke（旧注释写的「LRU 临时目录兜底」兜的是磁盘文件，兜不住 JS blob，勿再依赖）。 */
   async function toggleThumbs(e: QueueEntry) {
     if (expandedId === e.id) {
       expandedId = null;
@@ -214,21 +239,11 @@
         url: await loadImageBlobUrl(im.path),
       })),
     );
-    thumbs[e.id] = loaded;
-  }
-
-  async function onSaveThumb(imgId: string) {
-    const target = await save({
-      defaultPath: `${imgId}.png`,
-      filters: [{ name: "PNG", extensions: ["png"] }],
-    });
-    if (!target) return;
-    try {
-      await api.saveGeneratedImage(imgId, target);
-      await message(t.gen.saved, { title: t.dialog.info });
-    } catch (e) {
-      await showError(e);
+    if (!entries.some((en) => en.id === e.id)) {
+      for (const im of loaded) URL.revokeObjectURL(im.url); // 展开期间条目已被移除/重试：立即回收，不回写
+      return;
     }
+    thumbs[e.id] = loaded;
   }
 </script>
 
@@ -239,16 +254,7 @@
     onclick={() => (open = true)}
     title={t.gen.queue.expandTitle}
   >
-    <svg
-      class="db-ic"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true">{@html icons.play.body}</svg
-    >
+    <Icon name="play" class="db-ic" filled={false} />
     <span class="db-title">{t.gen.queue.tabQueue}</span>
     {#if dockScope}
       <span class="db-scope">{t.gen.queue.scopeTitle(dockScope)}</span>
@@ -275,16 +281,7 @@
         >
       {/if}
     {/if}
-    <svg
-      class="db-chev"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true">{@html icons.chevronUp.body}</svg
-    >
+    <Icon name="chevronUp" class="db-chev" />
   </button>
 {:else if open}
   <div class="dock">
@@ -303,17 +300,7 @@
         title={t.gen.queue.collapseTitle}
         onclick={() => (open = false)}
       >
-        <svg
-          viewBox="0 0 24 24"
-          width="14"
-          height="14"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.chevronDown.body}</svg
-        >
+        <Icon name="chevronDown" size={14} />
       </button>
     </div>
 
@@ -323,13 +310,7 @@
         disabled={imageaiStore.queueRunning || queuedCount === 0}
         onclick={onStart}
       >
-        <svg
-          viewBox="0 0 24 24"
-          width="11"
-          height="11"
-          fill="currentColor"
-          aria-hidden="true">{@html icons.play.body}</svg
-        >
+        <Icon name="play" size={11} />
         {t.gen.queue.startBtn}
       </button>
       <button
@@ -379,13 +360,7 @@
 
     {#if entries.length === 0}
       <div class="empty dock-empty">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          aria-hidden="true">{@html icons.image.body}</svg
-        >
+        <Icon name="image" stroke={1.6} />
         <p>{t.gen.queue.empty}</p>
       </div>
     {:else}
@@ -398,6 +373,7 @@
             <col class="w-age" />
             <col class="w-where" />
             <col class="w-status" />
+            <col class="w-detail" />
           </colgroup>
           <thead>
             <tr>
@@ -415,7 +391,7 @@
               <th class="static">{t.gen.queue.colPlayer}</th>
               <th class="static">{t.table.colUid}</th>
               <th class="static">{t.table.colAge}</th>
-              <th class="static">{dockIsStaff ? t.table.colJob : t.table.colBased}</th>
+              <th class="static">{appStore.basedLabel}</th>
               <th class="static c">{t.gen.colStatus}</th>
               <th class="static">{t.gen.queue.colDetail}</th>
             </tr>
@@ -487,18 +463,9 @@
                             type="button"
                             class="btn sm thumb-save"
                             title={t.gen.queue.saveImage}
-                            onclick={() => void onSaveThumb(im.id)}
+                            onclick={() => void saveGeneratedImageAs(im.id)}
                           >
-                            <svg
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              stroke-width="2"
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                              aria-hidden="true"
-                              >{@html icons.download.body}</svg
-                            >
+                            <Icon name="download" />
                             {t.gen.queue.saveImage}
                           </button>
                         </div>
@@ -541,7 +508,7 @@
     border-color: var(--accent);
     background: var(--accent-soft);
   }
-  .db-ic {
+  :global(.db-ic) {
     width: 13px;
     height: 13px;
     color: var(--accent);
@@ -603,7 +570,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .db-chev {
+  :global(.db-chev) {
     width: 15px;
     height: 15px;
     color: var(--text-3);
@@ -758,6 +725,10 @@
   }
   .w-status {
     width: 72px;
+  }
+  /* 详情列（第 7 列，此前 colgroup 漏列、无宽约束）：给建议宽，长错误文本才有确定宽度走 .detail 的省略号 */
+  .w-detail {
+    width: 220px;
   }
   /* 条目行身份格：头像缩略 + 姓名（S9），资料缺列时该行仍只靠姓名/UID 认人 */
   .player-cell {

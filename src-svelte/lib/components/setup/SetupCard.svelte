@@ -5,8 +5,14 @@
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
   import { pinScrollEnd } from "../../ui/actions"; // 把长路径钉到最右的 action
-  import { icons } from "../../ui/icons";
-  import { appStore, applySnapshot, runTask } from "../../stores/app.svelte";
+  import Icon from "../../ui/Icon.svelte";
+  import {
+    appStore,
+    applySnapshot,
+    markRosterFilled,
+    markSnapshotRead,
+    runTask,
+  } from "../../stores/app.svelte";
   import { ui } from "../../stores/ui.svelte"; // 本卡已在存档资料台：扫描结果切的是**本台**的验证视图
   import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
@@ -91,9 +97,8 @@
     const xmlPath = snap.configXml.path; // 取到局部变量：闭包里 TS 的判空收窄会失效
     try {
       await runTask(t.setup.viewConfigBtn, () => api.readSnapshot(xmlPath));
-      appStore.snapshotReadPath = xmlPath;
+      markSnapshotRead(xmlPath); // 记已读路径 + 触发快照预览重载（标记单点见 store，与替换收尾共用）
       ui.verifyView = "snapshot"; // 就地看到刚读进来的快照，不出台
-      appStore.snapshotVersion++;
     } catch (e) {
       await showError(e);
     }
@@ -123,9 +128,8 @@
   async function scanRtf() {
     if (!snap?.currentRtf) return;
     try {
-      appStore.lastRtfScan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
-      appStore.rosterReady = true; // 名单缓存已填充：名单预览据此渲染工具条
-      appStore.rosterVersion++;
+      const scan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
+      markRosterFilled(scan); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与替换收尾共用）
       ui.verifyView = 'table'; // 扫描成功：存档资料台的验证视图切到「名单预览」，就地看到扫描结果
     } catch (e) {
       await showError(e);
@@ -168,15 +172,7 @@
     <div class="path-row">
       <label for="sc-group">{t.setup.imgDirLabel}</label>
       <div class="input-wrap">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.folder.body}</svg
-        >
+        <Icon name="folder" />
         <input
           id="sc-group"
           type="text"
@@ -209,15 +205,7 @@
     <div class="path-row">
       <label for="sc-rtf">{t.setup.rtfLabel}</label>
       <div class="input-wrap">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.file.body}</svg
-        >
+        <Icon name="file" />
         <input
           id="sc-rtf"
           type="text"
@@ -251,15 +239,7 @@
     <div class="path-row">
       <label for="sc-xml">{t.setup.xmlLabel}</label>
       <div class="input-wrap">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true">{@html icons.file.body}</svg
-        >
+        <Icon name="file" />
         <input
           id="sc-xml"
           type="text"
@@ -295,9 +275,7 @@
           <span class="pill ok"><span class="dot"></span>{completeLabel}</span>
           {#if integrity.extra.length > 0}
             <span class="note"
-              >{t.setup
-                .extraDirsNote(integrity.extra.length)
-                .replace(/^；/, "")}</span
+              >{t.setup.extraDirsNote(integrity.extra.length)}</span
             >
           {/if}
         </div>

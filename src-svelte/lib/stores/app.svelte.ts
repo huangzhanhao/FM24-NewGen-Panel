@@ -7,7 +7,8 @@
  */
 import { listen } from '@tauri-apps/api/event';
 import { api } from '../services/api';
-import type { AppSnapshot, ProgressPayload, RtfScanResult, TaskProgressPayload } from '../types';
+import { t } from '../text';
+import type { AppSnapshot, PlayerRecord, ProgressPayload, RtfScanResult, TaskProgressPayload } from '../types';
 import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 
 /** 替换流水线的最终结果（'' = 尚未发生过替换）。事件载荷不含 ''，lastResult 初始值用它。 */
@@ -78,7 +79,23 @@ export const appStore = $state({
     const s = this.snapshot;
     return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && !!s.currentRtf;
   },
+  /** 第 15 列语义单点：extStaff（拓展职员）名单的「所在地」列实为「偏好工作」。
+   *  判据按后端结构化协议码 formatCode，不依赖中文展示文案——四个消费点
+   *  （名单表/单人替换/队列坞/球员源卡）原先各自 $derived 一份，此处单点维护。 */
+  get isStaffRoster(): boolean {
+    return this.lastRtfScan?.formatCode === 'extStaff';
+  },
+  /** 第 15 列表头文案：职员名单「偏好工作」，球员名单「所在地」。 */
+  get basedLabel(): string {
+    return this.isStaffRoster ? t.table.colJob : t.table.colBased;
+  },
 });
+
+/** 第 15 列取值：球员读 based，职员读 preferredJob（另一个在解析侧恒为空串）。
+ *  入参收 PlayerRecord['detailed'] | null（可空）；trim/占位符等展示口径由调用方自定。 */
+export function basedValue(detailed: PlayerRecord['detailed'] | null): string {
+  return (appStore.isStaffRoster ? detailed?.preferredJob : detailed?.based) ?? '';
+}
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */
 export async function refreshSnapshot() {
@@ -112,6 +129,24 @@ export async function applySnapshot(s: AppSnapshot) {
     }
   }
   appStore.snapshot = s;
+}
+
+/** 「后端名单缓存已被填充」的单点标记。两条写入方：「扫描RTF」成功、替换成功收尾
+ *  （摘要随 replace:finished 回传，前端不必再点一次「扫描RTF」就知道名单格式）。
+ *  失败/取消**不调**：后端失败/取消时不把缓存写回空表（作用域没变），前端保留替换前的
+ *  名单摘要与预览——照旧清成引导空态的话，用户就得重扫一遍，白丢筛选、排序和页码。 */
+export function markRosterFilled(scan: RtfScanResult | null) {
+  appStore.lastRtfScan = scan;
+  appStore.rosterReady = true;
+  appStore.rosterVersion++; // 触发名单预览重载（旧查询结果已过期）
+}
+
+/** 「快照已读入缓存」的单点标记。两条写入方：「读取快照」成功、替换成功（后端把新
+ *  config.xml 同步到该档快照位置并刷新缓存）；失败/取消不改 config.xml，不调。
+ *  snapshotVersion++ 触发快照预览重载（同路径重读也生效）。 */
+export function markSnapshotRead(xmlPath: string) {
+  appStore.snapshotReadPath = xmlPath;
+  appStore.snapshotVersion++;
 }
 
 /** 跑完的进度条在状态栏上保留多久（毫秒）：留一会儿让「100%」看得见，到点自动清空回纯「就绪」。
@@ -200,26 +235,16 @@ export async function initListeners(onFinished: (r: ReplaceResult) => Promise<vo
     'replace:finished',
     async (e) => {
       appStore.lastResult = e.payload.result;
-      // 名单状态只在**替换成功**时重置：成功 = 后端把这份名单写进缓存（见 commands.rs 的收尾），
-      // 摘要随事件回传，前端不必再点一次「扫描RTF」就知道名单格式。
-      // 失败/取消 = 后端不再把缓存写回空表（作用域此刻并没有变化），前端因此一并保留替换前的
-      // 名单摘要与预览——这里若照旧清成引导空态，用户就得重扫一遍，白丢筛选、排序和页码。
+      // 名单/快照的「缓存已填充」标记只在替换成功时打（失败/取消两者都不做：作用域没变，
+      // 保留替换前的摘要与预览——照旧清成引导空态的话，用户就得重扫一遍，白丢筛选、排序和页码）。
+      // 标记单点见 markRosterFilled / markSnapshotRead（「扫描RTF」「读取快照」按钮与本处共用）。
       if (e.payload.result === 'finished') {
-        appStore.lastRtfScan = e.payload.roster;
-        appStore.rosterReady = true;
-        appStore.rosterVersion++; // 触发名单预览重载（替换前的查询结果已过期）
+        markRosterFilled(e.payload.roster);
       }
       await refreshSnapshot();
-      // 快照预览同样有两条写缓存路径（「读取快照」按钮 / 替换收尾的自动同步）：
-      // 替换成功时后端已把新 config.xml 同步到该档快照位置并刷新快照缓存，
-      // 这里补上与 SetupCard::readSnapshot 相同的两个标记——记下已读路径 + 触发预览重载。
-      // 失败/取消不改 config.xml（快照保持原样），因此不动这两个标记。
       if (e.payload.result === 'finished') {
         const xmlPath = appStore.snapshot?.configXml?.path;
-        if (xmlPath) {
-          appStore.snapshotReadPath = xmlPath;
-          appStore.snapshotVersion++;
-        }
+        if (xmlPath) markSnapshotRead(xmlPath);
       }
       // 替换跑完（成功/失败/取消都一样）：把进度条在状态栏上留 20 秒再清空回「就绪」。
       scheduleBarClear();

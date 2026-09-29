@@ -1,8 +1,7 @@
 <!-- 提示词模板 CRUD，复用全局 modal 类。 -->
 <script lang="ts">
   import { confirm } from '@tauri-apps/plugin-dialog';
-  import { api } from '../../services/api';
-  import { imageaiStore } from '../../stores/imageai.svelte';
+  import { deleteTemplate, imageaiStore, saveTemplate } from '../../stores/imageai.svelte';
   import { showError } from '../../ui/dialog';
   import { t } from '../../text';
   import type { PromptTemplate } from '../../types';
@@ -17,8 +16,8 @@
   async function onSave() {
     if (!editing) return;
     try {
-      if (!editing.id) editing.id = `t-${Date.now()}`;
-      imageaiStore.config = await api.savePromptTemplate($state.snapshot(editing));
+      if (!editing.id) editing.id = `t-${crypto.randomUUID()}`;
+      await saveTemplate($state.snapshot(editing)); // config 整包写回 + 悬空兜底见 store action
       editing = null;
     } catch (e) {
       await showError(e);
@@ -29,7 +28,7 @@
   async function onDelete(tpl: PromptTemplate) {
     if (!(await confirm(t.gen.deleteTemplateConfirm(tpl.name), { title: t.dialog.warning }))) return;
     try {
-      imageaiStore.config = await api.deletePromptTemplate(tpl.id);
+      await deleteTemplate(tpl.id);
     } catch (e) {
       await showError(e);
     }

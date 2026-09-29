@@ -2,7 +2,7 @@
      参数区 + 生成 CTA + 结果画廊，右栏底部可折叠 QueueDock。复用全局类与 icons，不重写控件。 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { confirm, message, save } from "@tauri-apps/plugin-dialog";
+  import { confirm, message } from "@tauri-apps/plugin-dialog";
   import { api } from "../../services/api";
   import QueueDock from "./QueueDock.svelte";
   import ProviderDialog from "./ProviderDialog.svelte";
@@ -11,11 +11,12 @@
   import RatioPicker from "./RatioPicker.svelte";
   import AvatarThumb from "../shared/AvatarThumb.svelte"; // 数据源条的头像缩略图 + 放大气泡（与名单预览共用）
   import { createAvatarSource } from "../../avatarBlobs.svelte"; // 头像路径查询+缩略图装载（与名单预览/队列坞共用）
-  import { appStore } from "../../stores/app.svelte"; // 气泡缓存失效键（currentGroup）与备份开关
+  import { appStore, basedValue } from "../../stores/app.svelte"; // 气泡缓存失效键 + 第 15 列口径（basedLabel/basedValue）
   import { ui } from "../../stores/ui.svelte"; // 就绪卡「去存档资料台」切工作台
   import { t } from "../../text";
   import { showError } from "../../ui/dialog";
-  import { icons } from "../../ui/icons";
+  import Icon from "../../ui/Icon.svelte";
+  import { saveGeneratedImageAs } from "../../ui/generatedImageSave"; // 生成图另存为（与队列坞共用）
   import {
     VARIABLE_HINTS,
     appendVariable,
@@ -285,8 +286,7 @@
   const srcRec = $derived(
     imageaiStore.sourcePlayer ? (srcProfile?.record ?? null) : null,
   );
-  // 第 15 列语义与 PlayerViewer 同口径：extStaff 名单的「所在地」列实为「偏好工作」
-  const srcIsStaff = $derived(appStore.lastRtfScan?.formatCode === "extStaff");
+  // 第 15 列口径单点见 appStore（isStaffRoster/basedLabel/basedValue）。
 
   // ---- 台内 UID 查询（球员源第三来源，与名单行「送生图」/单人替换「用此球员生成」同入口）----
   let srcUidInput = $state("");
@@ -322,12 +322,14 @@
     }
   }
 
-  async function onGenerate() {
+  /** meta（同参重生）：结果卡「再生成」传入该图记录的 {size, seed} 按原参重出；
+   *  CTA 与内联重试不传 meta，用工作台当前值。 */
+  async function onGenerate(meta?: { size: string; seed: string }) {
     // Key 框有未提交内容时先串行提交，避免 change 异步与生成竞态（提交失败中止生成）。
     if (keyInput.trim()) await commitKey();
     genError = "";
     try {
-      await generate();
+      await generate(meta);
     } catch (e) {
       // 生成错误走结果区内联错误条（可就地重试），不再用系统弹窗打断。
       genError = e instanceof Error ? e.message : String(e);
@@ -355,20 +357,6 @@
       await message(t.gen.saveReplace.ok(sp.name), { title: t.dialog.info });
     } catch (e) {
       await showError(e); // 批量替换进行中被拒等后端错误走统一弹窗
-    }
-  }
-
-  async function onSave(imgId: string) {
-    const target = await save({
-      defaultPath: `${imgId}.png`,
-      filters: [{ name: "PNG", extensions: ["png"] }],
-    });
-    if (!target) return;
-    try {
-      await api.saveGeneratedImage(imgId, target);
-      await message(t.gen.saved, { title: t.dialog.info });
-    } catch (e) {
-      await showError(e);
     }
   }
 
@@ -450,16 +438,7 @@
           title={t.gen.keySubmit}
           onclick={commitKey}
         >
-          <svg
-            class="ic"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.4"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true">{@html icons.check.body}</svg
-          >
+          <Icon name="check" class="ic" stroke={2.4} />
         </button>
         {#if imageaiStore.keysSet[imageaiStore.providerId]}
           <span class="key-ok" title={t.gen.keyBarSetPlaceholder}
@@ -479,16 +458,7 @@
       {connStatus}
     </button>
     <button class="btn sm" onclick={() => (providerOpen = true)}>
-      <svg
-        class="ic"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true">{@html icons.gear.body}</svg
-      >
+      <Icon name="gear" class="ic" />
       {t.gen.providerSettings}
     </button>
   </section>
@@ -496,16 +466,7 @@
   <!-- 就绪卡：Key 未设置时条件出现，一句话说差什么 + 直达修复（聚焦上方 Key 输入框），设好自动消失 -->
   {#if !keySet}
     <div class="conn-warn" role="status">
-      <svg
-        class="ic"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.8"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true">{@html icons.alert.body}</svg
-      >
+      <Icon name="alert" class="ic" stroke={1.8} />
       <span>{t.gen.keyMissingHint}</span>
       <button class="btn sm" onclick={focusKey}>{t.gen.keyGoSet}</button>
     </div>
@@ -581,7 +542,7 @@
                 <span class="meta">{t.table.colAge} <b>{srcRec.detailed.age.trim() || "—"}</b></span>
                 <span class="meta">{t.table.colHeight} <b>{srcRec.detailed.height.trim() || "—"}</b></span>
                 <span class="meta">{t.table.colClub} <b>{srcRec.detailed.club.trim() || "—"}</b></span>
-                <span class="meta">{srcIsStaff ? t.table.colJob : t.table.colBased} <b>{(srcIsStaff ? srcRec.detailed.preferredJob : srcRec.detailed.based).trim() || "—"}</b></span>
+                <span class="meta">{appStore.basedLabel} <b>{basedValue(srcRec.detailed).trim() || "—"}</b></span>
                 <span class="meta">{t.table.colCa} <b>{srcRec.detailed.ca.trim() || "—"}</b></span>
                 <span class="meta">{t.table.colPa} <b>{srcRec.detailed.pa.trim() || "—"}</b></span>
               {/if}
@@ -680,17 +641,7 @@
           </label>
         {/if}
         <button class="neg-toggle" onclick={() => (showNeg = !showNeg)}>
-          <svg
-            class="ic"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-            >{@html (showNeg ? icons.chevronUp : icons.chevronDown).body}</svg
-          >
+          <Icon name={showNeg ? "chevronUp" : "chevronDown"} class="ic" />
           {t.gen.toggleNegative}
           {#if caps && !caps.supportsNegativePrompt}
             <span class="neg-off">{t.gen.negativeNotSent}</span>
@@ -829,16 +780,7 @@
               title={t.gen.seedRandomTitle}
               onclick={() => (imageaiStore.seed = "")}
             >
-              <svg
-                class="ic"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true">{@html icons.dice.body}</svg
-              >
+              <Icon name="dice" class="ic" stroke={1.8} />
             </button>
           </div>
         </section>
@@ -849,7 +791,7 @@
         disabled={genDisabled}
         title={sizeError ??
           (promptOver ? t.gen.promptTooLong(promptLimit) : "")}
-        onclick={onGenerate}
+        onclick={() => onGenerate()}
       >
         {#if imageaiStore.generating}
           <span class="cta-spin" aria-hidden="true"></span>
@@ -871,16 +813,7 @@
           class:on={dockOpen}
           onclick={() => (dockOpen = !dockOpen)}
         >
-          <svg
-            class="ic"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true">{@html icons.play.body}</svg
-          >
+          <Icon name="play" class="ic" filled={false} />
           {t.gen.queue.tabQueue}
           {#if queueBadge > 0}<span class="queue-badge">{queueBadge}</span>{/if}
         </button>
@@ -897,31 +830,13 @@
       <!-- 内联错误条：生成失败就地展示 + 重试（不再弹系统窗） -->
       {#if genError}
         <div class="inline-alert" role="alert">
-          <svg
-            class="ia-ic"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true">{@html icons.alert.body}</svg
-          >
+          <Icon name="alert" class="ia-ic" stroke={1.8} />
           <div class="ia-body">
             <span class="ia-title">{t.gen.genErrorTitle}</span>
             <span class="ia-msg" title={genError}>{genError}</span>
           </div>
-          <button class="btn sm ia-retry" onclick={onGenerate}>
-            <svg
-              class="ic"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true">{@html icons.refresh.body}</svg
-            >
+          <button class="btn sm ia-retry" onclick={() => onGenerate()}>
+            <Icon name="refresh" class="ic" />
             {t.gen.retry}
           </button>
           <button
@@ -929,29 +844,14 @@
             title={t.gen.closeAlert}
             onclick={() => (genError = "")}
           >
-            <svg
-              viewBox="0 0 24 24"
-              width="13"
-              height="13"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              aria-hidden="true">{@html icons.x.body}</svg
-            >
+            <Icon name="x" size={13} />
           </button>
         </div>
       {/if}
 
       {#if imageaiStore.results.length === 0 && !imageaiStore.generating}
         <div class="empty res-empty">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.6"
-            aria-hidden="true">{@html icons.image.body}</svg
-          >
+          <Icon name="image" stroke={1.6} />
           <p>{t.gen.empty}</p>
         </div>
       {:else}
@@ -982,7 +882,7 @@
                 title={t.gen.viewLarge}
                 onclick={() => (lightboxUrl = img.url)}
               >
-                <img src={img.url} alt="generated" />
+                <img src={img.url} alt={t.gen.resultAlt} loading="lazy" decoding="async" />
               </button>
               <div class="img-meta mono">
                 <span>{img.size ? img.size.replace("*", "×") : ""}</span>
@@ -991,19 +891,10 @@
               <div class="actions">
                 <button
                   class="btn sm"
-                  onclick={() => onSave(img.id)}
+                  onclick={() => saveGeneratedImageAs(img.id)}
                   title={t.gen.save}
                 >
-                  <svg
-                    class="ic"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true">{@html icons.download.body}</svg
-                  >
+                  <Icon name="download" class="ic" />
                   {t.gen.save}
                 </button>
                 <!-- 保存并替换：需数据源球员，无数据源禁用并提示入口 -->
@@ -1020,50 +911,23 @@
                 <button
                   class="btn sm"
                   title={t.gen.regenTitle}
-                  onclick={onGenerate}
+                  onclick={() => onGenerate({ size: img.size ?? '', seed: img.seed ?? '' })}
                 >
-                  <svg
-                    class="ic"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true">{@html icons.refresh.body}</svg
-                  >
+                  <Icon name="refresh" class="ic" />
                 </button>
                 <button
                   class="btn sm icon-as-btn"
                   title={t.gen.viewLarge}
                   onclick={() => (lightboxUrl = img.url)}
                 >
-                  <svg
-                    class="ic"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true">{@html icons.zoom.body}</svg
-                  >
+                  <Icon name="zoom" class="ic" />
                 </button>
                 <button
                   class="icon-btn"
                   title={t.gen.removeImageTitle}
                   onclick={() => removeResult(img.id)}
                 >
-                  <svg
-                    viewBox="0 0 24 24"
-                    width="13"
-                    height="13"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    aria-hidden="true">{@html icons.x.body}</svg
-                  >
+                  <Icon name="x" size={13} />
                 </button>
               </div>
             </div>
@@ -1092,22 +956,13 @@
         aria-modal="true"
         aria-label={t.gen.viewLarge}
       >
-        <img src={lightboxUrl} alt="generated preview" />
+        <img src={lightboxUrl} alt={t.gen.previewAlt} />
         <button
           class="icon-btn lb-close"
           title={t.gen.closePreview}
           onclick={() => (lightboxUrl = null)}
         >
-          <svg
-            viewBox="0 0 24 24"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            aria-hidden="true">{@html icons.x.body}</svg
-          >
+          <Icon name="x" size={16} />
         </button>
       </div>
     </div>
@@ -1208,7 +1063,7 @@
     font-size: 12.5px;
     color: var(--text-2);
   }
-  .conn-warn .ic {
+  .conn-warn :global(.ic) {
     color: var(--warn);
     flex-shrink: 0;
   }
@@ -1353,11 +1208,7 @@
     display: flex;
     flex-direction: column;
   }
-  .hint {
-    margin: 7px 0 5px;
-    color: var(--text-3);
-    font-size: 12px;
-  }
+  /* .hint 已提升为全局工具类（app.css），此处不再重复定义 */
   .chips {
     display: flex;
     flex-wrap: wrap;
@@ -1569,7 +1420,7 @@
     overflow-y: auto;
   }
   .img-card {
-    border: 1px solid var(--border);
+    border: 1px solid var(--hairline-2);
     border-radius: var(--radius-md);
     overflow: hidden;
     background: var(--bg-surface);
@@ -1616,7 +1467,7 @@
     padding-left: 0;
     padding-right: 0;
   }
-  .ic {
+  :global(.ic) {
     width: 13px;
     height: 13px;
   }
@@ -1632,7 +1483,7 @@
     border-radius: var(--radius-md);
     background: var(--danger-soft);
   }
-  .ia-ic {
+  :global(.ia-ic) {
     width: 17px;
     height: 17px;
     color: var(--danger);

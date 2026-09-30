@@ -1,19 +1,19 @@
-<!-- 头像缩略图（+ 悬停/点击放大气泡）：「名单预览 / 快照预览」共用。
+<!-- AvatarThumb · 头像缩略图：名单预览 / 快照预览 / 生图台各处共用的缩略图 + 悬停/点击放大气泡。
      单人替换是单张大图预览（PlayerViewer 的球员卡），不用本组件，只共用 blob 加载器。
 
      分工：
      - 缩略图的 blob 由父组件用 createAvatarBlobs 统一加载后经 url 传入（一批图同一套回收账）；
-     - 气泡里的原图由本组件自己读（blob 谁创建谁释放：若把行内那个 URL 交给气泡缓存，
+     - 气泡里的原图由本组件自己读（blob 谁创建谁释放：把行内那个 URL 交给气泡缓存的话，
        气泡失效时的 revoke 会把行内缩略图一起弄坏）；
-     - path（图片绝对路径）为空 = 没找到图，渲染占位符。
-     - path 变化（同一 UID 换了图）时用 {#key} 重建气泡：否则气泡缓存里会留着旧图。 -->
+     - path（图片绝对路径）为空 = 没找到图，渲染占位符
+     - path 变化（同一 UID 换了图）时用 {#key} 重建气泡：否则气泡缓存里会留着旧图 -->
 <script lang="ts">
   import { loadImageBlobUrl } from "../../services/images";
   import { t } from "../../text"; // 全局文案常量
   import AvatarPopover, {
     type AvatarEntry,
     type AvatarPopoverApi,
-  } from "./AvatarPopover.svelte"; // 放大气泡本体（缓存/钉住/延迟关闭都在其中）
+  } from "./AvatarPopover.svelte"; // 放大气泡本体：缓存/钉住/延迟关闭都在其中
 
   let {
     itemKey, // 气泡缓存键 + 图片 alt（一般传 UID）
@@ -29,18 +29,18 @@
     placeholder?: string;
   } = $props();
 
-  /** 气泡取头像：行内已确认路径存在，直接读字节包成 blob URL（读失败由气泡统一兜成文案）。 */
+  /** 气泡取头像：行内已有绝对路径，直接读字节包成 blob URL（读失败由气泡统一兜成文案） */
   async function resolve(): Promise<AvatarEntry> {
     if (!path) return { url: null, err: t.table.avatarNotFound };
     return { url: await loadImageBlobUrl(path), err: "" };
   }
 
-  // 气泡实例（bind:this）：缩略图按钮把鼠标/键盘事件接到它的 open/scheduleClose/close 上。
+  // 气泡实例（bind:this）：缩略图按钮的鼠标/键盘事件接到它的 open/scheduleClose/close
   let pop = $state<AvatarPopoverApi | null>(null);
 </script>
 
 {#if url && path}
-  <!-- 缩略图本身即触发器：悬停/聚焦弹大气泡、点击钉住。 -->
+  <!-- 缩略图本身即触发器：悬停/聚焦弹大气泡、点击钉住 -->
   <button
     type="button"
     class="thumb-btn"

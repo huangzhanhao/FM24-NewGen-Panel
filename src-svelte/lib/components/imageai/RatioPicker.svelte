@@ -1,8 +1,8 @@
-<!-- 画面方向选择器：按当前模型尺寸预设解析比例并归组（1:1/3:4/4:3/9:16/16:9），
-     用真实比例的矩形轮廓单选；点选即把该比例对应的官方推荐尺寸写入。
-     预设里一个可识别比例都没有时（如纯自由尺寸未给预设）调用方不渲染本组件。 -->
+<!-- RatioPicker · 画面方向选择器：按当前模型尺寸预设解析比例并归组（1:1/3:4/4:3/9:16/16:9），
+     以真实比例的矩形轮廓单选，点选即写入该比例对应的官方推荐尺寸
+     预设里一个可识别比例都没有时（如纯自由尺寸未给预设）本组件不渲染任何内容 -->
 <script lang="ts">
-  import { t } from "../../text"; // 全局文案常量
+  import { t } from "../../text";
 
   interface Props {
     sizes: string[];
@@ -11,13 +11,13 @@
   }
   let { sizes, value, onselect }: Props = $props();
 
-  /** 归一化解析 `1024*1024` / `1024x1024` → [w, h]。 */
+  /** 归一化解析 `1024*1024` / `1024x1024` → [w, h] */
   function parse(s: string): [number, number] | null {
     const m = /^(\d+)[x*](\d+)$/.exec(s.trim());
     return m ? [Number(m[1]), Number(m[2])] : null;
   }
 
-  // 目标比例（短边/长边 → 标签），顺序即展示顺序。
+  // 目标比例为 宽:高 → 标签，数组顺序即展示顺序
   const RATIOS = [
     { label: '1:1', w: 1, h: 1 },
     { label: '3:4', w: 3, h: 4 },
@@ -26,7 +26,7 @@
     { label: '16:9', w: 16, h: 9 },
   ] as const;
 
-  /** 从预设归组：每组取第一个命中的预设作为「推荐档」（配置已按官方顺序给好）。 */
+  /** 从预设归组：每组取首个命中的预设作为「推荐档」（配置已按官方顺序给好） */
   const groups = $derived(
     RATIOS.map((r) => {
       const target = r.w / r.h;
@@ -49,7 +49,7 @@
     );
   });
 
-  // 矩形轮廓尺寸：最长边 26px、最短边不低于 10px，保证 16:9 仍可辨。
+  // 矩形轮廓尺寸：最长边 26px、最短边不低于 10px，保证 16:9 仍可辨
   function box(w: number, h: number): { width: number; height: number } {
     const long = 26;
     const short = Math.max(10, Math.round((long * Math.min(w, h)) / Math.max(w, h)));
@@ -107,7 +107,7 @@
     background: var(--accent-soft);
     color: var(--accent);
   }
-  /* 比例轮廓：未选中描边色，选中填充主题色 */
+  /* 比例轮廓：currentColor 描边，选中态只随 .ratio.active 换色 */
   .shape {
     border: 1.5px solid currentColor;
     border-radius: 3px;

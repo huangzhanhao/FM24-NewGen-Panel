@@ -92,7 +92,6 @@ export const api = {
   // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
   addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),
   removeFromQueue: (ids: string[]) => invoke<QueueEntry[]>('remove_from_queue', { ids }),
-  clearQueue: () => invoke<QueueEntry[]>('clear_queue'),
   startQueue: () => invoke<void>('start_queue'),
   cancelQueue: () => invoke<void>('cancel_queue'),
   queryQueue: () => invoke<QueueEntry[]>('query_queue'),

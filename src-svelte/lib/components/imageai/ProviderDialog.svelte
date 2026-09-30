@@ -1,4 +1,4 @@
-<!-- 服务商设置：列表/新建/编辑/删除；Key 掩码输入仅发会话内存。复用全局 modal 类。 -->
+<!-- ProviderDialog · 服务商设置弹窗：列表/新建/编辑/删除；Key 掩码输入只进后端会话内存，复用全局 modal 类 -->
 <script lang="ts">
   import { confirm, message } from "@tauri-apps/plugin-dialog";
   import { t } from "../../text";
@@ -32,8 +32,8 @@
       if (!editing.id) editing.id = `p-${crypto.randomUUID()}`;
       if (!editing.defaultModel && editing.models[0])
         editing.defaultModel = editing.models[0].model;
-      await saveProvider($state.snapshot(editing)); // config 整包写回 + 悬空兜底见 store action
-      // 走 store 封装：后端记 Key（会话内存）+ 前端 keysSet 标记「已设置」，顶栏徽标同步点亮
+      await saveProvider($state.snapshot(editing)); // config 整包写回 + 悬空回退见 store action
+      // 后端记 Key（仅会话内存）+ 前端 keysSet 标记「已设置」，顶栏徽标同步点亮
       if (keyInput) await setProviderKey(editing.id, keyInput);
       await message(t.gen.providerSaved, { title: t.dialog.info });
       editing = null;
@@ -91,7 +91,7 @@
           </div>
         {:else}
           <div class="form">
-            <!-- ID 是 upsert_provider 的匹配键：编辑态只读，否则改 ID 会「新增一条、旧条目仍在」（Key 也留在旧 id 上）。 -->
+            <!-- ID 是 upsert_provider 的匹配键：编辑态只读，改 ID 等于新增一条、旧条目仍在（Key 也留在旧 id 上） -->
             <div class="f-row">
               <label for="pv-id">{t.gen.providerIdLabel}</label><input
                 id="pv-id"
@@ -168,7 +168,7 @@
 {/if}
 
 <style>
-  /* 只写布局：紧凑按钮尺寸是控件规格，已提到 app.css 的 button.btn.sm（§2 的复用原则） */
+  /* 只写布局：紧凑按钮尺寸是控件规格，统一由 app.css 的 button.btn.sm 给 */
   .p-list {
     display: flex;
     flex-direction: column;

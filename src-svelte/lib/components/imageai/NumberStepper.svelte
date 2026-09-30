@@ -1,7 +1,7 @@
-<!-- 生图张数步进器：30px 高，[−] 数值 [+]；min/max 到界硬禁用。
-     max<=1（火山单图模型）时调用方不应渲染本控件（改显示说明文字）。 -->
+<!-- NumberStepper · 生图张数步进器：30px 高的 [−] 数值 [+]，min/max 到界硬禁用；
+     max<=1 的单图模型（火山 seedream、百炼 z-image 等）调用方不渲染本控件、改显示说明文字 -->
 <script lang="ts">
-  import { t } from "../../text"; // 全局文案常量
+  import { t } from "../../text";
 
   interface Props {
     value: number;

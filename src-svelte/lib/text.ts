@@ -245,8 +245,6 @@ export const t = {
       goArchive: '去存档资料台',
       /** 资料降级：uid 不在当前名单（可能来自上一次扫描），仅姓名/UID 可信 */
       noProfile: '未在当前名单中找到该球员的资料，生成时变量可能取不到值',
-      /** 把当前数据源球员单独投进队列（多人批量走名单工具行） */
-      enqueue: '加入队列',
       /** 名单预览行尾按钮：把该行球员设为生图数据源并跳到 AI 生图 */
       sendBtn: '送生图',
       sendTitle: (name: string) => `以 ${name} 为数据源生成头像`,
@@ -302,7 +300,10 @@ export const t = {
       scopeTitle: (scope: string) => `入队时 ${scope}`,
       startBtn: '启动生成',
       cancelBtn: '取消生成',
-      clearBtn: '清空队列',
+      /** 「查看单人」：把唯一勾选的队列条目转入「球员源·单人」卡（原「清空队列」职责由全选+移除覆盖） */
+      viewSingle: '查看单人',
+      viewSingleTitle: (name: string) => `把 ${name} 转入「球员源·单人」卡`,
+      viewSingleHint: '勾选一条队列条目后，可将其球员转入「球员源·单人」卡',
       removeBtn: '移除选中',
       addBtn: (n: number) => `加入队列（${n}）`,
       statusQueued: '排队中',
@@ -314,7 +315,6 @@ export const t = {
       count: (total: number) => `共 ${total} 条`,
       startConfirm: (n: number) => `开始批量生成 ${n} 个排队任务？将逐条调用服务商接口并产生费用。`,
       cancelConfirm: '取消后未启动的条目将标记为已取消，正在生成的会跑完。确定取消？',
-      clearConfirm: (n: number) => `清空队列全部 ${n} 条条目？状态记录一并删除，无法恢复。`,
       removeConfirm: (n: number) => `移除选中的 ${n} 条条目？`,
       empty: '队列为空。在「名单预览」勾选球员后点「加入队列」，即可批量生成。',
       enqueued: (n: number) => `已加入 ${n} 条生成任务`,
@@ -322,11 +322,6 @@ export const t = {
       progressLabel: '批量生成进度',
       finishedSummary: (finished: number, failed: number, total: number) =>
         `批量生成结束：成功 ${finished} · 失败 ${failed} · 共 ${total} 条`,
-      // 队列坞（贴结果区底部的可折叠批量面板）
-      queuedBadge: (n: number) => `${n} 排队`,
-      runningBadge: (n: number) => `${n} 生成中`,
-      expandTitle: '展开生成队列',
-      collapseTitle: '收起队列',
       retryEntry: '重试本条',
       viewImages: '查看图片',
       collapseImages: '收起图片',

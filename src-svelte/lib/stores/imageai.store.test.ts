@@ -77,8 +77,7 @@ describe('image store', () => {
   });
 
   it('selectProvider resets model-dependent fields', () => {
-    imageaiStore.config = cfg;
-    imageaiStore.size = 'old';
+    imageaiStore.config = cfg;    imageaiStore.size = 'old';
     imageaiStore.n = 9;
     selectProvider('p1');
     expect(imageaiStore.model).toBe('m2');
@@ -315,5 +314,44 @@ describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
     expect(sent?.[0].status).toBe('queued');
     expect(sent?.[0].error).toBe('');
     expect(sent?.[0].req).toEqual(failed.req);
+  });
+});
+
+describe('promptOver（提示词超限派生，D3 跨组件单点）', () => {
+  beforeEach(() => {
+    imageaiStore.config = cfg;
+    imageaiStore.providerId = 'p1';
+    imageaiStore.model = 'm2';
+  });
+
+  it('模型未声明 maxPromptChars：无上限，恒不超限', () => {
+    imageaiStore.prompt = 'x'.repeat(50);
+    expect(imageaiStore.promptOver).toBe(false);
+  });
+
+  it('超出 maxPromptChars：超限；恰好等于上限：不超限', () => {
+    imageaiStore.config = {
+      ...cfg,
+      providers: [
+        {
+          ...cfg.providers[0],
+          models: [
+            {
+              model: 'mlimit',
+              label: 'MLimit',
+              capabilities: {
+                ...cfg.providers[0].models[0].capabilities,
+                maxPromptChars: 10,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    imageaiStore.model = 'mlimit';
+    imageaiStore.prompt = 'x'.repeat(11);
+    expect(imageaiStore.promptOver).toBe(true);
+    imageaiStore.prompt = 'x'.repeat(10);
+    expect(imageaiStore.promptOver).toBe(false);
   });
 });

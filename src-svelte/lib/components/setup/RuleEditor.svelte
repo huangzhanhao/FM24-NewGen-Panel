@@ -1,6 +1,6 @@
-<!-- 标准规则编辑对话框：直接查看/修改/保存 data/rules/ 下的 standard2|standard3.json。
-     顶部 chip 切换标准二/三；切换与关闭前若有未保存修改会弹确认；
-     保存时后端先按该标准 schema 校验（非法 JSON 直接报错，不会写入坏规则）。 -->
+<!-- RuleEditor · 标准规则编辑对话框：直接查看/修改/保存 data/rules/ 下的 standard2|standard3.json。
+     顶部 chip 切换标准二/三，切换与关闭前若有未保存修改会弹确认；
+     保存时后端先按该标准 schema 校验，非法 JSON 直接报错、不会写入坏规则 -->
 <script lang="ts">
   import { ask } from '@tauri-apps/plugin-dialog';
   import { api } from '../../services/api';
@@ -17,31 +17,31 @@
 
   let open = $state(false);
   let active = $state<RuleName>('standard2');
-  let text = $state('');      // 编辑区内容
-  let baseline = $state('');  // 载入时的内容（用于判断有无未保存修改）
+  let text = $state('');
+  let baseline = $state('');  // 载入时的内容（dirty 判定基准）
   let status = $state('');    // 行内提示（保存成功等）
   let editorEl = $state<HTMLTextAreaElement | null>(null); // 打开即聚焦的编辑区
 
   const dirty = $derived(text !== baseline);
 
-  /** 由父组件调用（bind:this 后 openEditor()）打开对话框并载入当前标准内容。 */
+  /** 父组件经 bind:this 调用：打开对话框并载入当前标准的内容 */
   export function openEditor() {
     open = true;
-    void load(active).then(() => editorEl?.focus()); // 载入后焦点直接进编辑区
+    void load(active).then(() => editorEl?.focus());
   }
 
-  /** Esc = 点关闭（有未保存修改时 close() 内部会先弹确认）。 */
+  /** Esc 等同点关闭：有未保存修改时 close() 内部会先弹确认 */
   function onWindowKey(e: KeyboardEvent) {
     if (e.key === 'Escape' && open) void close();
   }
 
-  /** 载入指定标准的规则文件内容，并把当前内容记为 baseline（用于判断有无未保存修改）。 */
+  /** 载入指定标准的规则文件内容，并把载入值记为 baseline */
   async function load(name: RuleName) {
     try {
       const got = await api.readRuleFile(name);
       // 【必须校验 active】快速连点两个标准 chip 时两个请求会乱序返回：
       // 晚到的 standard3 内容会盖进编辑区，用户一按保存就把它写进 standard2.json
-      //（后端只校目标文件的 schema 形状，语义错的内容照样被原子写入）。
+      //（后端只校目标文件的 schema 形状，语义错的内容照样被原子写入）
       if (name !== active) return;
       text = got;
       baseline = got;
@@ -52,7 +52,7 @@
     }
   }
 
-  /** 切换标准；有未保存修改时先弹确认，用户放弃才切换。 */
+  /** 切换标准：有未保存修改时先弹确认，用户放弃才切 */
   async function switchTo(name: RuleName) {
     if (name === active) return;
     if (dirty && !(await ask(t.ruleEditor.unsavedSwitch(LABELS[active]), { title: t.ruleEditor.unsavedTitle }))) return;
@@ -60,17 +60,17 @@
     await load(active);
   }
 
-  /** 保存当前标准：后端按 schema 校验并原子写回；成功后 baseline 同步为当前内容。 */
+  /** 保存当前标准：后端按 schema 校验并原子写回，成功后 baseline 同步 */
   async function save() {
     try {
       await api.saveRuleFile(active, text);
       baseline = text;
       status = t.ruleEditor.savedStatus;
       await refreshSnapshot(); // 快照携带其他状态，顺带保持全局一致
-    } catch (e) { await showError(e); } // JSON 校验错误（后端拒绝写入坏规则）
+    } catch (e) { await showError(e); }
   }
 
-  /** 关闭对话框；有未保存修改时先弹确认。 */
+  /** 关闭对话框：有未保存修改时先弹确认 */
   async function close() {
     if (dirty && !(await ask(t.ruleEditor.unsavedClose(LABELS[active]), { title: t.ruleEditor.unsavedTitle }))) return;
     open = false;
@@ -81,7 +81,7 @@
 <svelte:window onkeydown={onWindowKey} />
 
 {#if open}
-  <!-- 遮罩：点击空白处关闭（经确认）。 -->
+  <!-- 遮罩：点空白处关闭（同样经未保存确认） -->
   <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
     <div
       class="modal"

@@ -1,7 +1,9 @@
-<!-- 根组件：定义整个应用的布局骨架，把侧边栏、主区（配置卡/替换面板/结果区）、状态栏、日志抽屉组合在一起。 -->
+<!-- 根组件：只做布局骨架与启动装配，不含业务规则。
+     骨架 = 侧边栏 + 主区（按 ui.workbench 切换三个工作台）+ 状态栏 + 日志抽屉（浮层，置于主布局外）。
+     装配 = 首帧前写 data-theme（防主题闪烁）、挂载时订阅后端事件（替换流水线经 notifyReplaceResult
+     弹收尾提示，生图队列订阅与队列坞是否挂载无关）。前置条件提示等业务规则单点在 stores 里。 -->
 <script lang="ts">
-  import { onMount } from "svelte"; // 生命周期：组件挂载后执行一次
-  import { message } from "@tauri-apps/plugin-dialog"; // 原生弹框
+  import { onMount } from "svelte";
   import Sidebar from "./lib/components/layout/Sidebar.svelte";
   import TopNav from "./lib/components/layout/TopNav.svelte";
   import SetupCard from "./lib/components/setup/SetupCard.svelte";
@@ -11,43 +13,21 @@
   import ImageAiPanel from "./lib/components/imageai/ImageAiPanel.svelte";
   import StatusBar from "./lib/components/layout/StatusBar.svelte";
   import LogDrawer from "./lib/components/layout/LogDrawer.svelte";
-  import { t } from "./lib/text"; // 全局文案常量（用户可见文字统一在此维护）
-  import { appStore, initListeners } from "./lib/stores/app.svelte"; // 订阅后端事件的初始化函数
-  import { initQueueListeners } from "./lib/stores/imageai.svelte"; // 生图队列事件订阅（进程级，与队列坞是否挂载无关）
-  import { showError } from "./lib/ui/dialog"; // 后台队列刷新失败时弹原生错误框
-  import { applyTheme, ui } from "./lib/stores/ui.svelte"; // 深/浅主题令牌切换 + 当前工作台
+  import { t } from "./lib/text";
+  import { appStore, initListeners } from "./lib/stores/app.svelte";
+  import { initQueueListeners } from "./lib/stores/imageai.svelte";
+  import { notifyReplaceResult, showError } from "./lib/ui/dialog";
+  import { applyTheme, ui } from "./lib/stores/ui.svelte";
 
-  // 组件初始化即在 <html> 上写好 data-theme（首帧就是上次记忆的主题，不闪烁）。
+  // 首帧前就得在 <html> 上写好 data-theme：晚一帧就会按默认主题闪一下。
   applyTheme();
 
-  // 挂载后订阅后端事件；回调在替换结束时弹窗提示（完成/失败）。
   onMount(() => {
-    initListeners(async (result) => {
-      if (result === "finished")
-        await message(t.app.replaceFinished, { title: t.brand });
-      else if (result === "failed")
-        await message(t.app.replaceFailed, { title: t.dialog.error });
-    });
+    initListeners(notifyReplaceResult);
     // 队列事件订阅不挂在队列坞上：切走 AI 台期间 running/finished 仍照常入账，
     // 侧栏 queueRunning 护栏与回台后的快照/收尾摘要才不会因组件卸载而失真。
     void initQueueListeners(showError);
   });
-
-  // 以下两条提示原挂在步骤引导（Stepper）下方，随改造一并迁到替换台顶部：
-  // 它们讲的都是替换的前置条件，只在替换台出现才说得通。
-  const missing = $derived(
-    [
-      !appStore.snapshot || appStore.snapshot.currentProfile === "No Profile"
-        ? t.replace.needProfile
-        : "",
-      appStore.snapshot && !appStore.snapshot.currentGroup
-        ? t.replace.needGroup
-        : "",
-      appStore.snapshot && !appStore.snapshot.currentRtf
-        ? t.replace.needRtf
-        : "",
-    ].filter(Boolean),
-  );
 </script>
 
 <div class="app">
@@ -64,17 +44,16 @@
           {t.replace.browseNotice(appStore.selectedProfile)}
         </p>
       {/if}
-      {#if !appStore.replaceReady && missing.length > 0}
+      {#if appStore.missingPrerequisites.length > 0}
         <p class="hint muted small">
-          {t.replace.todoPrefix}{missing.join(" · ")}
+          {t.replace.todoPrefix}{appStore.missingPrerequisites.join(" · ")}
         </p>
       {/if}
-      <!-- 读写分栏：左栏 320 写（批量替换 + 单人替换同屏常驻，不需下钻/返回），右栏弹性读
-           （名单/快照结果视图独占全高）。窗口 <1100 时退化为上下堆叠（app.css 的 wb-split 断点）。 -->
+      <!-- 读写分栏：左栏 320 写（批量+单人常驻同栏），右栏弹性读；<1100 退化为上下堆叠（app.css 的 wb-split 断点）。 -->
       <div class="wb-split">
         <div class="wb-write">
           <ReplacePanel />
-          <!-- 单人替换卡自带外壳（.viewer-card 同时是窄栏容器查询锚点），与 ReplacePanel 同栏常驻。 -->
+          <!-- .viewer-card 同时是窄栏容器查询锚点，单人替换卡据此感知本栏宽度。 -->
           <PlayerViewer />
         </div>
         <RosterSnapshotTabs bind:view={appStore.resultsView} dense />
@@ -86,5 +65,5 @@
   <StatusBar />
 </div>
 
-<!-- 日志抽屉浮在最上层（由 ui.logOpen 控制显示/隐藏），故放在主布局之外。 -->
+<!-- 浮在最上层，由 ui.logOpen 控制显隐，故置于主布局之外。 -->
 <LogDrawer />

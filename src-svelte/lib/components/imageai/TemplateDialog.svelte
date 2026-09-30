@@ -1,4 +1,4 @@
-<!-- 提示词模板 CRUD，复用全局 modal 类。 -->
+<!-- TemplateDialog · 提示词模板管理弹窗：模板 CRUD，复用全局 modal 类 -->
 <script lang="ts">
   import { confirm } from '@tauri-apps/plugin-dialog';
   import { deleteTemplate, imageaiStore, saveTemplate } from '../../stores/imageai.svelte';
@@ -17,14 +17,14 @@
     if (!editing) return;
     try {
       if (!editing.id) editing.id = `t-${crypto.randomUUID()}`;
-      await saveTemplate($state.snapshot(editing)); // config 整包写回 + 悬空兜底见 store action
+      await saveTemplate($state.snapshot(editing)); // config 整包写回 + 悬空回退见 store action
       editing = null;
     } catch (e) {
       await showError(e);
     }
   }
 
-  // 形参不要叫 t：会遮蔽 text.ts 的 t 对象。
+  // 形参不要叫 t：会遮蔽 text.ts 的 t 对象
   async function onDelete(tpl: PromptTemplate) {
     if (!(await confirm(t.gen.deleteTemplateConfirm(tpl.name), { title: t.dialog.warning }))) return;
     try {
@@ -75,7 +75,7 @@
 {/if}
 
 <style>
-  /* 只写布局；紧凑按钮尺寸走 app.css 的 button.btn.sm */
+  /* 只写布局：紧凑按钮尺寸是控件规格，统一由 app.css 的 button.btn.sm 给 */
   .t-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
   .btns { display: flex; gap: 6px; }
   label { display: block; margin: 8px 0 4px; color: var(--text-2); font-size: 12.5px; }

@@ -1,9 +1,7 @@
 /**
  * 全局应用状态与后端事件订阅：前端与后端交互的中枢。
- * listen 订阅后端 emit 的事件（与命令 invoke 相反：事件由后端主动推送）。
- *
- * 状态用 $state 声明；命令返回的快照整体替换 appStore.snapshot。
- * 事件订阅是进程级副作用，initListeners 由 App 挂载时调用一次（内部用 inited 防重复）。
+ * appStore 集中持有后端快照与两条进度通道，派生 getter 单点维护核心业务规则，各组件只消费；
+ * listen 订阅后端主动 emit 的事件（与命令 invoke 相反），initListeners 由 App 挂载时调用一次。
  */
 import { listen } from '@tauri-apps/api/event';
 import { api } from '../services/api';
@@ -16,72 +14,62 @@ export type ReplaceResult = 'finished' | 'cancelled' | 'failed' | '';
 
 /** 全局应用状态（runes，响应式）。snapshot 由命令返回值整体替换。 */
 export const appStore = $state({
-  snapshot: null as AppSnapshot | null, // 后端回传的全局快照（真实激活态；初始为 null，启动后填充）
-  /** 浏览态预览快照：下拉选择存档但未点「激活」时的展示数据（null = 无浏览态）。
-   *  展示类组件（侧栏/当前任务卡）优先用它；操作类组件（替换执行等）始终用 snapshot。 */
-  profilePreview: null as AppSnapshot | null,
-  /** 下拉选中的存档名（浏览态）。与 snapshot.currentProfile 不同 = 正在浏览未激活的存档。 */
-  selectedProfile: 'No Profile',
-  /** 当前替换进度（替换流水线通道）：状态文字 + 百分比 + 阶段内的「第 n 个 / 共 total 个」。
-   *  形状与下面的 task 一致，StatusBar 才能对两条通道用同一段计数渲染逻辑。 */
+  snapshot: null as AppSnapshot | null,        // 后端回传的全局快照（真实激活态；初始 null，启动后填充）
+  profilePreview: null as AppSnapshot | null,  // 浏览态预览快照：下拉选档未点「激活」时的展示数据（null=无浏览态）
+  selectedProfile: 'No Profile',               // 下拉选中的存档名；≠ snapshot.currentProfile 即处于浏览态
+  /** 替换流水线进度通道：状态文字 + 百分比 + 阶段内「第 n 个 / 共 total 个」。
+   *  与 task 同形状，StatusBar 才能用同一段计数渲染逻辑渲染两条通道。 */
   progress: { status: '', value: 0, current: 0, total: 0 } as ProgressPayload,
-  /** 「检查完整性 / 扫描头像 / 扫描RTF / 读取快照」四个轻量任务的实时进度：状态文字 + 百分比 +
-   *  「第 n 个 / 共 total 个」。与上面的 progress（替换流水线）分两条通道，互不干扰。
-   *  生命周期由 runTask 管：点击时清成 `{status: 任务名, value: 0}`，命令成功后补 value=100
-   *  ——所以「taskRunning 为 false 但 value>0」表示「刚跑完」，状态栏会保留这条 100%
-   *  直到 scheduleBarClear 排的 20 秒到点；替换一开始（replace:progress）也会把它清掉。 */
+  /** 轻量任务（检查完整性/扫描头像/扫描RTF/读取快照）的进度通道，与替换的 progress 分开、互不干扰。
+   *  生命周期由 runTask 管：点击时清空并置任务名，命令成功补 100%；「taskRunning=false 但 value>0」
+   *  表示刚跑完，状态栏保留这条 100% 直到 scheduleBarClear 的 20 秒到点（或替换开始时清掉）。 */
   task: { status: '', value: 0, current: 0, total: 0 } as TaskProgressPayload,
-  /** 是否有轻量任务在跑：由 runTask 包住命令调用置位。状态栏据此优先显示 task 进度。 */
-  taskRunning: false,
-  lastResult: '' as ReplaceResult, // 最近一次替换结果
-  /** 「保存备份」开关：批量替换与单人替换共用（两处写 config.xml 前是否先备份）。
-   *  只在本会话内存活（mode 等其余替换选项也都是组件内会话态），不做持久化。 */
-  saveBackup: true,
-  rosterVersion: 0,                     // 名单预览版本号：名单缓存被填充/清空时 +1（「扫描RTF」成功、替换结束），触发 PlayersTable 重载
-  /** 最近一次解析名单的摘要（null=手上没有名单）。两条来源：「扫描RTF」成功、替换成功
-   *  （摘要随 replace:finished 回传，无需用户再点一次扫描）。名单预览/单人替换据此判断名单格式
-   *  ——拓展格式才有「随机人」筛选，且 formatCode 为 extStaff 时第 15 列是偏好工作。 */
+  taskRunning: false,                          // 是否有轻量任务在跑：由 runTask 包住命令调用置位
+  lastResult: '' as ReplaceResult,             // 最近一次替换结果
+  saveBackup: true,                            // 「保存备份」开关：批量与单人替换共用，仅本会话内存活
+  rosterVersion: 0,                            // 名单预览版本号：名单缓存填充/清空时 +1，触发 PlayersTable 重载
+  /** 最近一次解析名单的摘要（null=手上没有名单）。来源：扫描RTF 成功、替换成功（随 replace:finished 回传）。
+   *  名单预览/单人替换据此判断名单格式——拓展格式才有「随机人」筛选，extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
-  /** 名单缓存可读标记：后端名单缓存里有没有数据。对应快照预览的 snapshotReadPath。
-   *  两处会填充后端缓存：「扫描RTF」成功 → true；替换结束 → 成功为 true、失败/取消为 false
-   *  （后端失败/取消时会把缓存写回空表）。名单预览据此决定是否渲染工具条。 */
-  rosterReady: false,
-  /** 替换台读视图当前 Tab：'table'=名单预览 / 'snapshot'=快照预览。
-   *  放全局态：「读取快照」成功后要跨组件（当前任务卡 → 结果区）切换到快照预览。
-   *  原来的 'viewer'（单人替换）已常驻替换台左栏、'generate'（AI 生图）已独立成第三个工作台。 */
+  rosterReady: false,                          // 后端名单缓存里有没有数据；名单预览据此决定是否渲染工具条
+  /** 替换台读视图当前 Tab（'table'=名单预览 / 'snapshot'=快照预览）。放全局态：「读取快照」成功后要跨组件切换。 */
   resultsView: 'table' as 'table' | 'snapshot',
-  /** 最近一次「读取快照」的快照文件路径（null=尚未读取过）。
-   *  快照预览只认这份：当前展示的快照路径与它一致才拉数据，切档/切组后自动回到引导空态。
-   *  两处会置它：「读取快照」成功；替换成功（后端把新 config.xml 同步到该档快照位置并刷新缓存）。 */
+  /** 最近一次「读取快照」的快照文件路径（null=尚未读过）。快照预览只认这份：与它一致才拉数据，
+   *  切档/切组后自动回引导空态（清零见 applySnapshot）。 */
   snapshotReadPath: null as string | null,
-  /** 快照预览版本号：「读取快照」成功、或替换成功（后端同步快照）后 +1，
-   *  触发 SnapshotPreview 重载（同路径重读也生效）。 */
-  snapshotVersion: 0,
+  snapshotVersion: 0,                          // 快照预览版本号：读取快照成功或替换成功后 +1，触发快照预览重载（同路径重读也生效）
 
-  // ---- 展示态派生 getter（核心业务规则单点维护，各组件只消费，不再各自 $derived 一份）----
-  /** 展示用快照：浏览态优先（下拉预览未激活时用预览快照），否则用后端真实激活快照。
-   *  展示类组件（侧栏/当前任务卡/快照预览）用它取 currentGroup/currentRtf/configXml/groups。 */
+  // ---- 展示态派生 getter（核心业务规则单点维护，各组件只消费）----
+  /** 展示用快照：浏览态优先，否则真实激活快照。侧栏/当前任务卡/快照预览等展示类组件统一用它。 */
   get displaySnapshot(): AppSnapshot | null {
     return this.profilePreview ?? this.snapshot;
   },
-  /** 是否有替换正在进行：replacing 是后端全局运行标志（snapshot 与 preview 回传的都是同一个
-   *  state.running），故直接读激活快照即可，展示/操作类组件统一用它禁用按钮。 */
+  /** 是否有替换在进行：replacing 是后端全局运行标志，读激活快照即可；各组件统一用它禁用按钮。 */
   get busy(): boolean {
     return !!this.snapshot?.replacing;
   },
-  /** 浏览态：下拉选中的存档 ≠ 后端当前激活档（选中项尚未激活）。展示只读、写激活档的操作应禁用。 */
+  /** 浏览态：下拉选中的存档 ≠ 后端激活档（尚未激活）。展示只读、写激活档的操作应禁用。 */
   get browseMode(): boolean {
     const active = this.snapshot;
     return !!active && this.selectedProfile !== active.currentProfile;
   },
-  /** 替换就绪：作用于后端激活档——「已选 Profile + 已选头像包 + 已设 RTF」三者齐备才允许开始替换。 */
+  /** 替换就绪：作用于激活档——「已选 Profile + 已选头像包 + 已设 RTF」三者齐备才允许开始替换。 */
   get replaceReady(): boolean {
     const s = this.snapshot;
     return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && !!s.currentRtf;
   },
+  /** 替换台顶部的缺失项清单：未选 Profile / 未选组 / 未设 RTF，缺哪条列哪条文案。
+   *  与 replaceReady 同一套条件（数组非空 ⇔ 未就绪），单点维护免得两处口径漂移。 */
+  get missingPrerequisites(): string[] {
+    const s = this.snapshot;
+    return [
+      !s || s.currentProfile === 'No Profile' ? t.replace.needProfile : '',
+      s && !s.currentGroup ? t.replace.needGroup : '',
+      s && !s.currentRtf ? t.replace.needRtf : '',
+    ].filter(Boolean);
+  },
   /** 第 15 列语义单点：extStaff（拓展职员）名单的「所在地」列实为「偏好工作」。
-   *  判据按后端结构化协议码 formatCode，不依赖中文展示文案——四个消费点
-   *  （名单表/单人替换/队列坞/球员源卡）原先各自 $derived 一份，此处单点维护。 */
+   *  按后端协议码 formatCode 判，不依赖中文展示文案——原先四个消费点各自 $derived 一份。 */
   get isStaffRoster(): boolean {
     return this.lastRtfScan?.formatCode === 'extStaff';
   },
@@ -91,8 +79,7 @@ export const appStore = $state({
   },
 });
 
-/** 第 15 列取值：球员读 based，职员读 preferredJob（另一个在解析侧恒为空串）。
- *  入参收 PlayerRecord['detailed'] | null（可空）；trim/占位符等展示口径由调用方自定。 */
+/** 第 15 列取值：球员读 based，职员读 preferredJob（另一个在解析侧恒为空串）。 */
 export function basedValue(detailed: PlayerRecord['detailed'] | null): string {
   return (appStore.isStaffRoster ? detailed?.preferredJob : detailed?.based) ?? '';
 }
@@ -102,11 +89,9 @@ export async function refreshSnapshot() {
   await applySnapshot(await api.getAppState());
 }
 
-/** 直接用命令返回的快照替换本地状态（避免多一次 get_app_state 往返）。
- *  【作用域变化要复位派生标记】`rosterReady`/`lastRtfScan` 描述的是「后端名单缓存里有没有数据」，
- *  而后端在切档 / 切组 / 换名单时会清空该缓存（commands.rs 的 clear_caches_if_scope_changed）——
- *  它只回传快照，缓存状态变了只能靠这几个量比对出来。不复位的话，名单预览会继续显示
- *  **上一个档/组**的名单（查询打在后端已被清空的缓存上，或干脆是上一次的查询结果）。 */
+/** 直接用命令返回的快照替换本地状态（省一次 get_app_state 往返）。
+ *  【作用域变化要复位派生标记】切档/切组/换名单时后端会清空名单缓存但只回传快照，
+ *  缓存作废只能靠这几个量比对出来；不复位，名单预览会继续显示上一个档/组的名单。 */
 export async function applySnapshot(s: AppSnapshot) {
   const prev = appStore.snapshot;
   const scopeChanged =
@@ -115,12 +100,11 @@ export async function applySnapshot(s: AppSnapshot) {
       prev.currentGroup !== s.currentGroup ||
       prev.currentRtf !== s.currentRtf);
   if (scopeChanged && prev) {
-    appStore.rosterReady = false; // 后端名单缓存已作废 → 名单预览回到引导空态
-    appStore.lastRtfScan = null; // 摘要同上（它是「这份名单解析出来的」，名单换了就作废）
-    appStore.rosterVersion++; // 触发名单预览重载：按清空后的空态重画
-    // 快照读态跟着「档/组」走、不跟 RTF 走：快照文件是档+组的 config.xml 副本，换 RTF 不作废它
-    // （此时清零会白白把芯片打回琥珀、逼用户重读一次）。但换档/组后旧路径必然不属于当前作用域，
-    // 只判非空会让芯片跨组记忆「读过」——A 组读过 → 切到没读过的 B 组仍显示绿（虚绿），故清零。
+    appStore.rosterReady = false; // 后端名单缓存已作废 → 名单预览回引导空态
+    appStore.lastRtfScan = null;  // 摘要「是这份名单解析出来的」，名单换了就作废
+    appStore.rosterVersion++;     // 触发名单预览按清空后的空态重画
+    // 快照读态跟「档+组」走、不跟 RTF 走（快照文件是档+组的 config.xml 副本，换 RTF 不作废，
+    // 清零会白白把芯片打回琥珀）；但换档/组后旧路径必不属于当前作用域，不清会跨组虚绿。
     if (
       prev.currentProfile !== s.currentProfile ||
       prev.currentGroup !== s.currentGroup
@@ -131,32 +115,27 @@ export async function applySnapshot(s: AppSnapshot) {
   appStore.snapshot = s;
 }
 
-/** 「后端名单缓存已被填充」的单点标记。两条写入方：「扫描RTF」成功、替换成功收尾
- *  （摘要随 replace:finished 回传，前端不必再点一次「扫描RTF」就知道名单格式）。
- *  失败/取消**不调**：后端失败/取消时不把缓存写回空表（作用域没变），前端保留替换前的
- *  名单摘要与预览——照旧清成引导空态的话，用户就得重扫一遍，白丢筛选、排序和页码。 */
+/** 「后端名单缓存已填充」的单点标记（扫描RTF 成功、替换成功两处调用）。
+ *  失败/取消**不调**：后端不把缓存写回空表（作用域没变），保留旧摘要与预览，省用户重扫一遍。 */
 export function markRosterFilled(scan: RtfScanResult | null) {
   appStore.lastRtfScan = scan;
   appStore.rosterReady = true;
   appStore.rosterVersion++; // 触发名单预览重载（旧查询结果已过期）
 }
 
-/** 「快照已读入缓存」的单点标记。两条写入方：「读取快照」成功、替换成功（后端把新
- *  config.xml 同步到该档快照位置并刷新缓存）；失败/取消不改 config.xml，不调。
- *  snapshotVersion++ 触发快照预览重载（同路径重读也生效）。 */
+/** 「快照已读入缓存」的单点标记（读取快照成功、替换成功两处调用）；失败/取消不改 config.xml，不调。 */
 export function markSnapshotRead(xmlPath: string) {
   appStore.snapshotReadPath = xmlPath;
-  appStore.snapshotVersion++;
+  appStore.snapshotVersion++; // 同路径重读也生效，触发快照预览重载
 }
 
-/** 跑完的进度条在状态栏上保留多久（毫秒）：留一会儿让「100%」看得见，到点自动清空回纯「就绪」。
- *  【为什么要清】不清的话，四个扫描任务和替换留下的 100% 会一直挂在状态栏上，看着像还在忙。 */
+/** 跑完的进度条在状态栏保留多久（毫秒）：留出看得见 100% 的时间，到点自动清回「就绪」。 */
 export const BAR_LINGER_MS = 20_000;
 
-// 待清空的定时器（普通模块变量，非响应式）。同一时刻只留一个有效的：后来的任务/替换会重排。
+// 待清空的定时器（普通模块变量，非响应式）。同一时刻只留一个：后来的任务/替换会重排。
 let barClearTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 撤掉待清空的定时器。新任务开始、替换推进、或已经清空时调用。 */
+/** 撤掉待清空的定时器（新任务开始、替换推进、已清空时调用）。 */
 function cancelBarClear() {
   if (barClearTimer !== null) {
     clearTimeout(barClearTimer);
@@ -164,41 +143,39 @@ function cancelBarClear() {
   }
 }
 
-/** 安排「BAR_LINGER_MS 后清空状态栏的两条进度」。重复调用只保留最后一次（先撤掉上一个）。 */
+/** 安排 BAR_LINGER_MS 后清空状态栏两条进度；重复调用只保留最后一次。 */
 function scheduleBarClear() {
   cancelBarClear();
   barClearTimer = setTimeout(() => {
     barClearTimer = null;
-    // 这 20 秒里用户可能又点了一次扫描、或开始了替换：那时状态栏归它们，别把新进度抹掉。
+    // 这 20 秒里用户可能又点了扫描或开始了替换：状态栏归它，别把新进度抹掉
     if (appStore.taskRunning || appStore.snapshot?.replacing) return;
     appStore.task = { status: '', value: 0, current: 0, total: 0 };
     appStore.progress = { status: '', value: 0, current: 0, total: 0 };
   }, BAR_LINGER_MS);
 }
 
-/** 包一层「轻量任务」：命令执行期间状态栏显示它的进度（进度值由 task:progress 事件写入 appStore.task）。
- *  「检查完整性/扫描头像/扫描RTF/读取快照」四个按钮都经它调用，label 是状态栏上要显示的任务名。
- *  【为何点击时先清空 task】后端要读完文件、数出分母才发第一条 task:progress（扫描RTF/读取快照可达上百
- *  毫秒），不清空的话状态栏会先闪出上一个任务的名称与计数。 */
+/** 包一层「轻量任务」：命令执行期间状态栏显示其进度（进度值由 task:progress 事件写入 appStore.task），
+ *  四个扫描按钮都经它调用。点击先清空 task：后端读完文件才发第一条进度，不清会闪出上一个任务名。 */
 export async function runTask<T>(label: string, fn: () => Promise<T>): Promise<T> {
-  cancelBarClear(); // 新任务接管状态栏：撤掉上一次排的「20 秒后清空」
+  cancelBarClear(); // 新任务接管状态栏
   appStore.task = { status: label, value: 0, current: 0, total: 0 };
   appStore.taskRunning = true;
   try {
     const out = await fn();
-    // 小包/空包整个命令只有几毫秒，后端来不及上报（或只报到中途）——这里按它的口径补一个 100%
-    // （current 补齐到 total），否则进度条一闪而过、用户等于没看到反馈。后端已 finish() 上报过 100 的，
-    // 这里写的是同样的值。放在 try 里：命令抛错时保持 0%，别谎报完成。
+    // 小包/空包几毫秒就返回，后端来不及上报——按它的口径补一个 100%，否则进度条一闪而过。
+    // 放 try 里：命令抛错时保持 0%，别谎报完成。
     appStore.task = { ...appStore.task, value: 100, current: appStore.task.total };
     return out;
   } finally {
     appStore.taskRunning = false; // 失败也要复位，否则状态栏一直卡在任务态
-    scheduleBarClear(); // 收尾排一次清空（失败也排：顺手把上一次替换遗留的进度一起收掉）
+    scheduleBarClear(); // 收尾排一次清空（失败也排：顺手收掉上一次替换的遗留进度）
   }
 }
 
-// inited 是一个普通模块变量（非响应式），用于保证 initListeners 只真正执行一次。
+// inited 保证 initListeners 只真正执行一次。
 let inited = false;
+
 /** 从 Rust 环形缓冲回填当前过滤条件下的日志历史。 */
 export async function reloadLogs() {
   const page = await api.queryLogs(logStore.level, logStore.only, 0, 10_000);
@@ -211,33 +188,27 @@ export async function initListeners(onFinished: (r: ReplaceResult) => Promise<vo
   if (inited) return; // 防止重复订阅
   inited = true;
   await refreshSnapshot(); // 先拉一次全局快照，界面立即有数据可渲染
-  // 启动阶段的 log:batch（包含 “Starting Application v2”）在 WebView 导航开始前就已 emit，
-  // 前端无法收到，因此先回填历史再订阅增量（顺序反了会出现重复行）。
+  // 启动阶段的 log:batch 在 WebView 导航开始前就已 emit、前端收不到，故先回填历史再订阅增量（顺序反了会重复行）。
   await reloadLogs();
-  // 订阅进度事件：后端每进入一个阶段（以及阶段内每推进一项）就 emit，这里把载荷存进 appStore.progress。
+  // 替换进度：后端每进入一个阶段（及阶段内每推进一项）emit 一次，存进 appStore.progress。
   await listen<ProgressPayload>('replace:progress', (e) => {
     appStore.progress = e.payload;
-    cancelBarClear(); // 替换开始推进：撤掉上一次任务排的「20 秒后清空」，别把替换进度清掉
-    // 替换流水线一开始推进，就把轻量任务留在状态栏上的收尾态（100%）清掉：否则替换被取消后，
-    // 状态栏会退回显示那个旧任务的 100%，而不是替换被中断时的真实百分比。
-    // 加 value>0 的判断只是为了别在每个进度事件上都新建对象（状态栏此刻正在读 progress，与 task 无关）。
+    cancelBarClear(); // 替换推进接管状态栏，别让上次排的清空把替换进度抹掉
+    // 替换一开始推进就清掉轻量任务留下的 100% 收尾态，否则取消后状态栏显示的是旧任务的 100% 而非替换真实百分比
     if (appStore.task.value > 0) {
       appStore.task = { status: '', value: 0, current: 0, total: 0 };
     }
   });
-  // 订阅轻量任务进度：「检查完整性/扫描头像/扫描RTF/读取快照」执行期间实时刷新状态栏进度条。
-  // 与 replace:progress 分开存（appStore.task），两条通道同时存在也互不覆盖。
+  // 轻量任务进度：与 replace:progress 分开存，两条通道同时存在互不覆盖。
   await listen<TaskProgressPayload>('task:progress', (e) => {
     appStore.task = e.payload;
   });
-  // 订阅完成事件：记下结果、刷新快照（replacing 会变 false）、调用回调弹窗提示。
+  // 替换完成：记结果、刷新快照（replacing 变 false）、按需打缓存标记、排进度清空、回调弹窗。
   await listen<{ result: Exclude<ReplaceResult, ''>; roster: RtfScanResult | null }>(
     'replace:finished',
     async (e) => {
       appStore.lastResult = e.payload.result;
-      // 名单/快照的「缓存已填充」标记只在替换成功时打（失败/取消两者都不做：作用域没变，
-      // 保留替换前的摘要与预览——照旧清成引导空态的话，用户就得重扫一遍，白丢筛选、排序和页码）。
-      // 标记单点见 markRosterFilled / markSnapshotRead（「扫描RTF」「读取快照」按钮与本处共用）。
+      // 「缓存已填充」标记只在成功时打：失败/取消保留替换前的摘要与预览，用户不必重扫（详见 markRosterFilled）。
       if (e.payload.result === 'finished') {
         markRosterFilled(e.payload.roster);
       }
@@ -246,12 +217,11 @@ export async function initListeners(onFinished: (r: ReplaceResult) => Promise<vo
         const xmlPath = appStore.snapshot?.configXml?.path;
         if (xmlPath) markSnapshotRead(xmlPath);
       }
-      // 替换跑完（成功/失败/取消都一样）：把进度条在状态栏上留 20 秒再清空回「就绪」。
-      scheduleBarClear();
+      scheduleBarClear(); // 跑完（成功/失败/取消都一样）把进度条留 20 秒再清回「就绪」
       await onFinished(e.payload.result);
     },
   );
-  // 订阅日志批量事件：把新日志追写到前端日志列表。
+  // 日志批量事件：新日志追写到前端列表。
   await listen<import('../types').LogLine[]>('log:batch', (e) => {
     appendLogBatch(e.payload);
   });

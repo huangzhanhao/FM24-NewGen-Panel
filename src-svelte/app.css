@@ -838,6 +838,55 @@ input.uid-chip {
 .modal-actions { display: flex; align-items: center; gap: 10px; }
 
 /* ============================================================
+   生图卡片基元（ImageAiPanel 拆分后跨组件共用，D3 晋升）
+   ============================================================ */
+.pcard {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: 9px 12px 10px;
+  box-shadow: var(--shadow-1);
+}
+.pcard-h {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.pcard-h > span {
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+}
+.pcard-h > span::before {
+  content: "";
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+  margin-right: 8px;
+}
+.field-error {
+  margin: 5px 0 2px;
+  font-size: 12px;
+  color: var(--danger);
+}
+textarea.invalid,
+input.invalid {
+  border-color: var(--danger);
+}
+textarea.invalid:focus,
+input.invalid:focus {
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+/* 图标统一 13px（Icon 组件无内置尺寸时的默认档） */
+.ic {
+  width: 13px;
+  height: 13px;
+}
+
+/* ============================================================
    通用工具类
    ============================================================ */
 .muted { color: var(--text-3); }

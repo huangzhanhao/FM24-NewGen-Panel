@@ -1,20 +1,20 @@
-<!-- 表格分页器（名单预览/快照预览共用）：‹/› 翻页 + 「第 X / Y 页」，
-     细分隔线后是「前往 [输入框] 页 [跳转]」快速跳页。两处共用同一组件保证样式与行为一致；
-     page 从 0 计数、双向绑定；文案复用 t.table.* 的分页文案。 -->
+<!-- TablePager · 表格分页器（名单预览/快照预览共用）：‹/› 翻页 + 「第 X / Y 页」+ 快速跳页
+     细分隔线后是「前往 [输入框] 页 [跳转]」；两处共用同一组件保证样式与行为一致
+     page 从 0 计数、双向绑定 -->
 <script lang="ts">
   import { t } from "../../text"; // 全局文案常量
   import Icon from "../../ui/Icon.svelte";
 
-  // page：当前页码（从 0 开始，双向绑定）；totalPages：总页数（至少 1，由父组件按总条数算出）。
+  // totalPages 至少为 1，由父组件按总条数算出
   let { page = $bindable(0), totalPages = 1 }: { page: number; totalPages?: number } = $props();
 
-  // 快速跳页输入框的文本（1 基页码）；随 page 变化自动同步为当前页（含夹取后的值）。
+  // 跳页输入框文本（1 基页码），随 page 自动同步为当前页（含夹取后的值）
   let jumpInput = $state("1");
   $effect(() => {
     jumpInput = String(page + 1);
   });
 
-  /** 快速跳页：解析输入的 1 基页码，夹取到 [1, totalPages] 后切换；非法输入还原为当前页。 */
+  /** 快速跳页：解析 1 基页码，夹取到 [1, totalPages] 后切换；非法输入还原为当前页 */
   function gotoPage() {
     const n = Number.parseInt(jumpInput, 10);
     if (!Number.isFinite(n)) {
@@ -43,7 +43,7 @@
   >
     <Icon name="chevronRight" size={14} />
   </button>
-  <!-- 快速跳页：输入 1 基页码后回车或点「跳转」；gotoPage 会夹取到 [1, 总页数]。 -->
+  <!-- 快速跳页：1 基页码，回车或点「跳转」提交，夹取规则见 gotoPage -->
   <span class="pager-jump">
     <span>{t.table.gotoPrefix}</span>
     <input
@@ -63,8 +63,8 @@
 
 <style>
   /* 分页器：整组始终排在同一行（nowrap）并靠右；flex-shrink: 0 让它不被压缩，
-     窗口变窄时由左侧搜索框收缩让位（见 app.css 的 .search min-width），
-     避免分页器自己被挤成上下两行。 */
+     窗口变窄时由左侧搜索框收缩让位（.search 的 min-width 在 app.css），
+     避免分页器自己被挤成上下两行 */
   .pager {
     flex-wrap: nowrap;
     flex-shrink: 0;

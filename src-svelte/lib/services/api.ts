@@ -8,8 +8,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, GenImage, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
-  PageResult, PlayerPreview, PlayerQuery, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
-  QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo, SnapshotQuery,
+  PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
+  QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
@@ -39,8 +39,8 @@ export const api = {
   // 读取快照：解析当前展示档的存档 XML 快照并缓存（「读取快照」按钮 → 快照预览的数据源）。
   readSnapshot: (xmlPath: string) => invoke<SnapshotInfo>('read_snapshot', { xmlPath }),
   // 快照预览分页查询：UID 筛选 + 只对当前页解析图片路径（imgDir 为当前展示组的头像包目录）。
-  querySnapshot: (xmlPath: string, imgDir: string, query: SnapshotQuery) =>
-    invoke<PageResult<SnapshotEntry>>('query_snapshot', { xmlPath, imgDir, query }),
+  querySnapshot: (xmlPath: string) =>
+    invoke<SnapshotEntry[]>('query_snapshot', { xmlPath }),
   // 读取/保存标准规则文件（name ∈ standard2|standard3；保存时后端先按该标准 schema 校验）。
   readRuleFile: (name: 'standard2' | 'standard3') => invoke<string>('read_rule_file', { name }),
   saveRuleFile: (name: 'standard2' | 'standard3', content: string) =>
@@ -53,11 +53,14 @@ export const api = {
   preflightReplace: (mode: ReplaceArgs['mode']) => invoke<PreflightResult>('preflight_replace', { mode }),
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
   cancelReplace: () => invoke<void>('cancel_replace'),
-  queryPlayers: (query: PlayerQuery) => invoke<PageResult<PlayerRecord>>('query_players', { query }),
+  queryPlayers: () => invoke<PlayerRecord[]>('query_players'),
   // queryPlayersByUids：按 uid 批量取球员记录（队列坞条目行身份信息：年龄/所在地帮认人）；
   // 只读后端 rtf_cache（与 query_players 同源），未命中的 uid 不在返回之列。
   queryPlayersByUids: (uids: string[]) => invoke<PlayerRecord[]>('query_players_by_uids', { uids }),
   previewPlayer: (uid: string) => invoke<PlayerPreview>('preview_player', { uid }),
+  // querySnapshotImages：快照预览当前页批量解析头像实际路径（与 relPaths 顺序一一对应；null = 找不到）。
+  querySnapshotImages: (imgDir: string, relPaths: string[]) =>
+    invoke<(string | null)[]>('query_snapshot_images', { imgDir, relPaths }),
   // queryAvatars：名单预览头像列按 UID 批量取头像绝对路径（一次拉一页；null = 无映射或图片不在包内）。
   queryAvatars: (uids: string[]) =>
     invoke<Record<string, string | null>>('query_avatars', { uids }),

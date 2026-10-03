@@ -1,11 +1,11 @@
-<!-- PlayersTable · 名单预览表格：分页、搜索、点表头排序；数据留在后端，每次只拉当前页
+<!-- PlayersTable · 名单预览表格：分页、搜索、点表头排序；后端一次给全量，分页/筛选/排序都在前端
      可读判据与快照预览同款：后端名单缓存未填上（既没「扫描RTF」也没跑过替换）时
      不渲染工具条（搜索框/筛选/分页器），只留引导空态 -->
 <script lang="ts">
   import { api } from "../../services/api";
   import { showError } from "../../ui/dialog"; // 查询失败要弹窗，否则 rejection 被静默吞掉
   import { message } from "@tauri-apps/plugin-dialog"; // 「加入队列」成功提示（与 ImageAiPanel 保存同款）
-  import { appStore, basedValue } from "../../stores/app.svelte";
+  import { appStore, basedValue, filterPlayers } from "../../stores/app.svelte";
   import { ui } from "../../stores/ui.svelte"; // 「送生图」要切到 AI 生成头像工作台
   import {
     enqueuePlayers,
@@ -14,7 +14,7 @@
     toggleSelect,
     toggleSelectPage,
   } from "../../stores/imageai.svelte"; // 勾选与批量入队（队列动作转发见 store）
-  import { createPagedResource } from "../../ui/pagedResource.svelte"; // 分页骨架
+  import { createPagedResource, type PagedResource } from "../../ui/pagedResource.svelte"; // 本地分页骨架
   import { createAvatarSource } from "../../avatarBlobs.svelte"; // 头像路径查询 + 缩略图装载（与队列坞/球员源卡共用）
   import { t } from "../../text"; // 全局文案常量
   import Icon from "../../ui/Icon.svelte";
@@ -27,11 +27,15 @@
   // （勾选/UID/姓名/头像/年龄/所在地/送生图）。列集只能用 prop 区分——同一个 1280 窗口里
   // 两处容器宽度不同，视口断点区分不了
   let { dense = false }: { dense?: boolean } = $props();
-  // 精简模式下可勾选展开次要列（国籍/发色/肤色/随机人/性别/身高/俱乐部/能力等）
-  let showSecondary = $state(false);
-  const showAll = $derived(!dense || showSecondary);
+  // 拓展列开关（原「次要列」）：打开补齐拓展字段列（拓展名单共 18 列），收起只留基础字段列。
+  // 基础字段列（UID/姓名/国籍/第二国籍/发色/肤色/族裔码）与勾选/头像/送生图恒显示，不受它影响
+  let extCols = $state(false);
+  // 拓展字段列是否上屏：存档台全宽（审阅）恒展开；替换台窄栏由「拓展列」开关控制
+  const showExt = $derived(!dense || extCols);
 
-  let sortKey = $state("uid");
+  // 排序：null=不排序，保持 RTF 解析自然顺序（初始态）；点表头后按列名在前端本地排序
+  // （uid/name/primaryNat/ethnicityCode，只在本组件的比较器里用，不再是后端协议值）
+  let sortKey = $state<string | null>(null);
   let sortDesc = $state(false);
 
   // 随机人筛选（仅拓展名单显示）：'any' 任意（默认）/ 'yes' 仅随机人 / 'no' 仅真实球员
@@ -39,53 +43,61 @@
 
   // 是否为拓展名单：跟随最近一次「扫描RTF」的识别结果（detailed=true 即拓展球员/职员名单）
   const isExtRoster = $derived(appStore.lastRtfScan?.detailed ?? false);
-  // 发往后端的生效筛选：非拓展名单（下拉被隐藏）时强制按「任意」，避免旧筛选残留在请求里
-  const newganQuery = $derived<"any" | "yes" | "no">(
-    isExtRoster ? newganFilter : "any",
-  );
+  // 生效筛选：非拓展名单（下拉被隐藏）时强制按「任意」，避免旧筛选残留在视图里
+  const newganQuery = $derived<"any" | "yes" | "no">(isExtRoster ? newganFilter : "any");
 
   // 可读态：与快照预览同款判据——只认 store 的「后端名单缓存被填上」单点标记 rosterReady
   // 置真有两处（扫描RTF 成功 / 替换成功）；切档、切组、换名单导致作用域变化时由 store 作废
   const readable = $derived(appStore.rosterReady);
 
-  // ---- 分页骨架：页码/搜索/令牌/防抖/换代复位在 createPagedResource 单点维护 ----
-  //      本组件只剩排序键、随机人筛选与头像装载这些视图关切
-  const paged = createPagedResource<PlayerRecord>({
-    fetch: async ({ offset, limit, search }) =>
-      api.queryPlayers({
-        offset,
-        limit,
-        search,
-        sortKey,
-        sortDesc,
-        newgan: newganQuery === "any" ? null : newganQuery === "yes",
-      }),
-    deps: () => {
-      void sortKey;
-      void sortDesc;
-      void newganQuery;
-      void appStore.rosterVersion; // 名单填充或作用域作废 → 重载当前页
-      void appStore.snapshotVersion; // 快照缓存填充 → 头像列按 UID 重查，顺带重取当前页
-    },
+  // ---- 本地分页骨架：后端一次给全量（换代时取一次），搜索/随机人筛选/排序/翻页都在前端内存完成 ----
+  //      select 读组件本地状态（搜索词/筛选/排序），变化只重算 view，不产生任何请求
+  //      （显式标注 paged 类型：select 闭包引用 paged，否则 TS 判定循环推断）
+  let paneEl = $state<HTMLElement | undefined>(undefined);
+  const paged: PagedResource<PlayerRecord> = createPagedResource<PlayerRecord>({
+    fetch: () => api.queryPlayers(),
     resetKey: () => appStore.rosterVersion,
+    pane: () => paneEl, // 每页行数随面板高度自适应（无行数常量）
     onReset: () => {
-      sortKey = "uid";
+      sortKey = null; // 新名单也从自然顺序看起
       sortDesc = false;
       newganFilter = "any";
-      avatars.clear(); // 旧名单的头像路径与缩略图一并作废回收（新名单的图在拉取后重取）
+      extCols = false;
+      avatars.clear(); // 旧名单的头像路径与缩略图一并作废回收（新名单的图在装载 effect 里重取）
     },
-    onLoaded: (r) => {
-      // 本页头像另走一次批量查询（路径出处是后端快照/映射缓存）；空页或基础名单只清场不查询
-      if (r.items.some((x) => x.detailed)) void avatars.load(r.items.map((x) => x.uid));
-      else avatars.clear();
+    select: (rows) => {
+      let out = rows;
+      const search = paged.search.trim();
+      // 命中口径与单人替换卡共用 store 里的 filterPlayers（UID/姓名/国籍/俱乐部）
+      if (search) out = filterPlayers(out, search);
+      if (isExtRoster && newganQuery !== "any") {
+        const want = newganQuery === "yes";
+        out = out.filter((r) => r.uid.startsWith("r-") === want);
+      }
+      if (sortKey) {
+        const key = sortKey;
+        const val = (r: PlayerRecord) =>
+          key === "name"
+            ? r.name
+            : key === "primaryNat"
+              ? r.primaryNat
+              : key === "ethnicityCode"
+                ? r.ethnicityCode
+                : r.uid;
+        out = [...out].sort((a, b) => {
+          const ord = val(a).localeCompare(val(b));
+          return sortDesc ? -ord : ord;
+        });
+      }
+      return out;
     },
     onError: (e) => {
       showError(e);
-      return null;
+      return [];
     },
   });
 
-  /** 点表头排序：同一列切换升/降序，不同列切到该列并重置为升序 */
+  /** 点表头排序：同一列切换升/降序，不同列切到该列并重置为升序（初始 null 时点任意列即按该列升序） */
   function sortBy(key: string) {
     if (sortKey === key) {
       sortDesc = !sortDesc;
@@ -103,9 +115,9 @@
   }
 
   // 是否含详细信息：当前页任一条有 detailed 就额外渲染那几列（适配基础/详细两种名单）
-  const hasDetailed = $derived(!!paged.result?.items.some((r) => r.detailed));
+  const hasDetailed = $derived(paged.view.items.some((r) => r.detailed));
   // 性别列：仅当当前页有记录带性别（拓展职员/新版拓展球员）才渲染，无性别字段时不占位
-  const hasGender = $derived(!!paged.result?.items.some((r) => r.detailed?.gender));
+  const hasGender = $derived(paged.view.items.some((r) => r.detailed?.gender));
 
   /** 随机人列的标签配色：中文名单值为「是/否」，英文名单兼容 Yes/No；其余值原样显示不着色 */
   function newganCls(v: string) {
@@ -119,28 +131,23 @@
   // 【按钮口径】「加入队列（N）」的 N 与可用性只按当前页勾选数：提交只针对用户眼前这一页，
   // 语义最直白（store.selectedCount 是含跨页的全局口径，用它会出现显示 5、实际提交别页 12 条）
   const pageSelectedCount = $derived(
-    paged.result
-      ? paged.result.items.filter((r) => imageaiStore.selectedInTable[r.uid]).length
-      : 0,
+    paged.view.items.filter((r) => imageaiStore.selectedInTable[r.uid]).length,
   );
   const allPageSelected = $derived(
-    (paged.result?.items.length ?? 0) > 0 &&
-      paged.result!.items.every((r) => imageaiStore.selectedInTable[r.uid]),
+    paged.view.items.length > 0 && paged.view.items.every((r) => imageaiStore.selectedInTable[r.uid]),
   );
-  const somePageSelected = $derived(
-    !!paged.result?.items.some((r) => imageaiStore.selectedInTable[r.uid]),
-  );
+  const somePageSelected = $derived(paged.view.items.some((r) => imageaiStore.selectedInTable[r.uid]));
 
   /** 表头全选/取消：只作用于当前页数据行（翻页后另一页不受影响） */
   function onPageAll(v: boolean) {
     toggleSelectPage(
-      (paged.result?.items ?? []).map((r) => r.uid),
+      paged.view.items.map((r) => r.uid),
       v,
     );
   }
   /** 把当前页勾选的球员按工作台当前参数加入批量队列；成功后弹提示（条数） */
   async function onEnqueue() {
-    const rows = (paged.result?.items ?? [])
+    const rows = paged.view.items
       .filter((r) => imageaiStore.selectedInTable[r.uid])
       .map((r) => ({ uid: r.uid, name: r.name }));
     if (rows.length === 0) return;
@@ -153,7 +160,8 @@
   }
 
   // ---------------- 行尾「送生图」数据源入口 ----------------
-  /** 设为生图数据源并切 ui.workbench 去 AI 工作台；不写 appStore.resultsView（那会卸载整个结果区，丢掉搜索/页码/排序，顶栏也回不去） */
+  /** 设为生图数据源并切 ui.workbench 去 AI 工作台；不碰 appStore.rtfPreview（Tab 选择是两工作台共享态，
+   *  切回来仍停在原 Tab；但表内页码/搜索/排序是组件本地态，随本组件卸载回到初始） */
   function sendToGenerate(r: PlayerRecord) {
     setSourcePlayer(r.uid, r.name);
     ui.workbench = "ai";
@@ -163,15 +171,24 @@
 
   // ---------------- 头像列：按球员 UID 批量取路径 + 装载缩略图（共用 createAvatarSource） ----------------
   // 查路径/令牌作废/blob 装载的骨架在 createAvatarSource 单点维护，本组件只剩两条本地策略：
-  // 空页或基础名单（非拓展格式，表格不渲染头像列）不查询、只清场；
-  // 批级失败（avatars.error）挂在「头像」列头 title 上——单张图取不到本来就静默，
+  // 空页只清场不查询；批级失败（avatars.error）挂在「头像」列头 title 上——单张图取不到本来就静默，
   // 「命令挂了/载荷形状变了/没选头像包」与「这份名单真的没脸」不能长成同一个样子，
   // 否则整列空了用户没有任何线索可查
   const avatars = createAvatarSource();
+
+  // 头像装载跟随当前页视图：页码/筛选/搜索变化都会重算 view，这里随之只装载本页的 uid；
+  // 快照缓存收尾（snapshotVersion）后头像路径可能已变，一并重取。
+  // 头像列恒显示（基础名单也有），故不再按 detailed 门控——头像路径出自快照/映射缓存，与名单格式无关
+  $effect(() => {
+    void appStore.snapshotVersion;
+    const uids = paged.view.items.map((r) => r.uid);
+    if (uids.length) void avatars.load(uids);
+    else avatars.clear();
+  });
 </script>
 
 {#snippet sortIcon(key: string)}
-  <!-- 当前排序列的方向指示：线性 chevron 图标 -->
+  <!-- 当前排序列的方向指示：线性 chevron 图标（初始不排序，无任何箭头） -->
   {#if sortKey === key}
     <Icon name={sortDesc ? "chevronDown" : "chevronUp"} class="sort-ic" stroke={2.4} />
   {/if}
@@ -179,9 +196,12 @@
 
 <!-- 工具条：搜索框 + 加入队列 + 随机人筛选 + 总条数 + 右侧分页；readable 为假时整块不渲染
      （与快照预览的 {#if readable} 同款）。组件根是纵向 flex，撑满卡片正文高度 -->
-<div class="table-pane">
+<!-- 表格面板：工具条 + 滚动表格（面板交给 paged 做行数自适应） -->
+<div class="table-pane" bind:this={paneEl}>
   {#if readable}
+    <!-- 平铺 + 自然换行：放得下就同排（存档台一整排），放不下才换行；分页器自带贴右 -->
     <div class="table-toolbar">
+      <!-- 搜索框：外观由 app.css 的 .search 单点定义（与单人替换卡同款），命中口径见 store.filterPlayers -->
       <div class="search">
         <Icon name="search" />
         <input
@@ -192,40 +212,29 @@
           aria-label={t.table.searchPlaceholder}
         />
       </div>
-      <!-- 加入队列：按当前页勾选数计数（口径见脚本内注释），无勾选时禁用 -->
-      <button
-        class="btn sm"
-        disabled={pageSelectedCount === 0}
-        onclick={onEnqueue}
-      >
-        {t.gen.queue.addBtn(pageSelectedCount)}
-      </button>
       <!-- 随机人筛选：仅拓展名单显示，默认「任意」 -->
       {#if isExtRoster}
         <label class="newgan-filter">
           <span class="muted small">{t.table.newganFilterLabel}</span>
-          <select
-            bind:value={newganFilter}
-            onchange={() => (paged.page = 0)}
-            aria-label={t.table.newganFilterLabel}
-          >
+          <select bind:value={newganFilter} onchange={() => (paged.page = 0)} aria-label={t.table.newganFilterLabel}>
             <option value="any">{t.table.newganAny}</option>
             <option value="yes">{t.table.newganYes}</option>
             <option value="no">{t.table.newganNo}</option>
           </select>
         </label>
       {/if}
-      <!-- 精简列集（dense）下的次要列开关：勾上展开完整列，取消收回精简列 -->
-      {#if dense}
+      <!-- 加入队列：按当前页勾选数计数（口径见脚本内注释），无勾选时禁用；排在随机人筛选右侧 -->
+      <button class="btn sm" disabled={pageSelectedCount === 0} onclick={onEnqueue}>
+        {t.gen.queue.addBtn(pageSelectedCount)}
+      </button>
+      <!-- 拓展列开关（仅替换台窄栏 + 拓展名单显示）：打开补齐拓展字段列（共 18 列），
+           收起只留基础字段列；基础字段列与勾选/头像/送生图不受开关影响 -->
+      {#if dense && hasDetailed}
         <label class="switch">
-          <input type="checkbox" bind:checked={showSecondary} />
-          <span class="track"></span>{t.table.secondaryCols}
+          <input type="checkbox" bind:checked={extCols} />
+          <span class="track"></span>{t.table.extCols}
         </label>
       {/if}
-      {#if paged.result}<span class="muted small record-count"
-          >{t.table.recordCount(paged.result.total)}</span
-        >{/if}
-      <span class="spacer"></span>
       <!-- 分页器（含快速跳页）与快照预览共用同一组件，样式/行为单点维护 -->
       <TablePager bind:page={paged.page} totalPages={paged.totalPages} />
     </div>
@@ -237,41 +246,35 @@
       <Icon name="folder" stroke={1.8} />
       <p>{t.table.emptyHint}</p>
     </div>
-  {:else if paged.result && paged.result.items.length > 0}
+  {:else if paged.view.items.length > 0}
     <div class="table-scroll">
-      <table class="grid">
+      <!-- dense 类只服务替换台窄栏（≈670）的列宽收敛策略（见 style 末尾） -->
+      <table class="grid" class:dense>
         <!-- 列宽档位见 style 的列宽分区：长文本列（姓名/俱乐部/所在地）吃剩余空间，码值/数值列收窄居中
              首列勾选框与末列「送生图」都是固定窄列；
-             列槽位与下方 thead/tbody 的 {#if} 条件一一对应（dense 精简模式收起次要列） -->
+             列槽位与下方 thead/tbody 的条件一一对应（拓展字段列由「拓展列」开关控制） -->
         <colgroup>
           <col class="w-sel" />
           <col class="w-uid" />
-          {#if showAll}
-            <col class="w-nat" />
-            <col class="w-nat2" />
-          {/if}
+          <col class="w-nat" />
+          <col class="w-nat2" />
           <col class="w-name" />
-          {#if showAll}
+          <!-- 头像列恒显示（应用列，与名单格式无关）：紧跟姓名列 -->
+          <col class="w-avatar" />
+          <col class="w-code" />
+          <col class="w-code" />
+          <col class="w-code" />
+          {#if hasDetailed && showExt}
+            <col class="w-code" />
+            <col class="w-tag" />
+            {#if hasGender}<col class="w-code" />{/if}
+            <col class="w-code" />
+            <col class="w-height" />
+            <col class="w-club" />
+            <col class="w-based" />
             <col class="w-code" />
             <col class="w-code" />
-            <col class="w-code" />
-          {/if}
-          {#if hasDetailed}
-            {#if showAll}<col class="w-code" />{/if}
-            {#if showAll || dense}<col class="w-avatar" />{/if}
-            {#if showAll}<col class="w-tag" />{/if}
-            {#if showAll && hasGender}<col class="w-code" />{/if}
-            {#if showAll || dense}<col class="w-code" />{/if}
-            {#if showAll}
-              <col class="w-height" />
-              <col class="w-club" />
-            {/if}
-            {#if showAll || dense}<col class="w-based" />{/if}
-            {#if showAll}
-              <col class="w-code" />
-              <col class="w-code" />
-              <col class="w-rca" />
-            {/if}
+            <col class="w-rca" />
           {/if}
           <col class="w-gen" />
         </colgroup>
@@ -292,82 +295,61 @@
                 onchange={(e) => onPageAll(e.currentTarget.checked)}
               />
             </th>
-            <th
-              role="button"
-              tabindex="0"
-              onclick={() => sortBy("uid")}
-              onkeydown={(e) => onSortKey(e, "uid")}
-              title={t.table.colUid}
-              >{t.table.colUid}{@render sortIcon("uid")}</th
-            >
-            {#if showAll}
               <th
                 role="button"
                 tabindex="0"
-                onclick={() => sortBy("primaryNat")}
-                onkeydown={(e) => onSortKey(e, "primaryNat")}
-                title={t.table.colNat}
-                >{t.table.colNat}{@render sortIcon("primaryNat")}</th
+                onclick={() => sortBy("uid")}
+                onkeydown={(e) => onSortKey(e, "uid")}
+                title={t.table.colUid}
+                >{t.table.colUid}<span class="muted">（{t.table.recordCount(paged.view.total)}）</span>{@render sortIcon(
+                  "uid",
+                )}</th
               >
-              <th class="static">{t.table.col2ndNat}</th>
-            {/if}
             <th
               role="button"
               tabindex="0"
+              onclick={() => sortBy("primaryNat")}
+              onkeydown={(e) => onSortKey(e, "primaryNat")}
+              title={t.table.colNat}>{t.table.colNat}{@render sortIcon("primaryNat")}</th
+            >
+            <th class="static">{t.table.col2ndNat}</th>
+            <th
+              role="button"
+              tabindex="0"
+              class="clamp clamp-name"
               onclick={() => sortBy("name")}
               onkeydown={(e) => onSortKey(e, "name")}
-              title={t.table.colName}
-              >{t.table.colName}{@render sortIcon("name")}</th
+              title={t.table.colName}>{t.table.colName}{@render sortIcon("name")}</th
             >
-            {#if showAll}
-              <th class="static c">{t.table.colHair}</th>
-              <th class="static c">{t.table.colColor}</th>
-              <th
-                role="button"
-                tabindex="0"
-                class="c"
-                onclick={() => sortBy("ethnicityCode")}
-                onkeydown={(e) => onSortKey(e, "ethnicityCode")}
-                title={t.table.colEth}
-                >{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
-              >
-            {/if}
-            <!-- 详细列（拓展名单）顺序：肤色/头像/随机人/性别/年龄/身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A
-                 dense 精简模式只留 头像/年龄/所在地 三列（次要列开关展开后恢复全部） -->
-            {#if hasDetailed}
-              {#if showAll}<th class="static c">{t.table.colSkin}</th>{/if}
-              {#if showAll || dense}
-                <th
-                  class="static c"
-                  title={avatars.error
-                    ? t.table.avatarFailHint(avatars.error)
-                    : undefined}
-                >
-                  {t.table.colAvatar}{#if avatars.error}<span
-                      class="avatar-warn"
-                      aria-hidden="true">!</span
-                    >{/if}
-                </th>
-              {/if}
-              {#if showAll}<th class="static c">{t.table.colNewgan}</th>{/if}
-              {#if showAll && hasGender}
+            <!-- 头像列恒显示（紧跟姓名） -->
+            <th class="static c" title={avatars.error ? t.table.avatarFailHint(avatars.error) : undefined}>
+              {t.table.colAvatar}{#if avatars.error}<span class="avatar-warn" aria-hidden="true">!</span>{/if}
+            </th>
+            <th class="static c">{t.table.colHair}</th>
+            <th class="static c">{t.table.colColor}</th>
+            <th
+              role="button"
+              tabindex="0"
+              class="c"
+              onclick={() => sortBy("ethnicityCode")}
+              onkeydown={(e) => onSortKey(e, "ethnicityCode")}
+              title={t.table.colEth}>{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
+            >
+            <!-- 拓展字段列（仅拓展名单有，由「拓展列」开关控制）：顺序=肤色/随机人/性别/年龄/
+                 身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A。基础字段列与勾选/头像/送生图恒显示 -->
+            {#if hasDetailed && showExt}
+              <th class="static c">{t.table.colSkin}</th>
+              <th class="static c">{t.table.colNewgan}</th>
+              {#if hasGender}
                 <th class="static c">{t.table.colGender}</th>
               {/if}
-              {#if showAll || dense}
-                <th class="static c">{t.table.colAge}</th>
-              {/if}
-              {#if showAll}
-                <th class="static c">{t.table.colHeight}</th>
-                <th class="static">{t.table.colClub}</th>
-              {/if}
-              {#if showAll || dense}
-                <th class="static">{appStore.basedLabel}</th>
-              {/if}
-              {#if showAll}
-                <th class="static c">{t.table.colCa}</th>
-                <th class="static c">{t.table.colPa}</th>
-                <th class="static c">{t.table.colRca}</th>
-              {/if}
+              <th class="static c">{t.table.colAge}</th>
+              <th class="static c">{t.table.colHeight}</th>
+              <th class="static">{t.table.colClub}</th>
+              <th class="static clamp clamp-based">{appStore.basedLabel}</th>
+              <th class="static c">{t.table.colCa}</th>
+              <th class="static c">{t.table.colPa}</th>
+              <th class="static c">{t.table.colRca}</th>
             {/if}
             <!-- 末列「送生图」操作列：基础/拓展名单都有，表头留白（按钮自带读屏文案） -->
             <th class="static c" title={t.gen.source.sendBtn}></th>
@@ -375,7 +357,7 @@
         </thead>
         <tbody>
           <!-- 以 uid 为键，便于 Svelte 复用 DOM 行 -->
-          {#each paged.result.items as r (r.uid)}
+          {#each paged.view.items as r (r.uid)}
             <tr>
               <td class="c sel-col">
                 <input
@@ -386,52 +368,39 @@
                 />
               </td>
               <td class="mono">{r.uid}</td>
-              {#if showAll}
-                <td>{r.primaryNat}</td>
-                <td>{r.secNat}</td>
-              {/if}
-              <td>{r.name}</td>
-              {#if showAll}
-                <td class="c">{r.hairLength}</td>
-                <td class="c">{r.hairColor}</td>
-                <td class="c">{r.ethnicityCode}</td>
-              {/if}
-              <!-- 详细列空值显示 —；头像按 UID 从后端快照/映射缓存取图，无映射或图片不在包内同样显示 — -->
-              {#if hasDetailed}
+              <td>{r.primaryNat}</td>
+              <td>{r.secNat}</td>
+              <td class="clamp clamp-name" title={r.name}>{r.name}</td>
+              <!-- 头像列恒显示（紧跟姓名）：按 UID 从后端快照/映射缓存取图，无映射或图不在包内显示 — -->
+              <td class="c">
+                <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里，这里只交路径与图片 URL -->
+                <AvatarThumb
+                  itemKey={r.uid}
+                  url={avatars.urls[r.uid]}
+                  path={avatars.paths[r.uid] ?? undefined}
+                  groupKey={appStore.snapshot?.currentGroup}
+                />
+              </td>
+              <td class="c">{r.hairLength}</td>
+              <td class="c">{r.hairColor}</td>
+              <td class="c">{r.ethnicityCode}</td>
+              <!-- 拓展字段列（空值显示 —） -->
+              {#if hasDetailed && showExt}
                 {@const d = r.detailed}
-                {#if showAll}<td class="c">{d?.skinCode || "—"}</td>{/if}
-                {#if showAll || dense}
-                  <td class="c imgcell">
-                    <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里，这里只交路径与图片 URL -->
-                    <AvatarThumb
-                      itemKey={r.uid}
-                      url={avatars.urls[r.uid]}
-                      path={avatars.paths[r.uid] ?? undefined}
-                      groupKey={appStore.snapshot?.currentGroup}
-                    />
-                  </td>
-                {/if}
-                {#if showAll}
-                  <td class="c">
-                    {#if d?.isNewgan}
-                      <span class={newganCls(d.isNewgan)}>{d.isNewgan}</span>
-                    {:else}—{/if}
-                  </td>
-                {/if}
-                {#if showAll && hasGender}<td class="c">{d?.gender || "—"}</td>{/if}
-                {#if showAll || dense}<td class="c">{d?.age || "—"}</td>{/if}
-                {#if showAll}
-                  <td class="c">{d?.height || "—"}</td>
-                  <td title={d?.club ?? ""}>{d?.club || "—"}</td>
-                {/if}
-                {#if showAll || dense}
-                  <td title={basedValue(r.detailed)}>{basedValue(r.detailed) || "—"}</td>
-                {/if}
-                {#if showAll}
-                  <td class="c">{d?.ca || "—"}</td>
-                  <td class="c">{d?.pa || "—"}</td>
-                  <td class="c">{d?.rca || "—"}</td>
-                {/if}
+                <td class="c">{d?.skinCode || "—"}</td>
+                <td class="c">
+                  {#if d?.isNewgan}
+                    <span class={newganCls(d.isNewgan)}>{d.isNewgan}</span>
+                  {:else}—{/if}
+                </td>
+                {#if hasGender}<td class="c">{d?.gender || "—"}</td>{/if}
+                <td class="c">{d?.age || "—"}</td>
+                <td class="c">{d?.height || "—"}</td>
+                <td title={d?.club ?? ""}>{d?.club || "—"}</td>
+                <td class="clamp clamp-based" title={basedValue(r.detailed)}>{basedValue(r.detailed) || "—"}</td>
+                <td class="c">{d?.ca || "—"}</td>
+                <td class="c">{d?.pa || "—"}</td>
+                <td class="c">{d?.rca || "—"}</td>
               {/if}
               <!-- 行尾「送生图」：设为数据源并切到 AI 生图；已是数据源的球员按钮变「已选」描边高亮 -->
               <td class="c">
@@ -441,9 +410,7 @@
                   title={t.gen.source.sendTitle(r.name)}
                   onclick={() => sendToGenerate(r)}
                 >
-                  {imageaiStore.sourcePlayer?.uid === r.uid
-                    ? t.gen.source.sent
-                    : t.gen.source.sendBtn}
+                  {imageaiStore.sourcePlayer?.uid === r.uid ? t.gen.source.sent : t.gen.source.sendBtn}
                 </button>
               </td>
             </tr>
@@ -451,7 +418,7 @@
         </tbody>
       </table>
     </div>
-  {:else if paged.result}
+  {:else}
     <div class="empty">
       <Icon name="search" stroke={1.8} />
       <p>{paged.search ? t.table.noMatchHint : t.table.emptyHint}</p>
@@ -460,50 +427,33 @@
 </div>
 
 <style>
-  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（粘顶表头在其中生效）
-     min-width:0：18 列宽表格首次挂载时宽度约束在本层即被截断，
-     只允许 .table-scroll 内部横向滚动，不把 .card-body / 网格列撑宽 */
-  .table-pane {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-    gap: 2px;
-  }
-  /* 随机人筛选：横向排列的“标签+下拉”，下拉用紧凑尺寸（全局 select 默认 width:100%） */
-  .newgan-filter {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-  }
-  .newgan-filter select {
-    width: auto;
-    padding: 6px 26px 6px 8px;
-  }
+  /* 注：.newgan-filter（随机人筛选）已收进 app.css 表格章节——名单/快照两表共用 */
 
-  /* ---- 列宽（auto 布局下为建议宽度，姓名/俱乐部/所在地会分吃剩余空间；总宽超出则横向滚动） ---- */
+  /* ---- 列宽（auto 布局下为建议宽度，姓名/俱乐部/所在地会分吃剩余空间；总宽超出则横向滚动）----
+     恒显示 10 列（勾选/UID/国籍/第二国籍/姓名/发色/肤色/族裔码/头像/送生图）建议宽合计 ≈598
+     （码值三列表头即 40/40/52，实际 ≈610）≤ 窄栏 ≈621，替换台默认不横滚——为此把勾选/国籍/第二国籍/
+     姓名/头像各收了几个像素（头像列由拓展列转为恒显示）；打开「拓展列」后追加拓展字段列（共 18 列），
+     此时横滚是预期行为。UID 建议宽按表头「UID（N 条）」实测需求定（文字 ≈87 + 内边距 16 + 排序箭头 14），不能再收 */
   .w-sel {
-    width: 36px; /* 勾选框列：固定窄列 */
+    width: 30px; /* 勾选框列：14px 复选框 + 单元格内边距 */
   }
   .w-uid {
-    width: 96px;
+    width: 120px;
   }
   .w-nat {
-    width: 56px;
+    width: 44px;
   }
   .w-nat2 {
-    width: 72px;
+    width: 64px; /* 表头「第二国籍」四个字即为下限 */
   }
   .w-name {
-    width: 140px;
+    width: 120px;
   }
   .w-code {
     width: 36px;
   }
   .w-avatar {
-    width: 62px;
+    width: 48px; /* 30px 缩略图 + 单元格内边距 */
   }
   .w-tag {
     width: 64px;
@@ -515,7 +465,7 @@
     width: 150px;
   }
   .w-based {
-    width: 178px;
+    width: 158px;
   }
   .w-rca {
     width: 56px;
@@ -540,14 +490,33 @@
   /* 头像列批量取数失败的角标：给列头 title 里那个原因一个可见落点 */
   .avatar-warn {
     color: var(--warn);
-    font-weight: 700;
+    font-weight: var(--fw-bold);
     margin-left: 3px;
   }
 
-  /* 头像格（AvatarThumb）：去掉上下内边距后 30px 的缩略图不超过文本格的盒子（约 32px），
-     行高因此始终与其余文本行一致，不会因图片被撑高（与快照预览同款） */
-  td.imgcell {
-    padding-top: 0;
-    padding-bottom: 0;
+  /* ---- dense 精简列集（替换台右栏 ≈670）：默认 1280 窗口一屏放全 7 列，不产生横向滚动 ----
+     背景：全局单元格横向内边距 sp-5(12px) 是为存档台 18 列宽表定的宽松节奏；窄栏里
+     7 列 col 建议宽合计 612 已逼近容器（约 621，含纵向滚动条占位），而姓名/所在地是
+     nowrap 长文本列，遇长姓名/长地名（英文名单尤甚）auto 布局按 min-content 把整表撑出
+     横滚，末列「送生图」被推出视口。收敛只挂 table.grid.dense，存档台全宽表不戴此类：
+     ① 横向内边距收到 sp-3(8px)，降各列内容地板；
+     ② 姓名/所在地溢出省略、全文走 title 悬停，max-width 与各自 col 建议宽同值——
+        窗口变宽时两列仍可随 auto 布局分吃剩余空间，仅长内容不再撑破窄栏；
+     1100–1280 区间右栏更窄时两列向地板收缩并省略，同样不横滚；<1100 整栏堆叠成全宽。 */
+  table.grid.dense th,
+  table.grid.dense td {
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
   }
+  table.grid.dense .clamp {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  table.grid.dense .clamp-name {
+    max-width: 120px; /* 与 .w-name 同值：列建议宽即截断点 */
+  }
+  table.grid.dense .clamp-based {
+    max-width: 158px; /* 与 .w-based 同值：列建议宽即截断点 */
+  }
+  /* 注：.table-pane 已收进 app.css 表格原语（名单、快照两卡同款） */
 </style>

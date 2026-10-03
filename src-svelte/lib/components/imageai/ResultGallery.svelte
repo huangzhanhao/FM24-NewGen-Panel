@@ -14,8 +14,7 @@
     saveAndReplace,
   } from "../../stores/imageai.svelte";
 
-  let { onregenerate }: { onregenerate: (meta: { size: string; seed: string }) => void } =
-    $props();
+  let { onregenerate }: { onregenerate: (meta: { size: string; seed: string }) => void } = $props();
 
   // ---- 结果大图灯箱 ----
   let lightboxUrl = $state<string | null>(null);
@@ -61,16 +60,10 @@
     {#if imageaiStore.generating}
       {#each Array(Math.max(1, imageaiStore.n)) as _, i (i)}
         <div class="img-card skel-card">
-          <div
-            class="skel-img"
-            aria-hidden="true"
-            style={ratioStyle(imageaiStore.size)}
-          ></div>
+          <div class="skel-img" aria-hidden="true" style={ratioStyle(imageaiStore.size)}></div>
           <div class="skel-meta">
             <span class="skel-line"></span>
-            {#if i === 0}<span class="skel-hint"
-                >{t.gen.skeletonHint}</span
-              >{/if}
+            {#if i === 0}<span class="skel-hint">{t.gen.skeletonHint}</span>{/if}
           </div>
         </div>
       {/each}
@@ -91,11 +84,7 @@
           {#if img.seed}<span>{t.gen.metaSeed(img.seed)}</span>{/if}
         </div>
         <div class="actions">
-          <button
-            class="btn sm"
-            onclick={() => saveGeneratedImageAs(img.id)}
-            title={t.gen.save}
-          >
+          <button class="btn sm" onclick={() => saveGeneratedImageAs(img.id)} title={t.gen.save}>
             <Icon name="download" class="ic" />
             {t.gen.save}
           </button>
@@ -103,9 +92,7 @@
           <button
             class="btn sm"
             disabled={!imageaiStore.sourcePlayer}
-            title={imageaiStore.sourcePlayer
-              ? t.gen.saveReplace.btn
-              : t.gen.saveReplace.needPlayer}
+            title={imageaiStore.sourcePlayer ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
             onclick={() => onSaveReplace(img.id)}
           >
             {t.gen.saveReplace.btn}
@@ -113,7 +100,7 @@
           <button
             class="btn sm"
             title={t.gen.regenTitle}
-            onclick={() => onregenerate({ size: img.size ?? '', seed: img.seed ?? '' })}
+            onclick={() => onregenerate({ size: img.size ?? "", seed: img.seed ?? "" })}
           >
             <Icon name="refresh" class="ic" />
           </button>
@@ -146,12 +133,7 @@
       if (e.target === e.currentTarget) lightboxUrl = null;
     }}
   >
-    <div
-      class="lb-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t.gen.viewLarge}
-    >
+    <div class="lb-dialog" role="dialog" aria-modal="true" aria-label={t.gen.viewLarge}>
       <img src={lightboxUrl} alt={t.gen.previewAlt} />
       <button
         class="icon-btn lb-close"
@@ -173,9 +155,17 @@
     min-height: 0;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 10px;
+    gap: var(--sp-4);
     align-content: start;
     overflow-y: auto;
+  }
+  /* ≤1024 单栏堆叠：结果卡随内容自然高，画廊不再内部滚动（整栅格单点滚动），
+     否则 flex:1 在自然高父级里会把画廊折叠为 0 */
+  @media (max-width: 1024px) {
+    .gallery {
+      flex: none;
+      overflow: visible;
+    }
   }
   .img-card {
     border: 1px solid var(--hairline-2);
@@ -189,7 +179,7 @@
   .img-frame {
     display: block;
     width: 100%;
-    padding: 8px;
+    padding: var(--sp-3);
     border: none;
     background: var(--bg-inset);
     cursor: zoom-in;
@@ -204,24 +194,24 @@
   .img-meta {
     display: flex;
     justify-content: space-between;
-    gap: 8px;
-    padding: 0 8px;
-    font-size: 11px;
+    gap: var(--sp-3);
+    padding: 0 var(--sp-3);
+    font-size: var(--fs-xs);
     color: var(--text-3);
     white-space: nowrap;
     overflow: hidden;
   }
   .actions {
     display: flex;
-    gap: 6px;
-    padding: 6px 8px 8px;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3) var(--sp-3);
     align-items: center;
   }
   .actions .icon-btn {
     margin-left: auto;
   }
   .icon-as-btn {
-    width: 30px;
+    width: var(--control-h);
     padding-left: 0;
     padding-right: 0;
   }
@@ -232,10 +222,10 @@
   }
   .skel-img {
     box-sizing: border-box;
-    width: calc(100% - 16px);
+    width: calc(100% - var(--sp-6));
     min-height: 90px;
     border-radius: var(--radius-sm);
-    margin: 8px;
+    margin: var(--sp-3);
     background: linear-gradient(
       100deg,
       var(--bg-inset) 40%,
@@ -248,8 +238,8 @@
   .skel-meta {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 0 8px 8px;
+    gap: var(--sp-1);
+    padding: 0 var(--sp-3) var(--sp-3);
   }
   .skel-line {
     height: 10px;
@@ -258,7 +248,7 @@
     width: 55%;
   }
   .skel-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-3);
   }
   @keyframes skel-shimmer {
@@ -280,7 +270,7 @@
     position: fixed;
     inset: 0;
     z-index: var(--z-modal);
-    background: rgba(0, 0, 0, 0.72);
+    background: var(--scrim);
     display: grid;
     place-items: center;
     padding: 5vh 8vw;
@@ -306,14 +296,14 @@
     right: -12px;
     width: 32px;
     height: 32px;
-    border-color: rgba(255, 255, 255, 0.4);
-    background: rgba(0, 0, 0, 0.55);
-    color: #fff;
+    border-color: var(--on-media-hairline);
+    background: var(--on-media-surface);
+    color: var(--on-media-strong);
   }
   .lb-close:hover:not(:disabled) {
-    background: rgba(0, 0, 0, 0.8);
-    color: #fff;
-    border-color: #fff;
+    background: var(--on-media-surface-hover);
+    color: var(--on-media-strong);
+    border-color: var(--on-media-strong);
   }
   @keyframes lb-fade {
     from {

@@ -18,14 +18,17 @@ use std::time::Duration;
 
 // ===================== 数据契约（与前端 types.ts 一一对应，camelCase）=====================
 
-/// 服务商类型：决定适配器。custom = 用户自填 OpenAI 兼容服务。
+/// 服务商类型：决定适配器。
+/// 【为什么不设 custom】openai 兼容服务与官方 OpenAI 是**同一套 SDK**（请求/响应同构，
+/// 差异仅在 base_url 与模型名），此前单列的 Custom 变体在全仓无任何单独分支
+/// （适配器与校验里一律与 OpenAI 成对出现），属纯冗余标记 —— 已合并，用户自建兼容服务
+/// 直接用 OpenAI 这一档、改 base_url 即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     OpenAI,
     Volcano,
     Dashscope,
-    Custom,
 }
 
 /// 自由尺寸规则（万相 2.5/2.6 等无固定尺寸枚举的模型）：0 表示该条约束不检查。
@@ -84,9 +87,26 @@ pub struct Capabilities {
     /// 前端切模型时按此初始化开关；缺省 true 兼容旧配置。
     #[serde(default = "yes")]
     pub prompt_extend_default: bool,
+    /// 百炼 `prompt_extend_mode`：智能改写模式（`direct`=DPE / `agent`=APE）。
+    /// `agent` 官方仅支持文生图，图生图传入会 400。
+    #[serde(default)]
+    pub supports_prompt_extend_mode: bool,
+    /// `prompt_extend_mode` 的默认档（官方 `direct`）。
+    #[serde(default = "direct")]
+    pub prompt_extend_mode_default: String,
+    /// 百炼 `enable_thinking`：思考模式，提升质量但增加耗时。
+    /// 官方默认 true，且**仅当 `prompt_extend=true` 时生效**。
+    #[serde(default)]
+    pub supports_enable_thinking: bool,
+    /// `enable_thinking` 的默认值（官方 true）。
+    #[serde(default = "yes")]
+    pub enable_thinking_default: bool,
     /// 百炼 `watermark`：右下角固定「AI生成」水印。
     #[serde(default)]
     pub supports_watermark: bool,
+    /// `watermark` 的默认值（官方 false，各系列一致；仍按模型存放，便于日后分化）。
+    #[serde(default)]
+    pub watermark_default: bool,
     /// 请求体是否携带 `n` 参数：z-image 无此参数（固定 1 张）必须省略；其余百炼模型为 true。
     /// 缺省 true 兼容 OpenAI/火山与旧配置（它们一律发 n）。
     #[serde(default = "yes")]
@@ -98,6 +118,11 @@ pub struct Capabilities {
     /// 自由尺寸规则；None = 仅允许 sizes 枚举值（自定义走软警告，不做硬校验）。
     #[serde(default)]
     pub size_rules: Option<SizeRules>,
+    /// 是否支持异步调用（提交任务 → 轮询 `/tasks/{task_id}` 取结果）。
+    /// 这是**协议级**能力位（同一模型在同步/异步下请求体逐字相同，差异只在 endpoint 与
+    /// 异步头），与其余能力位一样由编辑区勾选；适配器尚未实现异步，出厂一律 false。
+    #[serde(default)]
+    pub supports_async: bool,
 }
 
 fn one() -> u32 {
@@ -108,12 +133,16 @@ fn yes() -> bool {
     true
 }
 
+/// `prompt_extend_mode` 的官方默认档（serde 缺字段兜底，见 `Capabilities`）。
+fn direct() -> String {
+    "direct".into()
+}
+
 /// 一个模型行。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub model: String,
-    pub label: String,
     #[serde(default)]
     pub capabilities: Capabilities,
 }
@@ -214,6 +243,12 @@ pub struct GenRequest {
     /// 万相「AI生成」水印开关（仅百炼适配器消费；None = 按官方默认 false）。
     #[serde(default)]
     pub watermark: Option<bool>,
+    /// 百炼 `prompt_extend_mode`（仅百炼适配器消费；None = 按该模型默认档 direct）。
+    #[serde(default)]
+    pub prompt_extend_mode: Option<String>,
+    /// 百炼 `enable_thinking`（仅百炼适配器消费；None = 按该模型默认值 true）。
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
     /// 内部字段（前端不传，serde 缺省为空）：`generate` 解析出服务商后填入 base_url，
     /// 适配器据此拼 endpoint。
     #[serde(default)]
@@ -236,6 +271,18 @@ pub struct GenRequest {
     /// （z-image 无 n 参数，必须省略）。
     #[serde(default = "yes")]
     pub supports_n: bool,
+    /// 内部字段：`generate` 从模型能力集拷入，百炼适配器据此决定是否发送改写模式/思考模式，
+    /// 并在用户未选择时回流该模型声明的默认档。
+    #[serde(default)]
+    pub supports_prompt_extend_mode: bool,
+    #[serde(default = "direct")]
+    pub prompt_extend_mode_default: String,
+    #[serde(default)]
+    pub supports_enable_thinking: bool,
+    #[serde(default = "yes")]
+    pub enable_thinking_default: bool,
+    #[serde(default)]
+    pub watermark_default: bool,
 }
 
 /// 一张临时图片元信息。
@@ -476,7 +523,6 @@ impl Config {
         if !p.default_model.is_empty() && p.default_model == model {
             return Some(ModelInfo {
                 model: model.to_string(),
-                label: model.to_string(),
                 capabilities: Capabilities::default(),
             });
         }
@@ -484,13 +530,16 @@ impl Config {
     }
 }
 
-/// 把代码内置的百炼服务商目录并入一份服务商列表（builtin/load/ensure 三处同口径）。
+/// 把代码内置的百炼服务商并入一份服务商列表（builtin/load/ensure 三处同口径）。
 ///
 /// 百炼模型目录代码托管（不写 assets/image_ai.json），故：
-/// - 列表中没有 dashscope：整块补入内置服务商；
-/// - 已有（含旧版本写入的 wanx/wan2.x 旧模型行）：**只保留用户可编辑的显示名与 base_url**
-///   （base_url 可能指向代理平台，绝不能丢），kind 归位、模型行整表替换、
-///   默认模型失效（旧模型已下线）时校正为内置默认。
+/// - 列表中没有 dashscope：**整块补入内置服务商**（新装/首次导入即得到完整目录）；
+/// - 已有：**只归位 kind，模型行与默认模型一律不接管** —— 交还用户，
+///   由「服务商设置」弹窗内的模型清单增删改。
+///   【代价，用户 10-03 00:06 明确接受】新内置模型不再随版本自动推送，
+///   旧模型下线的自动清理也不再发生；换来的是「对模型的增删改可保留」——
+///   若仍做「只补缺失」，用户删掉的内置模型会在下次启动复活，与「可删」自相矛盾。
+/// - name / base_url 本就不动（改名或指向代理平台是合法定制）。
 ///
 /// 返回是否发生需要落盘的变更（内容已一致时不重写，避免每次启动无谓写文件）。
 fn reconcile_builtin_providers(providers: &mut Vec<ProviderConfig>) -> bool {
@@ -500,22 +549,12 @@ fn reconcile_builtin_providers(providers: &mut Vec<ProviderConfig>) -> bool {
         .find(|p| p.id == crate::image_ai_providers::dashscope::PROVIDER_ID)
     {
         Some(slot) => {
-            let mut changed = false;
+            // kind 是代码级不变量（决定适配器分发），必须归位；这是唯一仍由代码接管的字段。
             if slot.kind != ProviderKind::Dashscope {
                 slot.kind = ProviderKind::Dashscope;
-                changed = true;
+                return true;
             }
-            if slot.models != builtin.models {
-                slot.models = builtin.models.clone();
-                changed = true;
-            }
-            let default_valid = slot.models.iter().any(|m| m.model == slot.default_model);
-            if !default_valid {
-                slot.default_model = builtin.default_model.clone();
-                changed = true;
-            }
-            // name / base_url 刻意不动：用户改名或指向代理平台是合法定制。
-            changed
+            false
         }
         None => {
             providers.push(builtin);
@@ -539,8 +578,12 @@ pub fn upsert_provider(cfg: &mut Config, mut p: ProviderConfig) -> Result<(), St
     Ok(())
 }
 
+/// 删除服务商。判据是 **id**（不是 kind）——「能否删」讲的是「是不是内置」，
+/// 与 kind 讲的「用什么协议」是两个维度；前端删除按钮同用 id 判据（两处必须一致）。
+/// openai 不可删：它是 settings.default_provider_id 的兜底项（见 load/ensure 的悬空回退）。
+/// custom 曾在此列，已随 ProviderKind::Custom 合并而撤销保护（内置列表里不再有该条目）。
 pub fn remove_provider(cfg: &mut Config, id: &str) -> Result<(), String> {
-    if id == "openai" || id == "custom" {
+    if id == "openai" {
         return Err("内置服务商不可删除（可改名/改地址）".into());
     }
     cfg.providers.retain(|p| p.id != id);
@@ -577,14 +620,14 @@ pub fn validate_request(cfg: &Config, req: &GenRequest) -> Result<(), String> {
         return Err("张数至少为 1".into());
     }
     let provider = cfg.provider(&req.provider_id).ok_or("请先选择服务商")?;
-    // P2 起 openai/custom/volcano/dashscope 四家均已适配（image_ai_providers 族）。
+    // 三家均已适配（image_ai_providers 族）。
     if provider.base_url.trim().is_empty()
         && matches!(
             provider.kind,
-            ProviderKind::OpenAI | ProviderKind::Custom | ProviderKind::Volcano
+            ProviderKind::OpenAI | ProviderKind::Volcano
         )
     {
-        // dashscope endpoint 为固定常量，不需要 base_url；其余三家必须填写。
+        // dashscope endpoint 为固定常量，不需要 base_url；其余两家必须填写。
         return Err("请先在「服务商设置」中填写接口地址 Base URL".into());
     }
     let model = cfg
@@ -817,6 +860,11 @@ pub async fn generate(
     req.supports_watermark = model.capabilities.supports_watermark;
     req.supports_seed = model.capabilities.supports_seed;
     req.supports_n = model.capabilities.supports_n;
+    req.supports_prompt_extend_mode = model.capabilities.supports_prompt_extend_mode;
+    req.prompt_extend_mode_default = model.capabilities.prompt_extend_mode_default.clone();
+    req.supports_enable_thinking = model.capabilities.supports_enable_thinking;
+    req.enable_thinking_default = model.capabilities.enable_thinking_default;
+    req.watermark_default = model.capabilities.watermark_default;
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -940,6 +988,8 @@ mod tests {
             uid: None,
             prompt_extend: None,
             watermark: None,
+            prompt_extend_mode: None,
+            enable_thinking: None,
             base_url: String::new(),
             supports_response_format: false,
             supports_negative_prompt: false,
@@ -947,6 +997,11 @@ mod tests {
             supports_watermark: false,
             supports_seed: false,
             supports_n: true,
+            supports_prompt_extend_mode: false,
+            prompt_extend_mode_default: "direct".into(),
+            supports_enable_thinking: false,
+            enable_thinking_default: true,
+            watermark_default: false,
         }
     }
 
@@ -956,10 +1011,8 @@ mod tests {
             serde_json::to_string(&ProviderKind::Dashscope).unwrap(),
             r#""dashscope""#
         );
-        assert_eq!(
-            serde_json::from_str::<ProviderKind>(r#""custom""#).unwrap(),
-            ProviderKind::Custom
-        );
+        // 已合并：兼容服务与官方同档，不存在 custom 变体
+        assert!(serde_json::from_str::<ProviderKind>(r#""custom""#).is_err());
     }
 
     #[test]
@@ -1048,7 +1101,7 @@ mod tests {
 
     #[test]
     fn builtin_openai_disables_response_format() {
-        // 出厂 gpt-image-1 必须关掉该能力，custom 保持开启。
+        // 出厂 gpt-image-1 必须关掉该能力。
         let cfg = Config::builtin();
         let openai = cfg.model("openai", "gpt-image-1").unwrap();
         assert!(!openai.capabilities.supports_response_format);
@@ -1056,14 +1109,14 @@ mod tests {
 
     #[test]
     fn default_model_without_detail_row_is_served() {
-        // custom 服务商只有 default_model 字符串、没有模型明细行：
+        // 自建 OpenAI 兼容服务只有 default_model 字符串、没有模型明细行：
         // 请求默认模型必须放行（合成通用能力），这是用户实测被「请先选择模型」拦住的根因。
         let mut cfg = Config::builtin();
         upsert_provider(
             &mut cfg,
             ProviderConfig {
                 id: "my-relay".into(),
-                kind: ProviderKind::Custom,
+                kind: ProviderKind::OpenAI, // 兼容服务与官方同档（Custom 已合并）
                 name: "中转".into(),
                 base_url: "https://x/compatible-mode/v1".into(),
                 default_model: "qwen-image-3.0".into(),
@@ -1133,10 +1186,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_four_providers_p2() {
+    fn builtin_has_three_providers() {
+        // OpenAI 兼容服务已并入 openai 档（原 custom 条目撤销），内置三条
         let cfg = Config::builtin();
         let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["openai", "custom", "volcano", "dashscope"]);
+        assert_eq!(ids, vec!["openai", "volcano", "dashscope"]);
         // 火山能力抽查：单张、支持 seed、不支持 quality
         let flash = cfg.model("volcano", "seedream-5.0-flash").unwrap();
         assert_eq!(flash.capabilities.max_n, 1);
@@ -1170,9 +1224,9 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_migrates_legacy_dashscope_block_keeping_user_edits() {
-        // 模拟旧版本用户文件：dashscope 块带旧模型行、自定义显示名与代理 base_url、
-        // 已失效的默认模型。
+    fn reconcile_leaves_existing_dashscope_entry_to_user() {
+        // 既有 dashscope 条：模型行与默认模型**归用户所有**（弹窗内可增删改），
+        // reconcile 只做 kind 归位，绝不整表替换 —— 否则用户删掉的模型会在启动时复活。
         let mut providers = vec![
             ProviderConfig {
                 id: "openai".into(),
@@ -1187,44 +1241,60 @@ mod tests {
                 kind: ProviderKind::Dashscope,
                 name: "我的百炼代理".into(),
                 base_url: "https://proxy.example.com/api/v1".into(),
-                default_model: "wanx2.1-t2i-turbo".into(), // 已下线 → 须校正
+                default_model: "wanx2.1-t2i-turbo".into(),
                 models: vec![ModelInfo {
                     model: "wanx2.1-t2i-turbo".into(),
-                    label: "旧模型".into(),
                     capabilities: Capabilities::default(),
                 }],
             },
         ];
-        assert!(reconcile_builtin_providers(&mut providers));
+        // kind 已正确 → 无任何变更（不触发无谓写盘）。
+        assert!(!reconcile_builtin_providers(&mut providers));
         let ds = providers.iter().find(|p| p.id == "dashscope").unwrap();
-        // 用户定制保留
+        // 用户定制全部保留：名称 / 地址 / 模型行 / 默认模型
         assert_eq!(ds.name, "我的百炼代理");
         assert_eq!(ds.base_url, "https://proxy.example.com/api/v1");
-        // 模型目录与默认模型被代码接管
-        assert_eq!(ds.models.len(), 8);
-        assert!(ds.models.iter().all(|m| m.model != "wanx2.1-t2i-turbo"));
-        assert_eq!(ds.default_model, "qwen-image-3.0-pro");
-        // 再跑一次：内容已一致，不产生变更（不触发无谓写盘）。
-        assert!(!reconcile_builtin_providers(&mut providers));
-        // 用户把默认模型改成新目录内的 wan2.7：不应被校正。
-        providers[1].default_model = "wan2.7-image".into();
-        assert!(!reconcile_builtin_providers(&mut providers));
-        assert_eq!(providers[1].default_model, "wan2.7-image");
+        assert_eq!(ds.models.len(), 1, "模型行不被内置目录整表替换");
+        assert_eq!(ds.default_model, "wanx2.1-t2i-turbo", "默认模型不再被校正");
     }
 
     #[test]
-    fn ensure_migrates_legacy_dashscope_user_file_end_to_end() {
-        // 旧版本用户文件：只有旧 dashscope 服务商、默认模型已下线。ensure 必须就地迁移
-        // 并把迁移结果写回（load 与磁盘两边都是 8 模型新目录）。
+    fn reconcile_normalizes_dashscope_kind_only() {
+        // kind 是唯一仍由代码接管的字段（决定适配器分发）；归位时不得顺带补模型行。
+        let mut providers = vec![ProviderConfig {
+            id: "dashscope".into(),
+            kind: ProviderKind::OpenAI, // 错值：必须归位
+            name: "百炼".into(),
+            base_url: String::new(),
+            default_model: "qwen-image-3.0".into(),
+            models: vec![],
+        }];
+        assert!(reconcile_builtin_providers(&mut providers));
+        assert_eq!(providers[0].kind, ProviderKind::Dashscope);
+        assert_eq!(
+            providers[0].models.len(),
+            0,
+            "kind 归位不得顺带补入内置模型行"
+        );
+        assert!(!reconcile_builtin_providers(&mut providers), "归位后幂等");
+    }
+
+    #[test]
+    fn ensure_keeps_existing_dashscope_entry_untouched() {
+        // 既有 dashscope 条的模型行归用户所有：ensure 不得用内置目录覆盖它，
+        // 否则用户在弹窗里增删改的模型会被启动流程抹掉。
         let root = tempfile::tempdir().unwrap();
-        let legacy = serde_json::json!({
+        let existing = serde_json::json!({
             "providers": [{
                 "id": "dashscope",
                 "kind": "dashscope",
                 "name": "百炼通义万相",
                 "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
-                "defaultModel": "wanx2.1-t2i-turbo",
-                "models": []
+                "defaultModel": "my-own-model",
+                "models": [{
+                    "model": "my-own-model",
+                    "capabilities": {}
+                }]
             }],
             "settings": {
                 "defaultProviderId": "dashscope",
@@ -1233,17 +1303,20 @@ mod tests {
                 "namingPattern": "{uid}_{index}"
             }
         });
-        fs::write(providers_path(root.path()), legacy.to_string()).unwrap();
+        fs::write(providers_path(root.path()), existing.to_string()).unwrap();
 
         Config::ensure_user_files(root.path()).unwrap();
 
         let cfg = Config::load(root.path()).unwrap();
-        assert_eq!(cfg.provider("dashscope").unwrap().models.len(), 8);
-        assert_eq!(
-            cfg.provider("dashscope").unwrap().default_model,
-            "qwen-image-3.0-pro"
-        );
-        // 再次 ensure 幂等：迁移已落盘，不重复产生写盘变更。
+        let ds = cfg.provider("dashscope").unwrap();
+        assert_eq!(ds.name, "百炼通义万相");
+        assert_eq!(ds.models.len(), 1, "不整表补入内置目录");
+        assert_eq!(ds.models[0].model, "my-own-model");
+        assert_eq!(ds.default_model, "my-own-model", "默认模型不被校正");
+        // 缺失的内置服务商仍会补齐（openai / volcano），dashscope 不在其中。
+        assert!(cfg.provider("openai").is_some());
+        assert!(cfg.provider("volcano").is_some());
+        // 再次 ensure 幂等：不再产生写盘变更。
         let before = fs::read_to_string(providers_path(root.path())).unwrap();
         Config::ensure_user_files(root.path()).unwrap();
         assert_eq!(

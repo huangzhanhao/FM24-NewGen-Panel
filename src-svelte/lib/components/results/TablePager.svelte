@@ -69,25 +69,25 @@
     flex-wrap: nowrap;
     flex-shrink: 0;
     justify-content: flex-end;
-    gap: 6px;
+    gap: var(--sp-2);
   }
-  /* 快速跳页组：与「第 X/Y 页」之间用细分隔线区隔，整组不换行 */
+  /* 快速跳页组：与「第 X/Y 页」之间用细分隔线区隔，整组不换行；
+     分隔线余量收到最紧（sp-2），给工具栏「一排放下」让几像素 */
   .pager-jump {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: var(--sp-2);
     white-space: nowrap;
-    margin-left: 2px;
-    padding-left: 8px;
+    padding-left: var(--sp-2);
     border-left: 1px solid var(--hairline);
   }
-  /* 页码输入框：紧凑居中（覆盖全局 text 输入框的 7px 纵向内边距、默认宽度与 30px 控件高度） */
+  /* 页码输入框：紧凑居中（覆盖全局 text 输入框的纵向内边距、默认宽度与 30px 控件高度） */
   .pager-jump .jump-input {
     width: 44px;
     min-width: 0;
     min-height: 0;
-    padding: 3px 6px;
+    padding: 3px var(--sp-2);
     text-align: center;
-    font-size: 12px;
+    font-size: var(--fs-sm);
   }
 </style>

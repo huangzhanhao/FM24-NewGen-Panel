@@ -6,14 +6,7 @@
   import { t } from "../../text"; // 全局文案常量
   import { pinScrollEnd } from "../../ui/actions"; // 把长路径钉到最右的 action
   import Icon from "../../ui/Icon.svelte";
-  import {
-    appStore,
-    applySnapshot,
-    markRosterFilled,
-    markSnapshotRead,
-    runTask,
-  } from "../../stores/app.svelte";
-  import { ui } from "../../stores/ui.svelte"; // 本卡在存档资料台：扫描结果切的是本台的验证视图
+  import { appStore, applySnapshot, markRosterFilled, markSnapshotRead, runTask } from "../../stores/app.svelte";
   import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
 
@@ -96,7 +89,7 @@
     try {
       await runTask(t.setup.viewConfigBtn, () => api.readSnapshot(xmlPath));
       markSnapshotRead(xmlPath); // 记已读路径 + 触发快照预览重载（标记单点见 store，与替换收尾共用）
-      ui.verifyView = "snapshot"; // 就地看到刚读进来的快照，不出台
+      appStore.rtfPreview = "snapshot"; // 切到快照 Tab（两工作台共享：替换台也同步看到）
     } catch (e) {
       await showError(e);
     }
@@ -128,7 +121,7 @@
     try {
       const scan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
       markRosterFilled(scan); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与替换收尾共用）
-      ui.verifyView = 'table'; // 扫描成功：存档资料台的验证视图切到「名单预览」，就地看结果
+      appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
     } catch (e) {
       await showError(e);
     }
@@ -136,14 +129,9 @@
 
   /** 一键创建缺失目录（先弹确认），创建成功后重新检查拿最新结论 */
   async function fixMissing() {
-    if (!snap?.currentGroup || !integrity || integrity.missing.length === 0)
-      return;
+    if (!snap?.currentGroup || !integrity || integrity.missing.length === 0) return;
     const ok = await ask(
-      t.setup.missingDirsConfirm(
-        integrity.standard,
-        integrity.missing.length,
-        integrity.missing.join(", "),
-      ),
+      t.setup.missingDirsConfirm(integrity.standard, integrity.missing.length, integrity.missing.join(", ")),
       { title: t.setup.missingDirsTitle },
     );
     if (!ok) return;
@@ -186,15 +174,11 @@
           class="btn"
           onclick={checkIntegrity}
           disabled={busy || !snap.currentGroup}
-          title={snap.currentGroup
-            ? t.setup.checkIntegrityHint
-            : t.setup.noGroupHint}>{t.setup.checkIntegrityBtn}</button
+          title={snap.currentGroup ? t.setup.checkIntegrityHint : t.setup.noGroupHint}
+          >{t.setup.checkIntegrityBtn}</button
         >
-        <button
-          class="btn"
-          onclick={scanImages}
-          disabled={busy || !snap.currentGroup}
-          title={t.setup.scanImagesHint}>{t.setup.scanImagesBtn}</button
+        <button class="btn" onclick={scanImages} disabled={busy || !snap.currentGroup} title={t.setup.scanImagesHint}
+          >{t.setup.scanImagesBtn}</button
         >
       </div>
     </div>
@@ -223,11 +207,8 @@
               ? t.setup.selectRtfHint
               : t.setup.noGroupHint}>{t.setup.selectRtfBtn}</button
         >
-        <button
-          class="btn"
-          onclick={scanRtf}
-          disabled={busy || !snap.currentRtf}
-          title={t.setup.scanRtfHint}>{t.setup.scanRtfBtn}</button
+        <button class="btn" onclick={scanRtf} disabled={busy || !snap.currentRtf} title={t.setup.scanRtfHint}
+          >{t.setup.scanRtfBtn}</button
         >
       </div>
     </div>
@@ -271,26 +252,18 @@
         <div class="statusline">
           <span class="pill ok"><span class="dot"></span>{completeLabel}</span>
           {#if integrity.extra.length > 0}
-            <span class="note"
-              >{t.setup.extraDirsNote(integrity.extra.length)}</span
-            >
+            <span class="note">{t.setup.extraDirsNote(integrity.extra.length)}</span>
           {/if}
         </div>
       {:else if integrity.status === "fixable"}
         <div class="statusline">
           <span class="pill warn"
             ><span class="dot"></span>
-            {t.setup.pillMissingDirs(
-              integrity.missing.length,
-              integrity.found,
-              integrity.expectedTotal,
-            )}
+            {t.setup.pillMissingDirs(integrity.missing.length, integrity.found, integrity.expectedTotal)}
           </span>
-          <button class="btn primary" onclick={fixMissing} disabled={busy}
-            >{t.setup.createMissingBtn}</button
-          >
+          <button class="btn primary" onclick={fixMissing} disabled={busy}>{t.setup.createMissingBtn}</button>
         </div>
-        <p class="muted small" style="margin:6px 0 0">
+        <p class="muted small sub-note">
           {t.setup.integrityFixable(
             integrity.standard,
             integrity.missing.length,
@@ -301,22 +274,17 @@
         </p>
       {:else}
         <div class="statusline">
-          <span class="pill warn"
-            ><span class="dot"></span>{t.setup.pillUnknown}</span
-          >
+          <span class="pill warn"><span class="dot"></span>{t.setup.pillUnknown}</span>
         </div>
-        <p class="muted small" style="margin:6px 0 0">
+        <p class="muted small sub-note">
           {t.setup.integrityUnknown}
         </p>
       {/if}
     {/if}
     <!-- 标准规则入口：顶部分隔线另起一行，打开规则编辑对话框（RuleEditor） -->
     <div class="rule-row">
-      <button
-        class="btn"
-        onclick={() => ruleEditor?.openEditor()}
-        disabled={busy}
-        title={t.setup.ruleConfigHint}>{t.setup.ruleConfigBtn}</button
+      <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy} title={t.setup.ruleConfigHint}
+        >{t.setup.ruleConfigBtn}</button
       >
       <span class="note">{t.setup.ruleConfigNote}</span>
     </div>
@@ -324,3 +292,10 @@
 {/if}
 
 <RuleEditor bind:this={ruleEditor} />
+
+<style>
+  /* 完整性详情长句：贴在状态胶囊行下方的弱化说明（与 .statusline 的行距同档） */
+  .sub-note {
+    margin: var(--sp-2) 0 0;
+  }
+</style>

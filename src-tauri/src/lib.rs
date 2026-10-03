@@ -333,10 +333,11 @@ pub fn run() {
             commands::preflight_replace, // 发起前预检：本次会不会清空本档既有映射（需要就先弹确认）
             commands::start_replace,   // 启动批量替换（后台线程）
             commands::cancel_replace,  // 请求取消正在进行的替换
-            commands::query_players,   // 分页查询名单（预览）
+            commands::query_players,   // 名单预览取全量（分页/筛选/排序在前端）
             commands::query_players_by_uids, // 按 uid 批量取球员记录（队列坞条目行身份信息）
             commands::read_snapshot,   // 读取快照：解析存档 XML 快照并缓存（快照预览数据源）
-            commands::query_snapshot,  // 快照预览分页查询（UID 筛选 + 按页解析图片路径）
+            commands::query_snapshot,  // 快照预览取全量条目（imagePath 留空，按页解析）
+            commands::query_snapshot_images, // 按前端当前页批量解析快照头像实际路径
             commands::preview_player,  // 预览单个球员的映射与头像
             commands::query_avatars,   // 名单预览头像列：按 UID 批量查快照/映射缓存里的头像路径
             commands::replace_single_face, // 单人换脸

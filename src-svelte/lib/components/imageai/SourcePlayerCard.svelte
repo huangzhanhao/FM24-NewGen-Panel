@@ -8,11 +8,7 @@
   import { createAvatarSource } from "../../avatarBlobs.svelte"; // 头像路径查询 + 缩略图装载
   import { appStore, basedValue } from "../../stores/app.svelte"; // rosterReady + 第 15 列口径 + 气泡失效键
   import { ui } from "../../stores/ui.svelte"; // 就绪卡「去存档资料台」切工作台
-  import {
-    clearSourcePlayer,
-    imageaiStore,
-    setSourcePlayer,
-  } from "../../stores/imageai.svelte";
+  import { clearSourcePlayer, imageaiStore, setSourcePlayer } from "../../stores/imageai.svelte";
   import { t } from "../../text";
   import type { PlayerPreview } from "../../types";
 
@@ -55,9 +51,7 @@
         }
       });
   });
-  const srcRec = $derived(
-    imageaiStore.sourcePlayer ? (srcProfile?.record ?? null) : null,
-  );
+  const srcRec = $derived(imageaiStore.sourcePlayer ? (srcProfile?.record ?? null) : null);
 
   // ---- 台内 UID 查询：命中即 setSourcePlayer 设为数据源 ----
   let srcUidInput = $state("");
@@ -85,11 +79,7 @@
   <div class="pcard-h">
     <span>{t.gen.cardSource}</span>
     {#if imageaiStore.sourcePlayer}
-      <button
-        class="btn sm"
-        title={t.gen.source.clearTitle}
-        onclick={clearSourcePlayer}>{t.gen.source.clear}</button
-      >
+      <button class="btn sm" title={t.gen.source.clearTitle} onclick={clearSourcePlayer}>{t.gen.source.clear}</button>
     {/if}
   </div>
   {#if !imageaiStore.sourcePlayer}
@@ -108,11 +98,7 @@
           bind:value={srcUidInput}
           onkeydown={(e) => e.key === "Enter" && querySourceUid()}
         />
-        <button
-          class="btn"
-          disabled={!srcUidInput.trim()}
-          onclick={querySourceUid}>{t.gen.source.queryBtn}</button
-        >
+        <button class="btn" disabled={!srcUidInput.trim()} onclick={querySourceUid}>{t.gen.source.queryBtn}</button>
       </div>
       {#if srcQueryError}
         <p class="field-error">{srcQueryError}</p>
@@ -157,11 +143,7 @@
     {/if}
     <!-- 生成 = 单张接口：转发父级 onGenerate（未提交 Key 先串行提交、错误进右栏内联条）；
          disabled 读的 generating 与主 CTA 同源，两按钮互斥 -->
-    <button
-      class="btn primary src-generate"
-      disabled={imageaiStore.generating}
-      onclick={() => void ongenerate()}
-    >
+    <button class="btn primary src-generate" disabled={imageaiStore.generating} onclick={() => void ongenerate()}>
       {t.gen.generate}
     </button>
   {/if}
@@ -171,8 +153,8 @@
   .src-head {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: var(--sp-4);
+    margin-bottom: var(--sp-3);
   }
   .src-id {
     display: flex;
@@ -181,27 +163,27 @@
     min-width: 0;
   }
   .src-id .src-name {
-    font-weight: 600;
-    font-size: 14px;
+    font-weight: var(--fw-semibold);
+    font-size: var(--fs-lg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .src-id .src-uid {
     color: var(--text-2);
-    font-size: 12px;
+    font-size: var(--fs-sm);
   }
   /* 台内 UID 查询：输入框吃余宽，回车与按钮等价 */
   .src-query {
     display: flex;
-    gap: 8px;
+    gap: var(--sp-3);
   }
   .src-query input {
     flex: 1;
     min-width: 0;
   }
   .src-card .meta-row {
-    margin-bottom: 9px;
+    margin-bottom: var(--sp-4);
   }
   .src-generate {
     width: 100%;

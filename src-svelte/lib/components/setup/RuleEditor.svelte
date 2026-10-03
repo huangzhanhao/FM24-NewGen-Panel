@@ -82,7 +82,7 @@
 
 {#if open}
   <!-- 遮罩：点空白处关闭（同样经未保存确认） -->
-  <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
+  <div class="modal-overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
     <div
       class="modal"
       role="dialog"

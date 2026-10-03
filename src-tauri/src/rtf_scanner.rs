@@ -45,7 +45,6 @@
 //! parse 也严格：行级问题（国籍查不到、字段不合法）会丢弃该行并逐行记 Warn 日志，便于用户核对并
 //! 增删翻译表；整份文件是否合法已经在 detect 阶段检查过了。
 use crate::logger::LogSink;
-use crate::paging::PageResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -298,26 +297,18 @@ impl RtfScanner {
         self.format = RtfFormat::default();
         // 文件读取失败也要留痕：此前这里的 Err 直接返回、没有日志，用户只看到弹窗。
         let text = read_head(path, HEAD_BYTES).map_err(|e| {
-            logger.write(
-                log::Level::Error,
-                "rtf",
-                format!("RTF 格式识别失败（读取文件 {}）：{e}", path.display()),
+            logger.write(log::Level::Error,"rtf", format!("RTF 格式识别失败（读取文件 {}）：{e}", path.display()),
             );
             e
         })?;
         self.detect(&text).map_err(|e| {
-            logger.write(
-                log::Level::Error,
-                "rtf",
-                format!("RTF 格式识别失败（{}）：{e}", path.display()),
+            logger.write(log::Level::Error, "rtf", format!("RTF 格式识别失败（{}）：{e}", path.display()),
             );
             e
         })?;
         // 匹配结果：识别成功后的列结构与语言（Debug 级）。这份状态已并入「解析完成」汇总行，
         // 单独记 Info 只会让一次扫描出现两条内容相近的日志。
-        logger.debug(
-            "rtf",
-            format!(
+        logger.debug("rtf", format!(
                 "RTF 格式识别完成：{}（语言 {}）",
                 self.format.label(),
                 self.language
@@ -414,10 +405,7 @@ impl RtfScanner {
         if !self.is_valid {
             let err = "RTF 格式无效，请先执行格式识别".to_string();
             // 入口校验失败：属于调用方顺序错误，记 Error 便于定位（返回文案不变）。
-            logger.write(
-                log::Level::Error,
-                "rtf",
-                format!("解析 RTF 被拒绝（{}）：{err}", path.display()),
+            logger.write(log::Level::Error,"rtf",format!("解析 RTF 被拒绝（{}）：{err}", path.display()),
             );
             return Err(err);
         }
@@ -431,25 +419,26 @@ impl RtfScanner {
             ),
         );
         let text = fs::read_to_string(path).map_err(|e| {
-            logger.write(
-                log::Level::Error,
-                "rtf",
-                format!("读取 RTF 失败（{}）：{e}", path.display()),
+            logger.write(log::Level::Error, "rtf", format!("读取 RTF 失败（{}）：{e}", path.display()),
             );
             format!("读取 RTF 失败: {e}")
         })?;
         let total = table_rows(&text).count(); // 数据行总数（进度分母）
         logger.debug("rtf", format!("名单数据行总数：{total}"));
         let mut data = Vec::new();
-        let mut counts = RosterCounts { rows: total, ..Default::default() };
+        let mut counts = RosterCounts {
+            rows: total,
+            ..Default::default()
+        };
         let mut done = 0usize;
         for (row_no, cells) in table_rows(&text) {
             done += 1;
             progress(done, total); // 逐行上报（订阅方按百分比去重后才 emit，不会刷爆 IPC）
-            // 【逐行取消检查点】万行名单解析要跑几秒，而这一段在替换流水线的「取消」生效区间之内：
-            // 原来这里没有检查点，取消后仍要把整份解析跑完才停（用户判定程序假死 → 强杀 → 正好写坏）。
+                                   // 【逐行取消检查点】万行名单解析要跑几秒，而这一段在替换流水线的「取消」生效区间之内：
+                                   // 原来这里没有检查点，取消后仍要把整份解析跑完才停（用户判定程序假死 → 强杀 → 正好写坏）。
             if cancel.load(Ordering::Relaxed) {
-                logger.warn("rtf", format!("名单解析已取消（停在第 {row_no} / {total} 行）"));
+                logger.warn("rtf", format!("名单解析已取消（停在第 {row_no} / {total} 行）"),
+                );
                 return Err("名单解析被取消".into());
             }
             match classify_row(&cells, self.format) {
@@ -464,9 +453,7 @@ impl RtfScanner {
                     } else {
                         // 追踪执行细节：逐行说明为何被过滤（Trace 级别默认被全局阈值挡住，不影响正常日志）。
                         counts.filtered += 1;
-                        logger.trace(
-                            "rtf",
-                            format!("第 {row_no} 行非随机人，已按「仅随机人」过滤"),
+                        logger.trace( "rtf", format!("第 {row_no} 行非随机人，已按「仅随机人」过滤"),
                         );
                     }
                 }
@@ -477,9 +464,7 @@ impl RtfScanner {
                     if row_no > 0 {
                         counts.stray += 1;
                         if counts.stray <= DROP_LOG_MAX {
-                            logger.warn(
-                                "rtf",
-                                format!("第 {row_no} 行编号列不是数字，不是名单数据行，已忽略该行"),
+                            logger.warn( "rtf", format!("第 {row_no} 行编号列不是数字，不是名单数据行，已忽略该行"),
                             );
                         }
                     }
@@ -488,10 +473,7 @@ impl RtfScanner {
                     // 逐行记日志（上限 DROP_LOG_MAX 条，超出合并汇总）；国籍查不到时可据此补表。
                     counts.dropped += 1;
                     if counts.dropped <= DROP_LOG_MAX {
-                        logger.write(
-                            log::Level::Warn,
-                            "rtf",
-                            format!("第 {row_no} 行「{field}」{detail}，已跳过该行"),
+                        logger.write(log::Level::Warn, "rtf", format!("第 {row_no} 行「{field}」{detail}，已跳过该行"),
                         );
                     }
                 }
@@ -552,10 +534,7 @@ fn table_rows(text: &str) -> impl Iterator<Item = (usize, Vec<String>)> + '_ {
     text.lines().filter_map(move |line| {
         let line = strip_zero_width_chars(line);
         let ends_with_bar = line.trim_end().ends_with('|');
-        let mut cells: Vec<String> = line
-            .split('|')
-            .map(|c| c.trim().to_string())
-            .collect();
+        let mut cells: Vec<String> = line.split('|').map(|c| c.trim().to_string()).collect();
         if cells.len() < 2 {
             return None; // 无竖线的杂行不是表行
         }
@@ -911,58 +890,6 @@ fn resolve_nat(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-/// 名单分页查询参数（前端传入；Deserialize，camelCase 与前端 types.ts 一致）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerQuery {
-    pub offset: usize,
-    pub limit: usize,
-    pub search: String,
-    pub sort_key: String,
-    pub sort_desc: bool,
-    pub newgan: Option<bool>, // 随机人筛选：None=任意 / Some(true)=仅随机人 / Some(false)=仅真实球员
-}
-
-/// 名单预览的搜索/随机人筛选/排序/分页（纯逻辑，不碰后端状态）。数据留在 Rust，IPC 只回当前页。
-/// 随机人筛选按 r- 前缀判定，与解析时加前缀、扫描摘要计数同一口径。
-pub fn query_page(mut rows: Vec<PlayerRecord>, query: &PlayerQuery) -> PageResult<PlayerRecord> {
-    let search = query.search.to_lowercase();
-    if !search.is_empty() {
-        // UID/姓名/国籍任一包含搜索词即命中。
-        rows.retain(|r| {
-            r.uid.to_lowercase().contains(&search)
-                || r.name.to_lowercase().contains(&search)
-                || r.primary_nat.to_lowercase().contains(&search)
-        });
-    }
-    if let Some(want) = query.newgan {
-        rows.retain(|r| r.uid.starts_with(NEWGAN_UID_PREFIX) == want);
-    }
-    // 按前端指定的列排序；sort_desc 为 true 时反转。
-    rows.sort_by(|a, b| {
-        let ord = match query.sort_key.as_str() {
-            "name" => a.name.cmp(&b.name),
-            "primaryNat" => a.primary_nat.cmp(&b.primary_nat),
-            "ethnicityCode" => a.ethnicity_code.cmp(&b.ethnicity_code),
-            _ => a.uid.cmp(&b.uid),
-        };
-        if query.sort_desc {
-            ord.reverse()
-        } else {
-            ord
-        }
-    });
-    let total = rows.len();
-    PageResult {
-        total,
-        items: rows
-            .into_iter()
-            .skip(query.offset)
-            .take(query.limit)
-            .collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,7 +1057,7 @@ mod tests {
         // 同一份名单的行数账目必须对得上：4 个表行里 1 行编号列非数字（stray）、
         // 1 行种族码越界（dropped）。这两类过去只会让记录静默变少（stray 连一行日志都没有）。
         let (_, counts) = s
-            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {})
+            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {}, )
             .unwrap();
         assert_eq!(
             (counts.rows, counts.kept, counts.dropped, counts.stray),
@@ -1153,7 +1080,7 @@ mod tests {
         let mut s = RtfScanner::new();
         s.detect_format(&path, &logger).unwrap();
         let (data, counts) = s
-            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {})
+            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {}, )
             .unwrap();
         assert_eq!(data.len(), 1, "结尾没有管道符的行被整行拒了");
         assert_eq!((counts.dropped, counts.stray), (0, 0), "行数账目不对：{counts:?}");
@@ -1737,31 +1664,5 @@ mod tests {
                 assert!(err.contains("RTF 格式不合法"), "{name}: {err}");
             }
         }
-    }
-
-    #[test]
-    fn query_page_filters_newgan() {
-        // 随机人筛选按 r- 前缀判定：None=全量，Some(true)=仅随机人，Some(false)=仅真实球员。
-        let mk = |uid: &str, name: &str| PlayerRecord {
-            uid: uid.into(),
-            name: name.into(),
-            ..Default::default()
-        };
-        let rows = vec![mk("r-100001", "随机人甲"), mk("2000472008", "真实球员乙")];
-        let q = |newgan: Option<bool>| PlayerQuery {
-            offset: 0,
-            limit: 200,
-            search: String::new(),
-            sort_key: "uid".into(),
-            sort_desc: false,
-            newgan,
-        };
-        assert_eq!(query_page(rows.clone(), &q(None)).total, 2);
-        let yes = query_page(rows.clone(), &q(Some(true)));
-        assert_eq!(yes.total, 1);
-        assert_eq!(yes.items[0].uid, "r-100001");
-        let no = query_page(rows, &q(Some(false)));
-        assert_eq!(no.total, 1);
-        assert_eq!(no.items[0].name, "真实球员乙");
     }
 }

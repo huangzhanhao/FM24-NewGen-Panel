@@ -11,7 +11,6 @@
 //! 于是这里只留三类线索：畸形映射行的丢弃数、备份的创建与轮转清理、单人替换落空的具体原因。
 use crate::assets::CONFIG_TEMPLATE;
 use crate::json_store::write_atomic;
-use crate::paging::PageResult;
 use crate::rtf_scanner::NEWGAN_UID_PREFIX;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -400,40 +399,17 @@ pub struct SnapshotEntry {
     pub image_path: Option<String>,
 }
 
-/// 快照预览分页查询参数（search 按 UID 子串筛选，空串=不筛选）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotQuery {
-    pub offset: usize,
-    pub limit: usize,
-    pub search: String,
-}
-
-/// 快照预览的筛选/分页/图片解析（纯逻辑，不碰后端状态）：每条图片解析最多探测 png/jpg/jpeg
-/// 三种扩展名，且仅对当前页的条目执行——整表几万条逐一探测文件开销太大，按页解析才现实。
-pub fn query_snapshot_page(
-    entries: &[MappingEntry],
-    img_dir: &str,
-    query: &SnapshotQuery,
-) -> PageResult<SnapshotEntry> {
-    let search = query.search.trim().to_lowercase();
-    let matched: Vec<&MappingEntry> = entries
+/// 快照预览取全量：把整份映射缓存摊平成预览行。imagePath 留空——文件探测按页做，
+/// 前端对当前页调 query_snapshot_images 批量解析（整表几万条逐一探测开销太大）。
+pub fn snapshot_entries(entries: &[MappingEntry]) -> Vec<SnapshotEntry> {
+    entries
         .iter()
-        .filter(|e| search.is_empty() || e.uid.to_lowercase().contains(&search))
-        .collect();
-    let total = matched.len();
-    let root = Path::new(img_dir);
-    let items = matched
-        .into_iter()
-        .skip(query.offset)
-        .take(query.limit)
         .map(|e| SnapshotEntry {
             uid: e.uid.clone(),
             rel_path: record_from(&e.ethnicity, &e.image),
-            image_path: resolve_image_file(root, &e.ethnicity, &e.image),
+            image_path: None,
         })
-        .collect();
-    PageResult { total, items }
+        .collect()
 }
 
 #[cfg(test)]
@@ -940,11 +916,8 @@ mod tests {
     }
 
     #[test]
-    fn query_snapshot_page_filters_paginates_resolves() {
-        let tmp = tempfile::tempdir().unwrap();
-        let eth = tmp.path().join("SpanMed");
-        std::fs::create_dir_all(&eth).unwrap();
-        std::fs::write(eth.join("img1.png"), b"png").unwrap();
+    fn snapshot_entries_flatten_and_resolve_by_page() {
+        // 全量摊平：rel_path 复原 from 原文，imagePath 留空（探测按页走 resolve_avatar_path）。
         let entries = vec![
             MappingEntry {
                 uid: "r-1001".into(),
@@ -957,30 +930,20 @@ mod tests {
                 image: "ghost".into(),
             },
         ];
-        let root = tmp.path().to_str().unwrap();
-        let q = |offset: usize, limit: usize, search: &str| SnapshotQuery {
-            offset,
-            limit,
-            search: search.into(),
-        };
-        // 全量：rel_path 复原 from 原文；能找到的图片解析出绝对路径，找不到的为 None。
-        let all = query_snapshot_page(&entries, root, &q(0, 10, ""));
-        assert_eq!(all.total, 2);
-        assert_eq!(all.items[0].rel_path, "SpanMed/img1");
-        assert!(all.items[0]
-            .image_path
-            .as_deref()
-            .unwrap()
-            .ends_with("img1.png"));
-        assert_eq!(all.items[1].rel_path, "ghost"); // 平铺条目无目录前缀
-        assert_eq!(all.items[1].image_path, None);
-        // UID 子串筛选。
-        let hit = query_snapshot_page(&entries, root, &q(0, 10, "1001"));
-        assert_eq!(hit.total, 1);
-        assert_eq!(hit.items[0].uid, "r-1001");
-        // 翻页：limit=1 时第 2 页恰好是第二条。
-        let page2 = query_snapshot_page(&entries, root, &q(1, 1, ""));
-        assert_eq!(page2.items.len(), 1);
-        assert_eq!(page2.items[0].uid, "2000472008");
+        let all = snapshot_entries(&entries);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].rel_path, "SpanMed/img1");
+        assert_eq!(all[0].image_path, None);
+        assert_eq!(all[1].rel_path, "ghost"); // 平铺条目无目录前缀
+
+        // 按页解析：rel_path 经 resolve_avatar_path 找得到图 → 绝对路径；找不到 → None。
+        let tmp = tempfile::tempdir().unwrap();
+        let eth = tmp.path().join("SpanMed");
+        std::fs::create_dir_all(&eth).unwrap();
+        std::fs::write(eth.join("img1.png"), b"png").unwrap();
+        let resolved = resolve_avatar_path(tmp.path(), &all[0].rel_path)
+            .unwrap_or_else(|| panic!("img1 应能解析"));
+        assert!(resolved.ends_with("img1.png"));
+        assert_eq!(resolve_avatar_path(tmp.path(), &all[1].rel_path), None);
     }
 }

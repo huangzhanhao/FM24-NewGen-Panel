@@ -28,9 +28,6 @@ export const ui = $state({
   /** 当前工作台。与 logOpen 同类——它是「界面在哪一屏」，不是业务数据，故放这里而非 appStore；
    *  也不持久化：每次启动都从「存档资料」开始，用户先看清手里有什么料。 */
   workbench: 'archive' as Workbench,
-  /** 存档资料台的验证视图当前 Tab。与替换台的 appStore.resultsView **各用各的**：
-   *  两处共用同一批子组件，但用途不同（这里验证备料、那里看执行结果），状态不该互相串。 */
-  verifyView: 'table' as 'table' | 'snapshot',
 });
 
 /** 把当前主题写到 <html data-theme>——这是深/浅两套 CSS 变量的唯一切换开关。 */

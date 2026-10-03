@@ -10,14 +10,11 @@ use crate::image_ai::{self, Config};
 use crate::image_ai_queue; // 批量生成队列（条目/状态机/执行器；6 个命令在本文件尾部）
 use crate::json_store; // save_generated_image 用其 copy_atomic（既有代码亦用全限定写法）
 use crate::logger::{LogPage, LogSink, Logger};
-use crate::paging::PageResult;
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
-use crate::rtf_scanner::{
-    self, PlayerQuery, PlayerRecord, RosterCounts, RosterSummary, RtfScanner,
-};
+use crate::rtf_scanner::{PlayerRecord, RosterCounts, RosterSummary, RtfScanner};
 use crate::templates::{self, RuleConfig};
-use crate::xml_parser::{self, MappingEntry, SnapshotEntry, SnapshotQuery};
+use crate::xml_parser::{self, MappingEntry, SnapshotEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap; // AppState.image_keys；commands.rs 原本没有这条 use
 use std::path::{Path, PathBuf};
@@ -1295,13 +1292,11 @@ pub async fn query_avatars(
     Ok(out)
 }
 
-/// RTF 名单分页查询（大名单预览；数据留 Rust，IPC 只传当前页）。
-/// 名单可能上万条，一次全传会卡顿，所以只传当前页。筛选/排序/分页逻辑在 rtf_scanner::query_page，
-/// 命令层只负责取出缓存（整体 clone 避免长时间持锁）并转交。
+/// 名单预览取全量：rtf_scanner 解析一次进缓存，这里整份交给前端，分页/筛选/排序都在前端做。
+/// 小工具口径：一次全量 IPC 比按页往返简单直接；名单至多数千条，开销可忽略。
 #[tauri::command]
-pub fn query_players(state: State<'_, AppState>, query: PlayerQuery) -> PageResult<PlayerRecord> {
-    let rows = state.rtf_cache.lock().unwrap().clone();
-    rtf_scanner::query_page(rows, &query)
+pub fn query_players(state: State<'_, AppState>) -> Vec<PlayerRecord> {
+    state.rtf_cache.lock().unwrap().clone()
 }
 
 /// 按 uid 批量取球员记录（队列坞条目行的身份信息：年龄/所在地帮认出同名同姓者）。
@@ -1429,15 +1424,13 @@ fn sync_group_snapshot(
     );
 }
 
-/// 快照预览分页查询：UID 筛选 + 分页，数据留在缓存里，IPC 只传当前页。
-/// 只对当前页的条目解析实际图片路径——整表几万条逐一探测文件开销太大，按页解析才现实。
+/// 快照预览取全量条目（uid + 头像相对路径）。imagePath 留空——文件探测按页做，
+/// 前端对当前页调 query_snapshot_images 批量解析（整表几万条逐一探测文件开销太大）。
 #[tauri::command]
 pub fn query_snapshot(
     state: State<'_, AppState>,
     xml_path: String,
-    img_dir: String,
-    query: SnapshotQuery,
-) -> Result<PageResult<SnapshotEntry>, String> {
+) -> Result<Vec<SnapshotEntry>, String> {
     let mut cache = state.snapshot_cache.lock().unwrap();
     // 正常流程「读取快照」已填好缓存且路径一致；路径不符（缓存被换走）时按请求路径重读兜底。
     let hit = cache
@@ -1447,18 +1440,28 @@ pub fn query_snapshot(
     if !hit {
         let path = PathBuf::from(&xml_path);
         if !path.is_file() {
-            return Ok(PageResult {
-                total: 0,
-                items: Vec::new(),
-            });
+            return Ok(Vec::new());
         }
         *cache = Some(SnapshotCache {
             xml_path: xml_path.clone(),
             entries: xml_parser::parse_xml_entries(&path)?,
         });
     }
-    let entries = &cache.as_ref().unwrap().entries;
-    Ok(xml_parser::query_snapshot_page(entries, &img_dir, &query))
+    Ok(xml_parser::snapshot_entries(&cache.as_ref().unwrap().entries))
+}
+
+/// 按前端当前页批量解析快照头像的实际图片路径（与入参顺序一一对应；找不到为 null）。
+/// 纯路径探测不碰缓存：resolve_avatar_path 覆盖 绝对路径/带扩展名/裸词干补扩展名 三种形态。
+#[tauri::command]
+pub fn query_snapshot_images(
+    img_dir: String,
+    rel_paths: Vec<String>,
+) -> Vec<Option<String>> {
+    let root = Path::new(&img_dir);
+    rel_paths
+        .iter()
+        .map(|p| xml_parser::resolve_avatar_path(root, p))
+        .collect()
 }
 
 // ---------------- 存档浏览预览（下拉选择存档 = 浏览，不切档） ----------------

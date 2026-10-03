@@ -17,14 +17,19 @@
 //! `text2image/image-synthesis` 异步任务端点因此整体删除，适配器只保留同步一条路。
 //!
 //! 【系列参数差异】（由内置模型目录的能力集门控，能力不声明就不发字段）：
-//! | 参数 | qwen-image 2.0/3.0 | wan2.7 | wan2.6 | z-image |
-//! |---|---|---|---|---|
-//! | size | `宽*高` 像素 | `1K/2K/4K` 档位 | `宽*高` 像素 | `宽*高` 像素 |
-//! | n | 1–6 | 1–4 | 1–4 | **无此参数**（固定 1） |
-//! | negative_prompt | ✓ | ✗（在提示词里写排除项） | ✓ | ✗ |
-//! | prompt_extend | ✓ 默认开 | ✗（思考开关官方名为 thinking_mode，本项目不暴露） | ✓ 默认开 | ✓ **默认关**（开启即思考模式，单价翻倍） |
-//! | watermark | ✓ | ✓ | ✓ | ✗ |
-//! | seed | ✓ | ✓ | ✓ | ✓ |
+//! | 参数 | qwen-image 3.0 | qwen-image 2.0 | wan2.7 | wan2.6 | z-image |
+//! |---|---|---|---|---|---|
+//! | size | `宽*高` 像素 | `宽*高` 像素 | `1K/2K/4K` 档位 | `宽*高` 像素 | `宽*高` 像素 |
+//! | n | 1–6 | 1–6 | 1–4 | 1–4 | **无此参数**（固定 1） |
+//! | negative_prompt | ✓ | ✓ | ✗（在提示词里写排除项） | ✓ | ✗ |
+//! | prompt_extend | ✓ 默认开 | ✓ 默认开 | ✗（思考开关官方名为 thinking_mode，本项目不暴露） | ✓ 默认开 | ✓ **默认关**（开启即思考模式，单价翻倍） |
+//! | prompt_extend_mode | ✓ direct/agent | ✗ | ✗ | ✗ | ✗ |
+//! | enable_thinking | ✓ 默认 true（仅改写开启时生效） | ✗ | ✗ | ✗ | ✗ |
+//! | watermark | ✓ | ✓ | ✓ | ✓ | ✗ |
+//! | seed | ✓ | ✓ | ✓ | ✓ | ✓ |
+//!
+//! 尺寸约束一律用「单边 / 总像素 / 宽高比」三条表达（0 = 不检查），官方未给的项**留空**：
+//! z-image 官方只写总像素区间，其单边 512–2048 是同区间推出的口径，比例留空。
 //!
 //! 模型目录代码内置（[`builtin_provider`]），不再写在 assets/image_ai.json：
 //! 新增/调整模型随版本发布即对全部用户生效，旧用户 image_ai.json 里的 dashscope
@@ -63,45 +68,37 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
             // ---------- 千问 Qwen-Image ----------
             ModelInfo {
                 model: "qwen-image-3.0-pro".into(),
-                label: "qwen-image-3.0-pro（千问3.0 旗舰）".into(),
-                capabilities: qwen_caps(6, 4500, true),
+                capabilities: qwen_caps(6, 4500, true, true),
             },
             ModelInfo {
                 model: "qwen-image-3.0".into(),
-                label: "qwen-image-3.0（千问3.0）".into(),
-                capabilities: qwen_caps(6, 4500, true),
+                capabilities: qwen_caps(6, 4500, true, true),
             },
             ModelInfo {
                 model: "qwen-image-2.0-pro".into(),
-                label: "qwen-image-2.0-pro（千问2.0 Pro）".into(),
                 // 2.0 系列官方未公布宽高比区间，只约束总像素，故不设 ratio 门限。
-                capabilities: qwen_caps(6, 1300, false),
+                capabilities: qwen_caps(6, 1300, false, false),
             },
             ModelInfo {
                 model: "qwen-image-2.0".into(),
-                label: "qwen-image-2.0（千问2.0）".into(),
-                capabilities: qwen_caps(6, 1300, false),
+                capabilities: qwen_caps(6, 1300, false, false),
             },
             // ---------- 万相 Wan ----------
             ModelInfo {
                 model: "wan2.7-image-pro".into(),
-                label: "wan2.7-image-pro（万相2.7 Pro·4K）".into(),
                 capabilities: wan27_caps(&["1K", "2K", "4K"]),
             },
             ModelInfo {
                 model: "wan2.7-image".into(),
-                label: "wan2.7-image（万相2.7）".into(),
                 capabilities: wan27_caps(&["1K", "2K"]),
             },
             ModelInfo {
                 model: "wan2.6-t2i".into(),
-                label: "wan2.6-t2i（万相2.6）".into(),
                 capabilities: wan26_caps(),
             },
             // ---------- Z-Image ----------
             ModelInfo {
                 model: "z-image-turbo".into(),
-                label: "z-image-turbo（极速低成本·推荐）".into(),
                 capabilities: zimage_caps(),
             },
         ],
@@ -112,9 +109,11 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
 /// - 官方推荐分辨率五档（总像素均落在 2048² 内）；
 /// - 总像素 [512², 2048²]；3.0 另有宽高比 [1:8, 8:1]（2.0 无此约束）；
 /// - n≤6；负向词/改写（默认开）/水印/seed 全开。
+/// - `gen3`：改写模式（`prompt_extend_mode`）与思考模式（`enable_thinking`）是 3.0 独有的
+///   协议参数，2.0 文档里没有，故只在这一代置位。
 /// `max_prompt_chars`：3.0 官方「推荐不超过 4500 Token」、2.0 上限 1300 Token，
 /// 前端按字符计数（中文约 1 字 ≈ 1–2 Token），取值宽松只拦明显超长。
-fn qwen_caps(max_n: u32, max_prompt_chars: u32, ratio_checked: bool) -> Capabilities {
+fn qwen_caps(max_n: u32, max_prompt_chars: u32, ratio_checked: bool, gen3: bool) -> Capabilities {
     Capabilities {
         sizes: vec![
             "2048*2048".into(),
@@ -131,6 +130,10 @@ fn qwen_caps(max_n: u32, max_prompt_chars: u32, ratio_checked: bool) -> Capabili
         supports_negative_prompt: true,
         supports_prompt_extend: true,
         prompt_extend_default: true,
+        supports_prompt_extend_mode: gen3,
+        prompt_extend_mode_default: "direct".into(),
+        supports_enable_thinking: gen3,
+        enable_thinking_default: true,
         supports_watermark: true,
         max_prompt_chars,
         size_rules: Some(SizeRules {
@@ -193,7 +196,9 @@ fn wan26_caps() -> Capabilities {
 /// - 没有 n 参数（出图固定 1 张，[`Capabilities::supports_n`]=false）；
 /// - 不支持负向词、水印；
 /// - `prompt_extend` 官方**默认关**（开启即「智能思考」，返回改写词与推理过程，单价翻倍）；
-/// - 总像素 [512², 2048²]，提示词硬上限 800 字符。
+/// - 提示词硬上限 800 字符。
+/// 尺寸约束：官方只写「总像素在 [512², 2048²] 之间」；同区间推出的**单边**区间一并填上
+/// （宽/高各自 512–2048，见 [`SizeRules::min_side`]），**宽高比留空**——官方对该模型无比例限制。
 fn zimage_caps() -> Capabilities {
     Capabilities {
         sizes: vec![
@@ -212,6 +217,8 @@ fn zimage_caps() -> Capabilities {
         prompt_extend_default: false,
         max_prompt_chars: 800,
         size_rules: Some(SizeRules {
+            min_side: 512,
+            max_side: 2048,
             total_min: 512 * 512,
             total_max: 2048 * 2048,
             ..Default::default()
@@ -273,9 +280,32 @@ fn build_params(req: &GenRequest) -> Value {
                 .unwrap_or_else(|| prompt_extend_default(&req.model))),
         );
     }
+    if req.supports_prompt_extend_mode {
+        // 用户未选则回流该模型声明的默认档；两者都缺（空串）时兜官方 direct，绝不发空值。
+        let chosen = req
+            .prompt_extend_mode
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| req.prompt_extend_mode_default.clone());
+        obj.insert(
+            "prompt_extend_mode".into(),
+            json!(if chosen.is_empty() { "direct" } else { chosen.as_str() }),
+        );
+    }
+    if req.supports_enable_thinking {
+        // 思考模式官方默认 true。官方那句「仅 prompt_extend=true 时生效」交给服务端，
+        // 客户端照发用户选择（发了不生效 ≠ 发错），本层不做二次门控。
+        obj.insert(
+            "enable_thinking".into(),
+            json!(req.enable_thinking.unwrap_or(req.enable_thinking_default)),
+        );
+    }
     if req.supports_watermark {
-        // 水印官方默认关。
-        obj.insert("watermark".into(), json!(req.watermark.unwrap_or(false)));
+        // 水印默认值随模型声明（官方口径为关）。
+        obj.insert(
+            "watermark".into(),
+            json!(req.watermark.unwrap_or(req.watermark_default)),
+        );
     }
     if req.supports_seed {
         if let Some(seed) = req.seed {
@@ -427,12 +457,19 @@ mod tests {
             uid: None,
             prompt_extend: None,
             watermark: None,
+            prompt_extend_mode: None,
+            enable_thinking: None,
             supports_response_format: false,
             supports_n: true,
             supports_negative_prompt: true,
             supports_prompt_extend: true,
             supports_watermark: true,
             supports_seed: true,
+            supports_prompt_extend_mode: false,
+            prompt_extend_mode_default: "direct".into(),
+            supports_enable_thinking: false,
+            enable_thinking_default: true,
+            watermark_default: false,
         }
     }
 
@@ -508,6 +545,23 @@ mod tests {
         // 提示词上限：3.0=4500、2.0=1300。
         assert_eq!(m("qwen-image-3.0").capabilities.max_prompt_chars, 4500);
         assert_eq!(m("qwen-image-2.0").capabilities.max_prompt_chars, 1300);
+        // 改写模式 / 思考模式是 3.0 独有的协议参数，2.0 文档里没有这两个字段。
+        for id in ["qwen-image-3.0-pro", "qwen-image-3.0"] {
+            let c = &m(id).capabilities;
+            assert!(c.supports_prompt_extend_mode, "{id} 有改写模式");
+            assert!(c.supports_enable_thinking, "{id} 有思考模式");
+            assert_eq!(c.prompt_extend_mode_default, "direct");
+            assert!(c.enable_thinking_default);
+        }
+        for id in ["qwen-image-2.0-pro", "qwen-image-2.0"] {
+            let c = &m(id).capabilities;
+            assert!(!c.supports_prompt_extend_mode, "{id} 无改写模式");
+            assert!(!c.supports_enable_thinking, "{id} 无思考模式");
+        }
+        // 异步能力位出厂一律 false（适配器尚未实现异步，见 Capabilities::supports_async）。
+        for m in &p.models {
+            assert!(!m.capabilities.supports_async, "{} 异步默认关", m.model);
+        }
     }
 
     #[test]
@@ -574,6 +628,13 @@ mod tests {
         assert!(!c.prompt_extend_default, "思考改写官方默认关，开启翻倍计费");
         assert!(c.supports_seed);
         assert_eq!(c.max_prompt_chars, 800);
+        assert!(!c.supports_prompt_extend_mode, "z-image 无改写模式");
+        assert!(!c.supports_enable_thinking, "z-image 无思考模式");
+        // 尺寸约束：官方只给总像素区间，单边按同区间推出；**比例留空**（官方无比例限制）。
+        let r = c.size_rules.as_ref().unwrap();
+        assert_eq!((r.min_side, r.max_side), (512, 2048));
+        assert_eq!((r.total_min, r.total_max), (512 * 512, 2048 * 2048));
+        assert_eq!((r.ratio_min, r.ratio_max), (0.0, 0.0));
         assert!(!prompt_extend_default("z-image-turbo"));
         assert!(prompt_extend_default("qwen-image-3.0"));
         assert!(prompt_extend_default("wan2.7-image-pro"));
@@ -639,6 +700,43 @@ mod tests {
         assert_eq!(b["parameters"]["prompt_extend"], false);
         assert_eq!(b["parameters"]["watermark"], true);
         assert!(b["parameters"].get("seed").is_none());
+    }
+
+    #[test]
+    fn extend_mode_and_thinking_follow_capability_gate() {
+        // 不支持的模型（默认 fixture）：两个字段都不出现。
+        let b = build_body(&gen_req("qwen-image-2.0"));
+        assert!(b["parameters"].get("prompt_extend_mode").is_none());
+        assert!(b["parameters"].get("enable_thinking").is_none());
+
+        // 3.0：用户未选 → 回流模型声明的默认（direct / true）。
+        let mut r = gen_req("qwen-image-3.0");
+        r.supports_prompt_extend_mode = true;
+        r.supports_enable_thinking = true;
+        let b = build_body(&r);
+        assert_eq!(b["parameters"]["prompt_extend_mode"], "direct");
+        assert_eq!(b["parameters"]["enable_thinking"], true);
+
+        // 用户显式选择必须如实发送。
+        r.prompt_extend_mode = Some("agent".into());
+        r.enable_thinking = Some(false);
+        let b = build_body(&r);
+        assert_eq!(b["parameters"]["prompt_extend_mode"], "agent");
+        assert_eq!(b["parameters"]["enable_thinking"], false);
+
+        // 默认档为空串（旧配置/程序构造未声明）时兜官方 direct，绝不发空值。
+        r.prompt_extend_mode = None;
+        r.prompt_extend_mode_default = String::new();
+        assert_eq!(build_body(&r)["parameters"]["prompt_extend_mode"], "direct");
+    }
+
+    #[test]
+    fn watermark_uses_model_declared_default() {
+        let mut r = gen_req("wan2.6-t2i");
+        r.watermark_default = true;
+        assert_eq!(build_body(&r)["parameters"]["watermark"], true);
+        r.watermark = Some(false);
+        assert_eq!(build_body(&r)["parameters"]["watermark"], false);
     }
 
     // ===================== 响应解析与 URL =====================

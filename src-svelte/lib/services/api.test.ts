@@ -22,11 +22,9 @@ describe('api 封装', () => {
     expect(invoke).toHaveBeenCalledWith('preflight_replace', { mode: 'Generate' });
   });
 
-  it('queryPlayers 序列化 query 参数', async () => {
-    invoke.mockResolvedValue({ total: 0, items: [] });
-    await api.queryPlayers({ offset: 0, limit: 200, search: 'x', sortKey: 'uid', sortDesc: false, newgan: null });
-    expect(invoke).toHaveBeenCalledWith('query_players', {
-      query: { offset: 0, limit: 200, search: 'x', sortKey: 'uid', sortDesc: false, newgan: null },
-    });
+  it('queryPlayers 无参取全量（分页/筛选/排序在前端）', async () => {
+    invoke.mockResolvedValue([{ uid: 'r-1' }]);
+    await expect(api.queryPlayers()).resolves.toEqual([{ uid: 'r-1' }]);
+    expect(invoke).toHaveBeenCalledWith('query_players');
   });
 });

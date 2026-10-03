@@ -32,8 +32,9 @@ export const appStore = $state({
    *  名单预览/单人替换据此判断名单格式——拓展格式才有「随机人」筛选，extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
   rosterReady: false,                          // 后端名单缓存里有没有数据；名单预览据此决定是否渲染工具条
-  /** 替换台读视图当前 Tab（'table'=名单预览 / 'snapshot'=快照预览）。放全局态：「读取快照」成功后要跨组件切换。 */
-  resultsView: 'table' as 'table' | 'snapshot',
+  /** 预览区当前 Tab（'table'=名单预览 / 'snapshot'=快照预览）。存档资料台与替换台共用同一份：
+   *  在存档台「读取快照」后翻到快照 Tab，切到替换台仍停在快照 Tab（两处状态一致，2026-09-30 用户拍板）。 */
+  rtfPreview: 'table' as 'table' | 'snapshot',
   /** 最近一次「读取快照」的快照文件路径（null=尚未读过）。快照预览只认这份：与它一致才拉数据，
    *  切档/切组后自动回引导空态（清零见 applySnapshot）。 */
   snapshotReadPath: null as string | null,
@@ -69,7 +70,7 @@ export const appStore = $state({
     ].filter(Boolean);
   },
   /** 第 15 列语义单点：extStaff（拓展职员）名单的「所在地」列实为「偏好工作」。
-   *  按后端协议码 formatCode 判，不依赖中文展示文案——原先四个消费点各自 $derived 一份。 */
+   *  按后端协议码 formatCode 判，不依赖中文展示文案（展示文案可变，各消费点各 $derived 一份会漂移）。 */
   get isStaffRoster(): boolean {
     return this.lastRtfScan?.formatCode === 'extStaff';
   },
@@ -82,6 +83,25 @@ export const appStore = $state({
 /** 第 15 列取值：球员读 based，职员读 preferredJob（另一个在解析侧恒为空串）。 */
 export function basedValue(detailed: PlayerRecord['detailed'] | null): string {
   return (appStore.isStaffRoster ? detailed?.preferredJob : detailed?.based) ?? '';
+}
+
+/** 名单搜索口径（名单预览表格 / 单人替换卡共用这一份实现）：
+ *  UID、姓名、国籍、俱乐部任一包含搜索词即命中，大小写不敏感；
+ *  俱乐部只有拓展名单有（基础名单为空串，不参与匹配）；搜索词为空视为全部命中。 */
+export function matchPlayer(r: PlayerRecord, word: string): boolean {
+  const w = word.trim().toLowerCase();
+  if (!w) return true;
+  return (
+    r.uid.toLowerCase().includes(w) ||
+    r.name.toLowerCase().includes(w) ||
+    r.primaryNat.toLowerCase().includes(w) ||
+    (r.detailed?.club ?? '').toLowerCase().includes(w)
+  );
+}
+
+/** 过滤出命中的记录（保持入参顺序）；搜索词为空时原样返回。 */
+export function filterPlayers(rows: readonly PlayerRecord[], word: string): PlayerRecord[] {
+  return word.trim() ? rows.filter((r) => matchPlayer(r, word)) : [...rows];
 }
 
 /** 主动拉一次最新快照（调后端 get_app_state）。 */

@@ -51,10 +51,10 @@ import type { ImageConfig, QueueEntry } from '../types';
 const cfg: ImageConfig = {
   providers: [
     {
-      id: 'p1', kind: 'custom', name: 'P1', baseUrl: 'http://x/v1', defaultModel: 'm2',
+      id: 'p1', kind: 'openai', name: 'P1', baseUrl: 'http://x/v1', defaultModel: 'm2',
       models: [
         {
-          model: 'm2', label: 'M2',
+          model: 'm2',
           capabilities: {
             sizes: ['768x768'], maxN: 4, supportsQuality: false, supportsSeed: true,
             supportsSteps: false, supportsNegativePrompt: true, supportsResponseFormat: true,
@@ -338,7 +338,6 @@ describe('promptOver（提示词超限派生，D3 跨组件单点）', () => {
           models: [
             {
               model: 'mlimit',
-              label: 'MLimit',
               capabilities: {
                 ...cfg.providers[0].models[0].capabilities,
                 maxPromptChars: 10,

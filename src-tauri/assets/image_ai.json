@@ -9,7 +9,6 @@
       "models": [
         {
           "model": "gpt-image-1",
-          "label": "gpt-image-1",
           "capabilities": {
             "sizes": ["1024x1024", "1024x1536", "1536x1024"],
             "maxN": 10,
@@ -24,14 +23,6 @@
       ]
     },
     {
-      "id": "custom",
-      "kind": "custom",
-      "name": "自定义 OpenAI 兼容服务",
-      "baseUrl": "",
-      "defaultModel": "",
-      "models": []
-    },
-    {
       "id": "volcano",
       "kind": "volcano",
       "name": "火山方舟 Seedream",
@@ -40,9 +31,14 @@
       "models": [
         {
           "model": "seedream-5.0-flash",
-          "label": "seedream-5.0-flash",
           "capabilities": {
-            "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
+            "sizes": [
+              "1024x1024",
+              "2048x2048",
+              "2304x1728",
+              "2560x1440",
+              "2048x3072"
+            ],
             "maxN": 1,
             "supportsQuality": false,
             "supportsSeed": true,
@@ -54,9 +50,14 @@
         },
         {
           "model": "seedream-5.0-lite",
-          "label": "seedream-5.0-lite",
           "capabilities": {
-            "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
+            "sizes": [
+              "1024x1024",
+              "2048x2048",
+              "2304x1728",
+              "2560x1440",
+              "2048x3072"
+            ],
             "maxN": 1,
             "supportsQuality": false,
             "supportsSeed": true,
@@ -68,9 +69,14 @@
         },
         {
           "model": "seedream-4.0",
-          "label": "seedream-4.0",
           "capabilities": {
-            "sizes": ["1024x1024", "2048x2048", "2304x1728", "2560x1440", "2048x3072"],
+            "sizes": [
+              "1024x1024",
+              "2048x2048",
+              "2304x1728",
+              "2560x1440",
+              "2048x3072"
+            ],
             "maxN": 1,
             "supportsQuality": false,
             "supportsSeed": true,

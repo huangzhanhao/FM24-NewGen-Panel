@@ -39,10 +39,10 @@ pub trait ImageProvider: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderOutcome, String>> + Send + 'a>>;
 }
 
-/// 唯一分发：按 ProviderKind 取适配器（openai/custom 共用 OpenAI 协议适配器）。
+/// 唯一分发：按 ProviderKind 取适配器。
 pub fn for_kind(kind: ProviderKind) -> Box<dyn ImageProvider> {
     match kind {
-        ProviderKind::OpenAI | ProviderKind::Custom => Box::new(openai::OpenAiProvider),
+        ProviderKind::OpenAI => Box::new(openai::OpenAiProvider),
         ProviderKind::Volcano => Box::new(volcano::VolcanoProvider),
         ProviderKind::Dashscope => Box::new(dashscope::DashscopeProvider),
     }

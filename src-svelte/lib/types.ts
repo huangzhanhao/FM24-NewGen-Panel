@@ -84,14 +84,7 @@ export interface ReplaceArgs {
 /** 「发起前预检」返回（对应 Rust 的 PreflightResult）：是否需要先弹确认，以及本档档景现有条数。 */
 export interface PreflightResult { needsConfirm: boolean; existing: number; }
 
-/** 名单分页查询参数（对应 Rust 的 PlayerQuery）。
- * newgan：随机人筛选（null=任意，true=仅随机人，false=仅真实球员）。 */
-export interface PlayerQuery {
-  offset: number; limit: number; search: string; sortKey: string; sortDesc: boolean;
-  newgan: boolean | null;
-}
-
-/** 通用分页结果（对应 Rust 的 PageResult<T>）；<T> 是泛型，使用时传入具体条目类型。 */
+/** 通用分页结果（对应 Rust 的 PageResult<T>）；日志查询仍在用。 */
 export interface PageResult<T> { total: number; items: T[]; }
 
 /** 单人预览（对应 Rust 的 PlayerPreview）；三个字段都可能为 null（后端 Option 序列化为 null）。 */
@@ -102,18 +95,16 @@ export interface PlayerPreview {
 /** 「读取快照」返回摘要（对应 Rust 的 SnapshotInfo）。 */
 export interface SnapshotInfo { total: number; }
 
-/** 快照预览分页查询参数（对应 Rust 的 SnapshotQuery）；search 按 UID 子串筛选，空串=不筛选。 */
-export interface SnapshotQuery { offset: number; limit: number; search: string; }
-
-/** 快照预览的一行（对应 Rust 的 SnapshotEntry）；imagePath 为 null 表示头像包内找不到对应图片。 */
+/** 快照预览的一行（对应 Rust 的 SnapshotEntry）；relPath 是映射原文，imagePath 由前端按页批量解析。 */
 export interface SnapshotEntry { uid: string; relPath: string; imagePath: string | null; }
 
 /** 一行日志（对应 Rust 的 LogLine）。 */
 export interface LogLine { ts: string; level: string; module: string; message: string; }
 
-export type ProviderKindCode = 'openai' | 'volcano' | 'dashscope' | 'custom';
+/** 决定适配器。无 custom：OpenAI 兼容服务与官方同为一套 SDK，合并为 openai 一档（改 baseUrl 即可）。 */
+export type ProviderKindCode = 'openai' | 'volcano' | 'dashscope';
 
-/** 自由尺寸规则（万相 2.5/2.6 等）；0/缺省 = 该条约束不检查。字段缺省兼容旧配置。 */
+/** 自由尺寸规则（万相 2.5/2.6 等）；0/缺省 = 该条约束不检查。字段可部分给出。 */
 export interface SizeRules {
   minSide?: number;
   maxSide?: number;
@@ -124,22 +115,41 @@ export interface SizeRules {
 }
 
 export interface Capabilities {
-  sizes: string[]; maxN: number;
-  supportsQuality: boolean; supportsSeed: boolean; supportsSteps: boolean;
-  supportsNegativePrompt: boolean; supportsResponseFormat: boolean; qualities: string[];
-  /** 以下为 V2 新增字段：旧用户配置可能没有，消费侧一律按「缺省=false/0」处理。 */
+  sizes: string[];
+  maxN: number;
+  supportsQuality: boolean;
+  supportsSeed: boolean;
+  supportsSteps: boolean;
+  supportsNegativePrompt: boolean;
+  supportsResponseFormat: boolean;
+  qualities: string[];
+  /** 以下字段可缺省，消费侧按「缺省=false/0」处理。 */
   supportsPromptExtend?: boolean;
   supportsWatermark?: boolean;
   maxPromptChars?: number;
+  /** null/缺省 = 不吃自由尺寸约束（有预设尺寸的模型）。 */
   sizeRules?: SizeRules | null;
   /** 请求体是否携带 n（z-image 无此参数，固定出 1 张；缺省按 true 处理）。 */
   supportsN?: boolean;
-  /** 智能改写开关的官方默认值：千问/万相=true，z-image=false（开启即思考模式、单价翻倍）。 */
+  /** 智能改写开关的官方默认值：千问/万相 true，z-image false（开启即思考模式、单价翻倍）。 */
   promptExtendDefault?: boolean;
+  /** `watermark` 的默认值（官方 false；按模型存放，便于日后分化）。 */
+  watermarkDefault?: boolean;
+  /** `prompt_extend_mode`：智能改写模式（direct=DPE / agent=APE，agent 仅文生图）。3.0 独有。 */
+  supportsPromptExtendMode?: boolean;
+  /** `prompt_extend_mode` 的默认档（官方 direct）。 */
+  promptExtendModeDefault?: string;
+  /** `enable_thinking`：思考模式（官方默认 true，仅 prompt_extend=true 时生效）。3.0 独有。 */
+  supportsEnableThinking?: boolean;
+  /** `enable_thinking` 的默认值（官方 true）。 */
+  enableThinkingDefault?: boolean;
+  /** 是否支持异步调用（提交任务 → 轮询取结果）。适配器尚未实现异步，出厂一律 false。 */
+  supportsAsync?: boolean;
 }
 
 export interface ModelInfo {
-  model: string; label: string; capabilities: Capabilities;
+  model: string;
+  capabilities: Capabilities;
 }
 
 export interface ProviderConfig {
@@ -171,6 +181,10 @@ export interface GenRequest {
   promptExtend?: boolean | null;
   /** 万相「AI生成」水印开关（null/缺省 = 按官方默认 false）。 */
   watermark?: boolean | null;
+  /** 百炼 `prompt_extend_mode`（null/缺省 = 按该模型默认档 direct）。 */
+  promptExtendMode?: string | null;
+  /** 百炼 `enable_thinking`（null/缺省 = 按该模型默认值 true）。 */
+  enableThinking?: boolean | null;
   /** 内部字段（serde 缺省为空）：后端 generate 解析出服务商后回填 base_url，前端提交（单张/批量）
    *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。 */
   baseUrl?: string;

@@ -24,8 +24,8 @@
     class="step-btn"
     aria-label={t.gen.nLess}
     disabled={value <= min}
-    onclick={() => step(-1)}
-  >−</button>
+    onclick={() => step(-1)}>−</button
+  >
   <input
     class="num"
     type="number"
@@ -44,8 +44,8 @@
     class="step-btn"
     aria-label={t.gen.nMore}
     disabled={value >= max}
-    onclick={() => step(1)}
-  >+</button>
+    onclick={() => step(1)}>+</button
+  >
 </div>
 
 <style>
@@ -53,38 +53,39 @@
     flex: 1;
     display: flex;
     align-items: stretch;
-    gap: 6px;
+    gap: var(--sp-2);
   }
   .step-btn {
     flex: none;
-    width: 30px;
-    min-height: 30px;
-    height: 30px;
+    width: var(--control-h);
+    min-height: var(--control-h);
+    height: var(--control-h);
     padding: 0;
     border: 1px solid var(--hairline-2);
     border-radius: var(--radius-md);
     background: var(--bg-raised);
     color: var(--text-1);
-    font-size: 15px;
+    font-size: var(--fs-lg);
     line-height: 1;
     cursor: pointer;
-    transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+    transition:
+      border-color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
   }
   .step-btn:hover:not(:disabled) {
     border-color: var(--accent);
     color: var(--accent);
     background: var(--accent-soft);
   }
-  .step-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
+  /* 禁用外观（透明度/not-allowed）沿用全局 button:disabled 契约，此处不覆盖 */
   .num {
     flex: 1;
     min-width: 0;
+    /* 与两侧按钮同高：显式锁标准控件高，避免继承输入框 7px 纵向 padding 后高出 30px */
+    height: var(--control-h);
     text-align: center;
     font-family: var(--mono);
-    padding-left: 4px;
-    padding-right: 4px;
+    padding: 0 var(--sp-1);
   }
 </style>

@@ -155,7 +155,7 @@
       {/if}
       <span class="btn-label">
         {#if !busy}
-          <Icon name="play" size={15} />
+          <Icon name="play" size={14} />
         {/if}
         {busy ? `${t.replace.runningBtn} ${appStore.progress.value}%` : t.replace.startBtn}
       </span>
@@ -181,7 +181,7 @@
   .mode-line {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: var(--sp-6);
     min-width: 0;
   }
   .mode-line .seg3 {
@@ -189,12 +189,12 @@
   }
   /* 仅收窄本面板分段按钮的纵向内边距，不影响 RuleEditor 复用的 .seg3 */
   .mode-line .seg3 button {
-    padding: 4px 10px;
+    padding: var(--sp-1) var(--sp-4);
   }
-  /* 选项行：三个开关 22px 间距换行 */
+  /* 选项行：三个开关整档间距换行 */
   .opt-line {
     display: flex;
-    gap: 22px;
+    gap: var(--sp-7);
     flex-wrap: wrap;
   }
 
@@ -203,7 +203,7 @@
   @container (max-width: 360px) {
     .path-row.two {
       grid-template-columns: 1fr;
-      gap: 7px;
+      gap: var(--sp-2);
     }
     .path-row.two .row-label {
       text-align: left;
@@ -211,7 +211,7 @@
     .mode-line {
       flex-direction: column;
       align-items: stretch;
-      gap: 7px;
+      gap: var(--sp-2);
     }
     .mode-line .seg3 {
       flex: 1 1 auto;
@@ -222,7 +222,7 @@
   @media (max-width: 900px) {
     .path-row.two {
       grid-template-columns: 1fr;
-      gap: 7px;
+      gap: var(--sp-2);
     }
     .path-row.two .row-label {
       text-align: left;
@@ -230,7 +230,7 @@
     .mode-line {
       flex-direction: column;
       align-items: stretch;
-      gap: 7px;
+      gap: var(--sp-2);
     }
     .mode-line .seg3 {
       flex: 1 1 auto;

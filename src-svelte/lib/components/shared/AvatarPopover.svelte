@@ -195,20 +195,21 @@
 <style>
   /* 钉住态的透明捕获层：点气泡外任意处关闭（浮在所有内容之上、气泡之下） */
   .pop-backdrop { position: fixed; inset: 0; z-index: var(--z-popover); margin: 0; padding: 0; border: 0; background: transparent; cursor: default; }
-  /* 头像气泡：固定定位脱离滚动容器；入场动画 140ms / 4px，符合动效约束 */
-  .avatar-pop { position: fixed; z-index: var(--z-popover-top); width: 204px; padding: 8px; border: 1px solid var(--hairline-2); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-2), var(--shadow-pop); animation: pop-in 140ms ease; }
-  @keyframes pop-in {
+  /* 头像气泡：固定定位脱离滚动容器；入场动画走全局动效令牌（180ms / 4px，符合动效约束）。
+     keyframe 用组件专属名，避免与 app.css 的全局 pop-in 重名造成语义混淆 */
+  .avatar-pop { position: fixed; z-index: var(--z-popover-top); width: 204px; padding: var(--sp-3); border: 1px solid var(--hairline-2); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-2), var(--shadow-pop); animation: avatar-pop-in var(--dur-slow) var(--ease-out); }
+  @keyframes avatar-pop-in {
     from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: none; }
   }
   .pop-body { width: 186px; height: 186px; display: grid; place-items: center; background: var(--bg-inset); border-radius: calc(var(--radius-md) - 2px); overflow: hidden; }
   .pop-body img { display: block; width: 100%; height: 100%; object-fit: contain; }
-  .pop-status { padding: 8px; font-size: 12px; line-height: 1.6; color: var(--text-3); text-align: center; }
+  .pop-status { padding: var(--sp-3); font-size: var(--fs-sm); line-height: 1.6; color: var(--text-3); text-align: center; }
   .pop-status.err { color: var(--danger); }
   /* 气泡底部的头像标识原文：超长省略，悬停看 title */
-  .pop-cap { margin-top: 6px; font-size: 11px; color: var(--text-3); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* 钉住态关闭钮：20×20 表面色小胶囊，悬停转危险色，两主题均清晰 */
-  .pop-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--hairline-2); border-radius: 6px; background: var(--bg-surface); color: var(--text-2); line-height: 1; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; }
+  .pop-cap { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--text-3); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 钉住态关闭钮：20×20 表面色小圆角钮，悬停转危险色，两主题均清晰 */
+  .pop-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--hairline-2); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-2); line-height: 1; cursor: pointer; transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
   .pop-x :global(svg) { width: 11px; height: 11px; }
   .pop-x:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 </style>

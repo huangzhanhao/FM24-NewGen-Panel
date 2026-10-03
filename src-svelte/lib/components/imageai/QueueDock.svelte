@@ -1,6 +1,6 @@
 <!-- QueueDock · 生成队列卡：左栏「球员源·单人」下方常驻的批量任务面板，空队列也显示空态提示。
-     条目为纵向列表：勾选+头像+姓名+状态一行，UID·年龄·所在地一行，详情/操作仅成功与失败的
-     条目渲染（排队/生成中没有可操作信息，摆「—」是噪音）。
+     条目为纵向列表：勾选+姓名+头像+状态一行，
+     UID·年龄·所在地一行，详情/操作仅成功与失败的条目渲染（排队/生成中没有可操作信息，摆「—」是噪音）。
      事件订阅是进程级的：gen:queue:* 由 imageai store 的 initQueueListeners（App 挂载调一次）统一接收，
      进度/收尾载荷写在 store 里——切走 AI 台期间事件不丢、回台无需重新 query，本组件只负责展示。 -->
 <script lang="ts">
@@ -23,12 +23,7 @@
     queueStart,
     setSourcePlayer,
   } from "../../stores/imageai.svelte";
-  import type {
-    GenImage,
-    PlayerRecord,
-    QueueEntry,
-    QueueStatus,
-  } from "../../types";
+  import type { GenImage, PlayerRecord, QueueEntry, QueueStatus } from "../../types";
 
   // 进度/收尾载荷来自进程级订阅（imageai store），组件卸载不影响事件接收。
   const progress = $derived(imageaiStore.queueProgress); // 最近一次进度事件载荷（驱动进度条即时更新）
@@ -38,29 +33,14 @@
   const thumbs = $state<Record<string, Array<{ id: string; url: string }>>>({}); // 条目 id → 缩略图 blob URL
 
   const entries = $derived(imageaiStore.queue);
-  const dockScope = $derived(imageaiStore.enqueueScope);
-  const queuedCount = $derived(
-    entries.filter((e) => e.status === "queued").length,
-  );
-  const runningCount = $derived(
-    entries.filter((e) => e.status === "running").length,
-  );
-  const pickedIds = $derived(
-    entries.filter((e) => picked[e.id]).map((e) => e.id),
-  );
-  const allPicked = $derived(
-    entries.length > 0 && pickedIds.length === entries.length,
-  );
+  const queuedCount = $derived(entries.filter((e) => e.status === "queued").length);
+  const runningCount = $derived(entries.filter((e) => e.status === "running").length);
+  const pickedIds = $derived(entries.filter((e) => picked[e.id]).map((e) => e.id));
+  const allPicked = $derived(entries.length > 0 && pickedIds.length === entries.length);
   /** 恰好勾选一条时的该条目（「查看单人」的操作对象；0 条或多选时为 null）。 */
-  const singlePicked = $derived(
-    pickedIds.length === 1
-      ? (entries.find((e) => e.id === pickedIds[0]) ?? null)
-      : null,
-  );
+  const singlePicked = $derived(pickedIds.length === 1 ? (entries.find((e) => e.id === pickedIds[0]) ?? null) : null);
   const progressPct = $derived(
-    progress && progress.total > 0
-      ? Math.round((progress.current / progress.total) * 100)
-      : 0,
+    progress && progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0,
   );
 
   function statusText(s: QueueStatus) {
@@ -75,8 +55,7 @@
   /** 详情行：失败显示原因，成功显示张数，其余留 —。 */
   function detailText(e: QueueEntry) {
     if (e.status === "failed") return e.error || "—";
-    if (e.status === "success")
-      return t.gen.queue.imagesDone(e.images?.length ?? 0);
+    if (e.status === "success") return t.gen.queue.imagesDone(e.images?.length ?? 0);
     return "—";
   }
 
@@ -117,9 +96,7 @@
         }
       }
       if (token !== infoToken) return; // 期间条目已变：过期结果整批作废
-      rowInfo = Object.fromEntries(
-        uids.map((u) => [u, infoCache.get(u) ?? null]),
-      );
+      rowInfo = Object.fromEntries(uids.map((u) => [u, infoCache.get(u) ?? null]));
     })();
   });
 
@@ -188,10 +165,7 @@
     }
   }
   async function onCancel() {
-    if (
-      !(await confirm(t.gen.queue.cancelConfirm, { title: t.dialog.warning }))
-    )
-      return;
+    if (!(await confirm(t.gen.queue.cancelConfirm, { title: t.dialog.warning }))) return;
     try {
       await queueCancel();
     } catch (e) {
@@ -256,47 +230,31 @@
 <div class="dock pcard">
   <div class="dock-head pcard-h">
     <span>{t.gen.queue.tabQueue}</span>
-    {#if dockScope}
-      <span class="dock-scope" title={t.gen.queue.scopeTitle(dockScope)}
-        >{t.gen.queue.scopeTitle(dockScope)}</span
-      >
-    {/if}
     {#if imageaiStore.queueRunning && progress}
-      <span class="muted small mono">{progress.current} / {progress.total}</span
-      >
+      <small class="muted small mono">{progress.current} / {progress.total}</small>
     {/if}
   </div>
 
   <!-- 工具按钮 2×2：四个等宽按钮一行放不下窄卡（约 300px），网格布局两行稳定不换行抖动 -->
   <div class="toolbar">
     <button
-      class="btn sm primary"
+      class="btn sm primary queue-start"
       disabled={imageaiStore.queueRunning || queuedCount === 0}
       onclick={onStart}
     >
       <Icon name="play" size={11} />
-      {t.gen.queue.startBtn}
+      <span class="queue-start-label">{t.gen.queue.startBtn}</span>
     </button>
-    <button
-      class="btn sm"
-      disabled={!imageaiStore.queueRunning}
-      onclick={onCancel}>{t.gen.queue.cancelBtn}</button
-    >
+    <button class="btn sm" disabled={!imageaiStore.queueRunning} onclick={onCancel}>{t.gen.queue.cancelBtn}</button>
     <button
       class="btn sm"
       disabled={!singlePicked}
-      title={singlePicked
-        ? t.gen.queue.viewSingleTitle(singlePicked.name)
-        : t.gen.queue.viewSingleHint}
+      title={singlePicked ? t.gen.queue.viewSingleTitle(singlePicked.name) : t.gen.queue.viewSingleHint}
       onclick={onViewSingle}
     >
       {t.gen.queue.viewSingle}
     </button>
-    <button
-      class="btn sm danger"
-      disabled={imageaiStore.queueRunning || pickedIds.length === 0}
-      onclick={onRemove}
-    >
+    <button class="btn sm danger" disabled={imageaiStore.queueRunning || pickedIds.length === 0} onclick={onRemove}>
       {t.gen.queue.removeBtn}
     </button>
   </div>
@@ -305,22 +263,18 @@
     <div class="progress-row">
       <span class="muted small">{t.gen.queue.progressLabel}</span>
       <div
-        class="pbar"
+        class="progress-track"
         role="progressbar"
         aria-valuenow={progress.current}
         aria-valuemin={0}
         aria-valuemax={progress.total}
       >
-        <div class="pfill" style={`width:${progressPct}%`}></div>
+        <div class="progress-fill" style={`width:${progressPct}%`}></div>
       </div>
     </div>
   {:else if lastFinished}
     <div class="muted small finished-row">
-      {t.gen.queue.finishedSummary(
-        lastFinished.finished,
-        lastFinished.failed,
-        lastFinished.total,
-      )}
+      {t.gen.queue.finishedSummary(lastFinished.finished, lastFinished.failed, lastFinished.total)}
     </div>
   {/if}
 
@@ -340,17 +294,18 @@
               checked={!!picked[e.id]}
               onchange={(ev) => (picked[e.id] = ev.currentTarget.checked)}
             />
+            <div class="q-id">
+              <span class="q-name" title={e.name}>{e.name}</span>
+              <span class="q-sub mono" title={subText(e)}>{subText(e)}</span>
+            </div>
             <AvatarThumb
               itemKey={e.uid}
               url={rowAvatars.urls[e.uid]}
               path={rowAvatars.paths[e.uid] ?? undefined}
               groupKey={appStore.snapshot?.currentGroup}
+              placeholder=""
             />
-            <div class="q-id">
-              <span class="q-name" title={e.name}>{e.name}</span>
-              <span class="q-sub mono" title={subText(e)}>{subText(e)}</span>
-            </div>
-            <span class="badge {e.status}">{statusText(e.status)}</span>
+            <span class="pill q-status {e.status}">{statusText(e.status)}</span>
           </div>
           {#if e.status === "success" || e.status === "failed"}
             <div class="q-detail">
@@ -362,17 +317,11 @@
                   aria-expanded={expandedId === e.id}
                   onclick={() => void toggleThumbs(e)}
                 >
-                  {expandedId === e.id
-                    ? t.gen.queue.collapseImages
-                    : t.gen.queue.viewImages}
+                  {expandedId === e.id ? t.gen.queue.collapseImages : t.gen.queue.viewImages}
                 </button>
               {/if}
               {#if e.status === "failed" && !imageaiStore.queueRunning}
-                <button
-                  type="button"
-                  class="btn sm link-btn"
-                  onclick={() => void onRetry(e)}
-                >
+                <button type="button" class="btn sm link-btn" onclick={() => void onRetry(e)}>
                   {t.gen.queue.retryEntry}
                 </button>
               {/if}
@@ -424,7 +373,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--sp-3);
   }
   .dock-head {
     margin-bottom: 0; /* .pcard-h 自带 margin-bottom，会与 .dock 的 gap 叠加过松 */
@@ -432,63 +381,64 @@
   .toolbar {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 6px;
+    gap: var(--sp-2);
+  }
+  /* 启动生成：文字与其余三个纯文字按钮同中线，播放图标悬入左列留白
+     （两侧 1fr + 对称列距保证中列居中；仅覆盖排版，几何/字号仍走 .btn.sm 契约） */
+  .queue-start {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+  }
+  .queue-start :global(svg) {
+    grid-column: 1;
+    justify-self: end;
+  }
+  .queue-start-label {
+    grid-column: 2;
   }
   .progress-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--sp-4);
   }
-  .pbar {
-    flex: 1;
-    min-width: 0;
-    height: 6px;
-    border-radius: 99px;
-    background: var(--progress-bg);
-    overflow: hidden;
-  }
-  .pfill {
-    height: 100%;
-    border-radius: 99px;
-    background: var(--accent);
-    transition: width var(--dur) var(--ease-out);
-  }
+  /* 进度条轨道/填充用全局 .progress-track/.progress-fill 唯一原语 */
   /* 窄卡里收尾摘要允许换行 */
   .finished-row {
     overflow-wrap: anywhere;
   }
-  .badge {
-    border-radius: 99px;
-    padding: 1px 9px;
-    font-size: 11.5px;
-    white-space: nowrap;
+  /* 行尾状态胶囊：几何直接复用全局 .pill 原语（标准档 3px/11px + fs-sm）；
+     scoped 只补行内防压缩，四态变体仅覆盖色差 */
+  .q-status {
     flex: none;
+    white-space: nowrap;
   }
-  .badge.queued {
+  .q-status.queued {
     color: var(--text-2);
     background: var(--bg-raised);
   }
-  .badge.running {
+  .q-status.running {
     color: var(--warn);
     background: var(--warn-soft);
   }
-  .badge.success {
+  .q-status.success {
     color: var(--ok);
     background: var(--ok-soft);
   }
-  .badge.failed {
+  .q-status.failed {
     color: var(--danger);
     background: var(--danger-soft);
   }
-  /* 条目列表：顶行 = 勾选 + 头像 + 姓名/副行 + 状态徽章；次行 = 详情与操作（仅成功/失败） */
+  /* 条目列表：顶行 = 勾选 + 姓名/副行 + 头像 + 状态胶囊；次行 = 详情与操作（仅成功/失败） */
   .list-scroll {
     flex: 1;
     min-height: 0;
     overflow: auto;
   }
   .q-item {
-    padding: 7px 6px;
+    padding: var(--sp-3) var(--sp-2);
     border-radius: var(--radius-md);
+    transition: background-color var(--dur-fast) var(--ease-out);
   }
   .q-item + .q-item {
     border-top: 1px solid var(--hairline-2);
@@ -499,8 +449,12 @@
   .q-top {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--sp-3);
     min-width: 0;
+  }
+  /* 头像在姓名列与状态胶囊之间：不参与压缩，空间紧张时由 .q-id 省略号让出宽度 */
+  .q-top :global(.thumb-btn) {
+    flex: none;
   }
   .q-id {
     flex: 1;
@@ -510,14 +464,14 @@
     gap: 1px;
   }
   .q-name {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .q-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-3);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -526,14 +480,14 @@
   .q-detail {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--sp-3);
     min-width: 0;
-    padding-left: 26px; /* 与顶行姓名列对齐（勾选框宽 + 间距） */
+    padding-left: 22px; /* 与顶行姓名列对齐（勾选框 14px + 间距 8px） */
   }
   .q-detail .detail {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--fs-sm);
     color: var(--text-2);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -544,10 +498,13 @@
     flex: none;
     border: none;
     background: none;
-    padding: 2px 4px;
-    min-height: 24px;
-    height: 24px;
+    padding: 2px var(--sp-1);
+    min-height: var(--control-h-xs);
+    height: var(--control-h-xs);
     color: var(--accent);
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out);
   }
   .link-btn:hover:not(:disabled) {
     background: var(--accent-soft);
@@ -557,18 +514,18 @@
   .thumb-strip {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
-    padding: 2px 0 4px 26px;
+    gap: var(--sp-4);
+    padding: 2px 0 var(--sp-1) 22px;
   }
   .thumb {
-    width: 118px;
+    width: var(--thumb-queue-size);
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: var(--sp-2);
   }
   .thumb img {
-    width: 118px;
-    height: 118px;
+    width: var(--thumb-queue-size);
+    height: var(--thumb-queue-size);
     object-fit: contain;
     border: 1px solid var(--hairline-2);
     border-radius: var(--radius-md);
@@ -589,7 +546,7 @@
   .foot-all {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: var(--sp-3);
     cursor: pointer;
   }
 </style>

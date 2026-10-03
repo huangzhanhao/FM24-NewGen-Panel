@@ -1,128 +1,151 @@
 /**
- * 分页取数骨架（名单预览 / 快照预览两表格共用）：
- * 页码、搜索词、令牌防乱序、300ms 防抖、换代复位、总页数派生。
+ * 本地分页骨架（名单预览 / 快照预览共用）：后端一次性给全量（换代时取一次），
+ * 分页/筛选/排序全在前端内存完成——翻页/搜索/排序/行数变化都不产生任何后端往返。
  *
- * 【为什么抽它】两表格的分页状态/防抖/令牌/复位 effect 逐行同构（历史复制粘贴），
- * 是「改一处漏两处」的面；列定义、排序键、额外筛选、头像装载等视图关切留在组件。
+ * 【分工】组件持有搜索词（paged.search，输入框直接绑定）与筛选/排序状态，
+ * 经 opts.select 作用到全量上；本骨架负责：换代取全量、页码、切片（view）、错误兜底。
  *
- * 【边界】本文件只管「取数骨架」，不碰 Tauri 弹窗：
- *  - fetch 由组件闭包提供（排序/筛选/路径等参数组件自取）；返回 null 表示组件自判过期
- *    （如快照路径已换），本轮作废不写；
- *  - deps 是触发刷新的响应式依赖（在 effect 内读取建立追踪）；resetKey 变化则换代复位；
- *  - 失败经 onError 收口（返回错误态的 result；showError 由组件闭包调，本文件不依赖
- *    Tauri 弹窗，vitest 可直测）。
+ * 【每页行数 = 布局自适应，无行数常量】传入 opts.pane（恒渲染的 .table-pane）即开启：
+ * 面板装得下几行，每页就是几行。行数 = floor(.table-scroll.clientHeight / --table-row-h) − 1
+ * （减一行粘顶表头）：clientHeight 是浏览器布局后的实测值，工具条一排/两排（窄栏 flex 换行）、
+ * 横滚条占不占位都已自动扣好，JS 不做固定减法；ResizeObserver 只随高度变化重算——本地切片零成本。
  *
- * 【两种构造方式】组件用 createPagedResource（自动接线换代/防抖两个 effect）；
- * vitest 用 manual: true（跳过接线，直接驱动 load/reset 测纯逻辑——effect 根在
- * node 测试环境不可用，见 pagedResource.test.ts）。
- * page/search 是 $state 字段：模板可 bind:page={paged.page} / bind:value={paged.search}。
+ * 【换代】resetKey 变化 → 复位 + 重取全量；令牌防乱序：晚到的旧响应不得覆盖新结果。
  */
-import type { PageResult } from '../types';
-
-/** 一次取页的入参（组件闭包补齐自己的排序/筛选/路径）。 */
-export interface PagedFetchArgs {
-  offset: number;
-  limit: number;
-  search: string;
-}
-
 export interface PagedResourceOptions<T> {
-  /** 拉一页；组件闭包自取额外参数。返回 null = 组件自判过期，作废不写。 */
-  fetch: (args: PagedFetchArgs) => Promise<PageResult<T> | null>;
-  /** 触发刷新的响应式依赖（在 effect 内读取建立追踪；本体 page/search 已含）。 */
-  deps: () => unknown;
-  /** 换代键：值变化即换代复位（回第 1 页、清搜索、作废在途，并调用 onReset）。 */
+  /** 取全量（换代且门控放行时调用一次）。 */
+  fetch: () => Promise<T[]>;
+  /** 换代键：变化即换代（复位 + 重新取全量）。 */
   resetKey: () => string | number;
-  /** 每页条数（两表格现状同为 8，默认 8）。 */
-  pageSize?: number;
-  /** 载入门控：返回 false 时本轮不查询（快照侧 readable=false 的引导空态）。 */
+  /** 载入门控：false 时不取数（快照侧 readable=false 的引导空态）。 */
   shouldLoad?: () => boolean;
-  /** 换代复位后的组件侧清理（清排序/筛选/图账等）。 */
+  /** 换代复位后的组件侧清理（清排序/头像账等）。 */
   onReset?: () => void;
-  /** 拉取成功后的组件侧动作（装载本页头像图等）。 */
-  onLoaded?: (result: PageResult<T>) => void;
-  /** 查询失败：返回错误态 result 并自行提示（不传则 result 置 null、不弹窗）。 */
-  onError?: (e: unknown) => PageResult<T> | null;
+  /** 取数失败：返回空全量并自行提示。 */
+  onError?: (e: unknown) => T[];
+  /** 组件的筛选/排序（读组件本地状态的纯函数）；分页切片在其后执行。 */
+  select?: (items: T[]) => T[];
+  /** 表格面板（恒渲染）。提供即开启「每页行数随面板高度自适应」。 */
+  pane?: () => HTMLElement | undefined;
 }
 
 export class PagedResource<T> {
   /** 当前页码（0 起）——模板可 bind:page={paged.page}。 */
   page = $state(0);
-  /** 搜索词——模板可 bind:value={paged.search}。 */
+  /** 搜索词——模板可 bind:value={paged.search}；筛选语义由 opts.select 解释。 */
   search = $state('');
-  /** 当前页结果；null = 尚无数据，或查询失败且 onError 未提供错误态。 */
-  result = $state<PageResult<T> | null>(null);
+  /** 全量结果；null = 尚无数据或取数失败。 */
+  result = $state<T[] | null>(null);
+  /**
+   * 每页行数：由面板高度实测写入（#measure），**没有设计常量**。
+   * 初值 0 = 未测量；实测发生在挂载 effect（同步），早于异步取数返回，用户看不到中间态。
+   */
+  pageSize = $state(0);
 
   readonly #opts: PagedResourceOptions<T>;
-  readonly #pageSize: number;
-  #token = 0; // 令牌：翻页/筛选/换代后，在途旧响应不得写回
-  #timer: ReturnType<typeof setTimeout> | undefined;
+  #token = 0; // 令牌：换代后，在途旧响应不得写回
 
-  constructor(
-    opts: PagedResourceOptions<T>,
-    /** manual: true = 不接 effect（vitest 直测纯逻辑用）；默认自动接线。 */
-    wiring?: { manual?: boolean },
-  ) {
+  constructor(opts: PagedResourceOptions<T>, wiring?: { manual?: boolean }) {
     this.#opts = opts;
-    this.#pageSize = opts.pageSize ?? 8; // 两表格现状同为 8（单页 8 行）
     if (wiring?.manual) return;
-
-    // 换代（resetKey 变化）：换代语义 = 「这份数据从头看」，触发面收敛到 resetKey 一个读取。
+    // 行数自适应：滚动盒 clientHeight 是浏览器布局后的实测值（工具条换行/横滚条占位都已扣除），
+    // 同时观测 pane 与实际 .table-scroll 的高度；空态 ↔ 表格是条件渲染，childList 补挂/补测。
+    // 只认高度变化：纵滚条进出只改宽度，若也重测会形成「减行→条消失→加行→条又出现」的自激环。
+    $effect(() => {
+      const pane = opts.pane?.();
+      if (!pane) return;
+      let lastH = -1;
+      const remeasure = () => {
+        const scroller = pane.querySelector<HTMLElement>('.table-scroll');
+        if (!scroller || scroller.clientHeight === lastH) return; // 空态等挂载；纯宽度变化忽略
+        lastH = scroller.clientHeight;
+        this.#measure(pane);
+      };
+      const ro = new ResizeObserver(remeasure);
+      ro.observe(pane);
+      const observed = new WeakSet<Element>();
+      const track = (el: Element | null) => {
+        if (el && !observed.has(el)) {
+          observed.add(el);
+          ro.observe(el);
+        }
+      };
+      track(pane.querySelector('.table-scroll'));
+      remeasure();
+      const mo = new MutationObserver(() => {
+        track(pane.querySelector('.table-scroll'));
+        remeasure();
+      });
+      mo.observe(pane, { childList: true });
+      return () => {
+        ro.disconnect();
+        mo.disconnect();
+      };
+    });
+    // 换代/门控变化：复位并重取全量（门控分支在 #load 里；此处读取 shouldLoad 是为了追踪）
     $effect(() => {
       opts.resetKey();
-      this.reset();
-    });
-
-    // 页码/搜索/组件依赖变化：300ms 防抖拉取（两表格现状一致，避免边输入边频繁请求）。
-    $effect(() => {
-      void this.page;
-      void this.search;
-      opts.deps();
-      this.#schedule();
-      return () => clearTimeout(this.#timer); // 依赖变化/组件销毁时取消定时器
+      opts.shouldLoad?.();
+      this.#applyReset();
+      void this.#load();
     });
   }
 
-  /** 总页数：总数除以每页向上取整（至少 1 页）。 */
-  get totalPages(): number {
-    return this.result ? Math.max(1, Math.ceil(this.result.total / this.#pageSize)) : 1;
+  /**
+   * 面板装得下几行，每页就是几行。直接读 .table-scroll 的实测 clientHeight——
+   * 工具条一排/两排（窄栏 flex 换行）、横滚条占不占位，浏览器布局时都已扣除，
+   * JS 不再维护固定区减法常数（常数曾只覆盖一排工具条，替换台两排时凭空多算一行逼出纵滚条）。
+   */
+  #measure(pane: HTMLElement): void {
+    const scroller = pane.querySelector<HTMLElement>('.table-scroll');
+    if (!scroller) return; // 空态：滚动盒条件渲染，挂载后由 childList 通告补测
+    const n = Number.parseFloat(getComputedStyle(pane).getPropertyValue('--table-row-h'));
+    const row = Number.isFinite(n) && n > 0 ? n : 40; // 行高 = 表头高（同一令牌）
+    // 滚动盒内容高 / 行高，再减一行粘顶表头；夹 1 行下限（极小窗下纵滚条不可避免）
+    this.pageSize = Math.max(1, Math.floor(scroller.clientHeight / row) - 1);
   }
 
-  /** 换代复位：回第 1 页、清搜索、作废在途，组件侧清理交 onReset。 */
+  /** 筛选/排序后的当前页视图（模板与派生状态只读这里）。 */
+  view = $derived.by(() => {
+    const size = Math.max(1, this.pageSize); // 未测量（0）时退化为单行/页，测量后立即正确
+    const all = this.#opts.select ? this.#opts.select(this.result ?? []) : (this.result ?? []);
+    const total = all.length;
+    const last = Math.max(0, Math.ceil(total / size) - 1);
+    const page = Math.min(this.page, last); // 筛选后总页数变少时夹住，避免空页
+    const start = page * size;
+    return { total, items: all.slice(start, start + size) };
+  });
+
+  /** 总页数（按筛选后的 total，至少 1 页）。 */
+  totalPages = $derived(Math.max(1, Math.ceil(this.view.total / Math.max(1, this.pageSize))));
+
+  /** 换代复位：回第 1 页、清搜索、作废在途取数并清空全量，然后重取。 */
   reset(): void {
-    this.result = null;
+    this.#applyReset();
+    void this.#load();
+  }
+
+  #applyReset(): void {
     this.page = 0;
     this.search = '';
+    this.result = null;
     this.#token++;
     this.#opts.onReset?.();
   }
 
-  /** 拉当前页。fetcher 返回 null = 组件自判过期，作废不写。 */
-  async load(): Promise<void> {
-    const opts = this.#opts;
-    if (opts.shouldLoad && !opts.shouldLoad()) return;
+  async #load(): Promise<void> {
+    if (this.#opts.shouldLoad?.() === false) return; // 门控：未就绪时不取数（快照侧引导空态）
     const mine = ++this.#token;
-    let got: PageResult<T> | null = null;
+    let got: T[];
     try {
-      got = await opts.fetch({
-        offset: this.page * this.#pageSize,
-        limit: this.#pageSize,
-        search: this.search,
-      });
+      got = await this.#opts.fetch();
     } catch (e) {
       if (mine !== this.#token) return; // 过期失败不落状态
-      this.result = opts.onError ? opts.onError(e) : null;
+      this.result = this.#opts.onError ? this.#opts.onError(e) : null;
       return;
     }
-    // 期间又翻页/换代/过期：整份作废——不拦的话表体停在第 N 页、分页器却显示第 M 页。
-    if (mine !== this.#token || got === null) return;
+    if (mine !== this.#token) return; // 期间又换代：整份作废
     this.result = got;
-    opts.onLoaded?.(got);
-  }
-
-  #schedule(): void {
-    clearTimeout(this.#timer);
-    this.#timer = setTimeout(() => this.load(), 300);
   }
 }
 

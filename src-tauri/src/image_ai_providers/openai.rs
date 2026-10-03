@@ -153,6 +153,8 @@ mod tests {
             uid: None,
             prompt_extend: None,
             watermark: None,
+            prompt_extend_mode: None,
+            enable_thinking: None,
             supports_response_format: false,
             // OpenAI 官方端点不认百炼扩展参数，样本一律置 false。
             supports_negative_prompt: false,
@@ -160,6 +162,12 @@ mod tests {
             supports_watermark: false,
             supports_seed: false,
             supports_n: true,
+            // 百炼专属：改写模式/思考模式与该模型的默认值，其他协议不声明。
+            supports_prompt_extend_mode: false,
+            prompt_extend_mode_default: "direct".into(),
+            supports_enable_thinking: false,
+            enable_thinking_default: true,
+            watermark_default: false,
         }
     }
 

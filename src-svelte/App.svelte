@@ -36,8 +36,8 @@
     <TopNav />
     {#if ui.workbench === "archive"}
       <SetupCard />
-      <!-- 验证视图：扫描 RTF / 读取快照后就地看结果，不必跳去别的工作台 -->
-      <RosterSnapshotTabs bind:view={ui.verifyView} />
+      <!-- 验证视图：扫描 RTF / 读取快照后就地看结果；Tab 存 appStore.rtfPreview 两工作台共享，表内浏览态随组件卸载复位 -->
+      <RosterSnapshotTabs bind:view={appStore.rtfPreview} />
     {:else if ui.workbench === "replace"}
       {#if appStore.browseMode}
         <p class="hint muted small">
@@ -56,7 +56,7 @@
           <!-- .viewer-card 同时是窄栏容器查询锚点，单人替换卡据此感知本栏宽度。 -->
           <PlayerViewer />
         </div>
-        <RosterSnapshotTabs bind:view={appStore.resultsView} dense />
+        <RosterSnapshotTabs bind:view={appStore.rtfPreview} dense />
       </div>
     {:else}
       <ImageAiPanel />

@@ -1,9 +1,8 @@
-/** createPagedResource 骨架断言：令牌防乱序/作废/门控/换代复位/错误态/总页数/取页参数。
- *  manual 构造跳过 effect 接线（node 测试环境无 effect 根），直接驱动 load()/reset()
- *  测纯逻辑；换代与防抖的 effect 接线本身很薄（各 5 行），随应用运行验证。改骨架前先看这里。 */
+/** createPagedResource 骨架断言：全量落地/本地切片/筛选排序/令牌防乱序/门控/换代复位/错误态。
+ *  manual 构造跳过 effect 接线（node 测试环境无 effect 根），直接驱动 reset() 测纯逻辑；
+ *  换代的 effect 接线本身很薄（几行），随应用运行验证。改骨架前先看这里。 */
 import { describe, expect, it, vi } from 'vitest';
 import { PagedResource, type PagedResourceOptions } from './pagedResource.svelte';
-import type { PageResult } from '../types';
 
 interface Row {
   uid: string;
@@ -11,102 +10,109 @@ interface Row {
 
 /** 受控 fetch：手动 resolve，模拟「先发的请求后到」。 */
 function deferred() {
-  let resolve!: (v: PageResult<Row> | null) => void;
-  const promise = new Promise<PageResult<Row> | null>((r) => (resolve = r));
+  let resolve!: (v: Row[]) => void;
+  const promise = new Promise<Row[]>((r) => (resolve = r));
   return { promise, resolve };
 }
 
-const pageOf = (total: number, uid: string): PageResult<Row> => ({ total, items: [{ uid }] });
+const rowsOf = (...uids: string[]): Row[] => uids.map((uid) => ({ uid }));
 
-/** manual 构造（无 effect 接线）；fetch 默认空页。 */
+/** manual 构造（无 effect 接线）；fetch 默认空全量。 */
 function setup(
   over: Partial<PagedResourceOptions<Row>> = {},
-  fetch: PagedResourceOptions<Row>['fetch'] = vi.fn(async () => pageOf(0, 'x')),
+  fetch: PagedResourceOptions<Row>['fetch'] = vi.fn(async () => rowsOf()),
 ): { res: PagedResource<Row>; fetch: PagedResourceOptions<Row>['fetch'] } {
   const res = new PagedResource<Row>(
-    { fetch, deps: () => {}, resetKey: () => 0, ...over },
+    { fetch, resetKey: () => 0, ...over },
     { manual: true },
   );
   return { res, fetch };
 }
 
-describe('createPagedResource（分页骨架）', () => {
-  it('load：offset/limit/search 按当前页组装，result/totalPages 写回', async () => {
-    const { res, fetch } = setup({}, vi.fn(async () => pageOf(100, 'a')));
-    await res.load();
-    expect(fetch).toHaveBeenCalledWith({ offset: 0, limit: 8, search: '' });
-
-    res.page = 1;
-    res.search = 'abc';
-    await res.load();
-    expect(fetch).toHaveBeenLastCalledWith({ offset: 8, limit: 8, search: 'abc' });
-    expect(res.result).toEqual(pageOf(100, 'a'));
-    expect(res.totalPages).toBe(13); // 100/8 向上取整
-  });
-
-  it('乱序防护：迟到响应不得覆盖新结果', async () => {
-    const d1 = deferred();
-    const fetch = vi.fn().mockReturnValueOnce(d1.promise).mockResolvedValueOnce(pageOf(2, 'B'));
+describe('createPagedResource（本地分页骨架）', () => {
+  it('全量落地：view 按 pageSize 切片，total 为全量条数，翻页是纯内存切片', async () => {
+    const fetch = vi.fn(async () => rowsOf(...Array.from({ length: 20 }, (_, i) => `u${i + 1}`)));
     const { res } = setup({}, fetch);
-
-    const p1 = res.load(); // load#1 在途（d1）
-    await res.load(); // load#2 完成 → 采纳 B
-    expect(res.result).toEqual(pageOf(2, 'B'));
-
-    d1.resolve(pageOf(1, 'A')); // load#1 迟到
-    await p1;
-    expect(res.result).toEqual(pageOf(2, 'B')); // 仍是被采纳的 B，不被迟到的 A 盖掉
-  });
-
-  it('fetcher 返回 null（组件自判过期）：作废不写', async () => {
-    const fetch = vi.fn(async () => null);
-    const { res } = setup({}, fetch);
-    await res.load();
+    res.pageSize = 8; // 行数由面板实测写入（组件内）；测试里手动定档
+    await res.reset();
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(res.result).toBeNull();
+    expect(res.view.total).toBe(20);
+    expect(res.view.items.map((r) => r.uid)).toEqual(['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8']);
+    expect(res.totalPages).toBe(3); // 20/8 向上取整
+
+    res.page = 2; // 第 3 页只剩 4 条
+    expect(res.view.items.map((r) => r.uid)).toEqual(['u17', 'u18', 'u19', 'u20']);
   });
 
-  it('shouldLoad=false：不发起查询（快照侧引导空态的门控）', async () => {
+  it('select 筛选/排序只影响 view，不重新取数', async () => {
+    const fetch = vi.fn(async () => rowsOf('b1', 'a2', 'b2', 'a1'));
+    const { res } = setup(
+      {
+        select: (rows) =>
+          rows
+            .filter((r) => r.uid.startsWith(res.search))
+            .sort((a, b) => a.uid.localeCompare(b.uid)),
+      },
+      fetch,
+    );
+    res.pageSize = 4;
+    await res.reset();
+    expect(res.view.total).toBe(4);
+    expect(res.view.items.map((r) => r.uid)).toEqual(['a1', 'a2', 'b1', 'b2']);
+
+    res.search = 'a'; // 筛选：fetch 不再被调用，view 即时重算
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(res.view.total).toBe(2);
+    expect(res.view.items.map((r) => r.uid)).toEqual(['a1', 'a2']);
+  });
+
+  it('乱序防护：换代后迟到的前一份全量不得覆盖新结果', async () => {
+    const d1 = deferred();
+    const fetch = vi.fn().mockReturnValueOnce(d1.promise).mockResolvedValueOnce(rowsOf('B'));
+    const { res } = setup({}, fetch);
+
+    void res.reset(); // 换代#1 在途（d1）
+    await res.reset(); // 换代#2 完成 → 采纳 B
+    expect(res.result).toEqual(rowsOf('B'));
+
+    d1.resolve(rowsOf('A')); // 换代#1 迟到
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(res.result).toEqual(rowsOf('B')); // 仍是被采纳的 B，不被迟到的 A 盖掉
+  });
+
+  it('shouldLoad=false：不发起取数（快照侧引导空态的门控）', async () => {
     const fetch = vi.fn();
     const { res } = setup({ shouldLoad: () => false }, fetch);
-    await res.load();
+    await res.reset();
     expect(fetch).not.toHaveBeenCalled();
     expect(res.result).toBeNull();
   });
 
-  it('换代复位：回第 1 页、清搜索、作废在途并调用 onReset', async () => {
+  it('换代复位：回第 1 页、清搜索、清全量并调用 onReset', async () => {
     const onReset = vi.fn();
-    const { res, fetch } = setup({ onReset }, vi.fn(async () => pageOf(8, 'x')));
-    await res.load();
+    const { res, fetch } = setup({ onReset }, vi.fn(async () => rowsOf('x')));
+    await res.reset();
     res.page = 2;
     res.search = 'abc';
-    res.result = pageOf(8, 'old');
 
-    res.reset();
+    await res.reset();
     expect(res.page).toBe(0);
     expect(res.search).toBe('');
-    expect(res.result).toBeNull();
-    expect(onReset).toHaveBeenCalledTimes(1);
-
-    await res.load(); // 复位后的重新拉取
-    expect(fetch).toHaveBeenLastCalledWith({ offset: 0, limit: 8, search: '' });
+    expect(onReset).toHaveBeenCalledTimes(2); // 首次装载 + 本次换代各一次
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(res.view.total).toBe(1);
   });
 
-  it('onError：查询失败写入错误态 result', async () => {
-    const onError = vi.fn(() => ({ total: 0, items: [] }));
-    const { res } = setup({ onError }, vi.fn(async () => {
-      throw new Error('boom');
-    }));
-    await res.load();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(res.result).toEqual({ total: 0, items: [] });
-  });
-
-  it('无 onError：查询失败 result 置 null', async () => {
-    const { res } = setup({}, vi.fn(async () => {
-      throw new Error('boom');
-    }));
-    await res.load();
-    expect(res.result).toBeNull();
+  it('取数失败：onError 返回空全量（组件自行提示）', async () => {
+    const { res } = setup(
+      { onError: () => rowsOf() },
+      vi.fn(async () => {
+        throw new Error('boom');
+      }),
+    );
+    await res.reset();
+    expect(res.result).toEqual([]);
+    expect(res.view.total).toBe(0);
   });
 });

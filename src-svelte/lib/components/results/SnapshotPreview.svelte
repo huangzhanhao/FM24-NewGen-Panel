@@ -1,73 +1,115 @@
 <!-- SnapshotPreview · 快照预览：展示「读取快照」解析出的存档快照映射（UID / 头像相对路径 / 头像图）
      样式对齐名单预览（同款工具条与表格，行高由文本行决定，头像图不撑高行）
-     数据留在后端缓存，每次只拉当前页 8 条，头像也只取这 8 张，翻页/跳页/重新筛选才取新页
-     避免大快照一次性加载全部图片；头像的「读字节 → 建 blob → 回收」走共用 createAvatarBlobs，
+     后端一次给全量条目（uid + 相对路径），分页/搜索在前端；实际图片路径按当前页批量解析——
+     整表几万条逐一探测文件开销太大。头像的「读字节 → 建 blob → 回收」走共用 createAvatarBlobs，
      缩略图与放大气泡走共用 AvatarThumb（两处实现都与名单预览同一份，本组件只把路径交出去） -->
 <script lang="ts">
-  import { api } from '../../services/api';
-  import { appStore } from '../../stores/app.svelte';
-  import { createAvatarBlobs } from '../../avatarBlobs.svelte'; // 头像 blob 加载器（名单/快照/球员查看卡共用）
-  import { t } from '../../text'; // 全局文案常量
-  import { showError } from '../../ui/dialog';
-  import { createPagedResource } from '../../ui/pagedResource.svelte'; // 分页骨架
-  import Icon from '../../ui/Icon.svelte';
-  import TablePager from './TablePager.svelte'; // 分页器（与名单预览共用）
-  import AvatarThumb from '../shared/AvatarThumb.svelte'; // 头像缩略图 + 放大气泡（与名单预览共用）
-  import type { SnapshotEntry } from '../../types';
+  import { api } from "../../services/api";
+  import { appStore } from "../../stores/app.svelte";
+  import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（名单/快照/球员查看卡共用）
+  import { t } from "../../text"; // 全局文案常量
+  import { showError } from "../../ui/dialog";
+  import { createPagedResource, type PagedResource } from "../../ui/pagedResource.svelte"; // 本地分页骨架
+  import Icon from "../../ui/Icon.svelte";
+  import TablePager from "./TablePager.svelte"; // 分页器（与名单预览共用）
+  import AvatarThumb from "../shared/AvatarThumb.svelte"; // 头像缩略图 + 放大气泡（与名单预览共用）
+  import type { SnapshotEntry } from "../../types";
 
   const blobs = createAvatarBlobs(); // 本页头像图的 blob 账（翻页换代、卸载回收都在其内部）
 
   const snap = $derived(appStore.displaySnapshot); // 展示层：浏览态优先，统一取自 store getter
-  const xmlPath = $derived(snap?.configXml?.path ?? ''); // 当前展示档的快照文件
-  const imgDir = $derived(snap?.currentGroup ?? '');     // 头像相对路径的根（当前展示组的头像包）
+  const xmlPath = $derived(snap?.configXml?.path ?? ""); // 当前展示档的快照文件
+  const imgDir = $derived(snap?.currentGroup ?? ""); // 头像相对路径的根（当前展示组的头像包）
   // 可读态：当前展示的快照正是最近一次「读取快照」的那份；切档/切组后路径不一致，回引导空态
   const readable = $derived(!!xmlPath && xmlPath === appStore.snapshotReadPath);
 
-  // ---- 分页骨架：页码/搜索/令牌/防抖/换代在 createPagedResource 单点维护 ----
-  //      本组件只剩快照特有语义：readable 门控、快照路径过期（wantPath）与头像装载
-  const paged = createPagedResource<SnapshotEntry>({
-    fetch: async ({ offset, limit, search }) => {
-      const wantPath = xmlPath; // 发出请求时的快照路径：返回时展示档可能已经换了
-      const got = await api.querySnapshot(xmlPath, imgDir, { offset, limit, search });
-      // 【为什么要再判 wantPath】切档连点时两个 querySnapshot 会乱序返回：
-      // 晚到的旧档结果会盖在新档的表格上，头像又按这份结果去读——展示的会是别档的映射
-      return wantPath === xmlPath ? got : null; // 展示档已换：作废不写（令牌防乱序由骨架兜底）
-    },
-    deps: () => {
-      void readable; // 「读取快照」成功 → readable 翻 true，据此发起首次拉取
-      void xmlPath;
-      void imgDir;
-      void appStore.snapshotVersion; // 替换收尾同步快照缓存 → 重取当前页（头像路径可能已变）
-    },
+  // 随机人筛选（与名单预览同款，仅拓展名单显示）：'any' 任意 / 'yes' 仅随机人 / 'no' 仅真实球员。
+  // 判据同为 uid 的 r- 前缀——config.xml 的 to 字段就是名单里的 UID 原文，两种表口径一致。
+  let newganFilter = $state<"any" | "yes" | "no">("any");
+  const isExtRoster = $derived(appStore.lastRtfScan?.detailed ?? false);
+  // 生效筛选：非拓展名单（下拉被隐藏）时强制按「任意」，避免旧筛选残留在视图里
+  const newganQuery = $derived<"any" | "yes" | "no">(isExtRoster ? newganFilter : "any");
+
+  // ---- 本地分页骨架：后端一次给全量条目，UID 搜索与随机人筛选都在前端内存完成，翻页不产生请求 ----
+  //      （显式标注 paged 类型：select 闭包引用 paged，否则 TS 判定循环推断）
+  let paneEl = $state<HTMLElement | undefined>(undefined);
+  const paged: PagedResource<SnapshotEntry> = createPagedResource<SnapshotEntry>({
+    fetch: () => api.querySnapshot(xmlPath),
     resetKey: () => `${xmlPath}|${appStore.snapshotVersion}`, // 换路径/重读快照都算换代
+    pane: () => paneEl, // 每页行数随面板高度自适应（无行数常量）
     shouldLoad: () => readable, // 未读取时只留引导空态，不查询
-    onReset: () => blobs.clear(), // 换快照：旧头像图一并作废回收
-    onLoaded: (r) => {
-      // 把本页条目的头像路径交给共用 blob 加载器（先回收上一页，再并发读图，就绪一张出现一张）
-      const wanted: Record<string, string> = {};
-      for (const it of r.items) {
-        if (it.imagePath) wanted[it.uid] = it.imagePath; // 包内找不到图片的条目不发请求，留无图占位
+    onReset: () => {
+      blobs.clear(); // 换快照：旧头像图一并作废回收
+      newganFilter = "any"; // 新快照也从「任意」看起
+    },
+    select: (entries) => {
+      let out = entries;
+      const search = paged.search.trim().toLowerCase();
+      if (search) out = out.filter((e) => e.uid.toLowerCase().includes(search));
+      if (isExtRoster && newganQuery !== "any") {
+        const want = newganQuery === "yes";
+        out = out.filter((e) => e.uid.startsWith("r-") === want);
       }
-      void blobs.load(wanted);
+      return out;
     },
     onError: (e) => {
       showError(e);
-      return { total: 0, items: [] }; // 错误态返回空结果，落到无匹配提示
+      return [];
     },
+  });
+
+  // 当前页条目的实际图片路径（按页向后端批量解析；找到图 → 绝对路径，找不到 → 无键）
+  let imgPaths = $state<Record<string, string>>({});
+  let resolveToken = 0;
+  async function loadPaths(entries: SnapshotEntry[]) {
+    const mine = ++resolveToken;
+    try {
+      const got = await api.querySnapshotImages(imgDir, entries.map((e) => e.relPath));
+      if (mine !== resolveToken) return; // 页已翻走：晚到的解析结果作废
+      const wanted: Record<string, string> = {};
+      entries.forEach((e, i) => {
+        const p = got[i];
+        if (p) wanted[e.uid] = p; // 包内找不到图片的条目不发请求，留无图占位
+      });
+      imgPaths = wanted;
+      void blobs.load(wanted); // 把本页头像路径交给共用 blob 加载器（就绪一张出现一张）
+    } catch (e) {
+      if (mine === resolveToken) showError(e);
+    }
+  }
+
+  // 页码/筛选变化 → 当前页条目变化 → 只为这一页解析并装载头像；imgDir 切组也随之重解析
+  $effect(() => {
+    void loadPaths(paged.view.items);
   });
 </script>
 
 <!-- 与名单预览同款布局：工具条 + 滚动表格；未读取时只显示引导空态 -->
-<div class="table-pane">
+<div class="table-pane" bind:this={paneEl}>
   {#if readable}
+    <!-- 平铺 + 自然换行：放得下就同排，放不下才换行（与名单预览同款）；分页器自带贴右 -->
     <div class="table-toolbar">
       <div class="search">
         <Icon name="search" />
-        <input type="search" placeholder={t.snapshot.searchPlaceholder} bind:value={paged.search}
-               oninput={() => (paged.page = 0)} aria-label={t.snapshot.searchPlaceholder} />
+        <input
+          type="search"
+          placeholder={t.snapshot.searchPlaceholder}
+          bind:value={paged.search}
+          oninput={() => (paged.page = 0)}
+          aria-label={t.snapshot.searchPlaceholder}
+        />
       </div>
-      {#if paged.result}<span class="muted small record-count">{t.snapshot.recordCount(paged.result.total)}</span>{/if}
-      <span class="spacer"></span>
+      <!-- 随机人筛选：与名单预览同款（仅拓展名单显示，默认「任意」）；改筛选即回第 1 页 -->
+      {#if isExtRoster}
+        <label class="newgan-filter">
+          <span class="muted small">{t.table.newganFilterLabel}</span>
+          <select bind:value={newganFilter} onchange={() => (paged.page = 0)} aria-label={t.table.newganFilterLabel}>
+            <option value="any">{t.table.newganAny}</option>
+            <option value="yes">{t.table.newganYes}</option>
+            <option value="no">{t.table.newganNo}</option>
+          </select>
+        </label>
+      {/if}
       <!-- 分页器（含快速跳页）与名单预览共用同一组件，样式/行为单点维护 -->
       <TablePager bind:page={paged.page} totalPages={paged.totalPages} />
     </div>
@@ -78,28 +120,38 @@
       <Icon name="file" stroke={1.8} />
       <p>{t.snapshot.readHint}</p>
     </div>
-  {:else if paged.result && paged.result.items.length > 0}
+  {:else if paged.view.items.length > 0}
     <div class="table-scroll">
-      <table class="grid">
+      <!-- fixed 布局（见 style）：列宽全由 colgroup 定，长路径只截断不撑宽表格；
+           UID/头像列定宽，相对路径列吃满剩余宽度 -->
+      <table class="grid fixed">
+        <colgroup>
+          <col class="w-uid" />
+          <col />
+          <col class="w-thumb" />
+        </colgroup>
         <thead>
           <tr>
-            <th>{t.snapshot.colUid}</th>
+            <th
+              >{t.snapshot.colUid}<span class="muted">（{t.snapshot.recordCount(paged.view.total)}）</span></th
+            >
             <th>{t.snapshot.colPath}</th>
             <th>{t.snapshot.colImage}</th>
           </tr>
         </thead>
         <tbody>
           <!-- 以行索引为键：快照里可能出现重复 UID，UID 作键会撞键 -->
-          {#each paged.result.items as { uid, relPath, imagePath }, i (i)}
+          {#each paged.view.items as { uid, relPath }, i (i)}
             <tr>
               <td class="mono">{uid}</td>
               <td class="mono path" title={relPath}>{relPath}</td>
-              <td class="imgcell">
-                <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里（与名单预览头像列同款） -->
+              <td>
+                <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里（与名单预览头像列同款）；
+                     path 来自本页批量解析结果（imgPaths），包内找不到图的条目无键 → 无图占位 -->
                 <AvatarThumb
                   itemKey={uid}
                   url={blobs.urls[uid]}
-                  path={imagePath ?? undefined}
+                  path={imgPaths[uid]}
                   groupKey={imgDir}
                   placeholder={t.snapshot.noImage}
                 />
@@ -109,7 +161,7 @@
         </tbody>
       </table>
     </div>
-  {:else if paged.result}
+  {:else}
     <div class="empty">
       <Icon name={paged.search ? "search" : "file"} stroke={1.8} />
       <p>{paged.search ? t.snapshot.noMatchHint : t.snapshot.emptyHint}</p>
@@ -118,12 +170,25 @@
 </div>
 
 <style>
-  /* 撑满父级 .card-body：工具条定高 + 表格滚动区吃剩余高度（与名单预览一致）
-     min-width:0：宽表格只在 .table-scroll 内部横滚，不向上撑宽卡片与网格列 */
-  .table-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; gap: 2px; }
-  /* 头像格（AvatarThumb）：去掉上下内边距后 30px 的缩略图不超过文本格的盒子（约 32px），
-     行高因此始终与名单预览的文本行一致，不会因图片被撑高 */
-  td.imgcell { padding-top: 0; padding-bottom: 0; }
-  /* 路径列长串省略号，悬停看全文 */
-  td.path { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 注：.table-pane 已收进 app.css 表格原语（与名单预览同款） */
+
+  /* 固定表布局：列宽只认 colgroup（内容不再反过来影响列宽），长路径由 .path 截断，
+     表格恒等于容器宽度、不产生横向滚动。不给宽度的第 2 列吃满剩余宽度。 */
+  table.grid.fixed {
+    table-layout: fixed;
+  }
+  /* 列宽（fixed 下即实际宽度）：UID 列要连表头的「（N 条）」一起装下（≈127px）；
+     头像列容 60px 缩略图 + 单元格内边距 */
+  .w-uid {
+    width: 152px;
+  }
+  .w-thumb {
+    width: 96px;
+  }
+  /* 路径列长串省略号，悬停看全文（fixed 布局下不需要 max-width 抑制撑宽） */
+  td.path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>

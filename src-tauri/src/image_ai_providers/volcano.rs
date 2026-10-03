@@ -116,6 +116,8 @@ mod tests {
             uid: None,
             prompt_extend: None,
             watermark: None,
+            prompt_extend_mode: None,
+            enable_thinking: None,
             supports_response_format: true,
             // 火山 Seedream 只支持 seed；负向/改写/水印字段不发送。
             supports_negative_prompt: false,
@@ -123,6 +125,12 @@ mod tests {
             supports_watermark: false,
             supports_seed: true,
             supports_n: true,
+            // 百炼专属：改写模式/思考模式与该模型的默认值，其他协议不声明。
+            supports_prompt_extend_mode: false,
+            prompt_extend_mode_default: "direct".into(),
+            supports_enable_thinking: false,
+            enable_thinking_default: true,
+            watermark_default: false,
         }
     }
 

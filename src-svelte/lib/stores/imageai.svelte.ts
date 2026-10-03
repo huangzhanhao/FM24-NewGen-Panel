@@ -31,6 +31,14 @@ export function parseSize(s: string): [number, number] | null {
   return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
+/** 解析 Seed 输入：空串/非数字/负数一律视为随机（null）。
+ *  输入框是 text 型（不渲染浏览器原生 × 清空钮），允许自由输入，非法值按随机处理。 */
+export function parseSeed(s: string): number | null {
+  if (s.trim() === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+}
+
 /** 自由尺寸前端校验（与 Rust validate_size 同口径）；返回 null = 通过。 */
 export function validateSizeRules(size: string, rules: SizeRules | null | undefined): string | null {
   if (!rules) return null;
@@ -72,6 +80,8 @@ export const imageaiStore = $state({
   seed: '',
   promptExtend: true, // 百炼智能改写；默认随模型能力走，切服务商/模型时归位
   watermark: false, // 「AI生成」水印，官方默认关；仅模型支持时发送
+  promptExtendMode: 'direct', // 改写模式 direct/agent；仅 3.0 支持，切模型归位官方默认档
+  enableThinking: true, // 思考模式；官方默认开，且仅改写开启时生效
   generating: false,
   results: [] as GeneratedImage[],
 
@@ -90,8 +100,6 @@ export const imageaiStore = $state({
   queueProgress: null as QueueProgress | null,
   /** 最近一次批量收尾摘要；下次 queueStart 时复位。 */
   queueFinished: null as QueueFinished | null,
-  /** 最近一次入队的作用域「档 · 组」（队列坞标题护栏）。后端 QueueEntry 不带作用域，仅前端记账。 */
-  enqueueScope: '',
   /** 名单表格勾选（key=uid）。切组/换名单/翻页不清空——勾选跟随球员。 */
   selectedInTable: {} as Record<string, boolean>,
 
@@ -106,7 +114,6 @@ export const imageaiStore = $state({
     if (this.model && this.model === this.provider?.defaultModel) {
       return {
         model: this.model,
-        label: this.model,
         capabilities: {
           sizes: [],
           maxN: 0,
@@ -116,15 +123,29 @@ export const imageaiStore = $state({
           supportsNegativePrompt: false,
           supportsResponseFormat: false,
           qualities: [],
+          supportsPromptExtend: false,
+          supportsWatermark: false,
+          maxPromptChars: 0,
+          sizeRules: null,
+          supportsN: true,
+          promptExtendDefault: false,
         },
       };
     }
     return null;
   },
-  /** 提示词超出当前模型上限（Panel CTA 禁用 + PromptCard 计数标红共用）；上限未声明时恒不超限。 */
+  /** 提示词超出当前模型上限（CTA 禁用 + 生成设置卡计数标红共用）；上限未声明时恒不超限。 */
   get promptOver(): boolean {
     const limit = this.modelInfo?.capabilities?.maxPromptChars ?? 0;
     return limit > 0 && this.prompt.length > limit;
+  },
+  /** 尺寸违规信息（CTA 禁用/title + 生成设置卡自定义行共用）；null = 通过。
+   *  预设尺寸天然合法（含 wan 的 "1K/2K" 档位串，本就不是 WxH 格式），只有非预设值
+   *  （自定义宽高、或无预设模型的兜底值）才走 sizeRules——避免档位串误报格式错误。 */
+  get sizeError(): string | null {
+    const caps = this.modelInfo?.capabilities;
+    if (!caps?.sizeRules || caps.sizes.includes(this.size)) return null;
+    return validateSizeRules(this.size, caps.sizeRules);
   },
 
   /** 全局勾选数（不校验 uid 是否仍在当前页）。名单表格按钮用的是组件内自算的「当前页勾选数」。 */
@@ -133,13 +154,26 @@ export const imageaiStore = $state({
   },
 });
 
-export async function loadImageState() {
-  imageaiStore.config = await api.getImageAiState();
-  selectProvider(imageaiStore.config.settings.defaultProviderId || 'openai');
-  const tpl =
-    imageaiStore.config.templates.find((x) => x.id === imageaiStore.templateId) ??
-    imageaiStore.config.templates[0];
-  if (tpl) await applyTemplate(tpl.id);
+/** 在途加载承诺：名单预览入队与 AI 面板挂载可能同时触发加载（或用户连点），共享同一次 IPC；
+ *  失败后承诺清空，允许下次进入时重试。 */
+let loadPromise: Promise<void> | null = null;
+
+/** 拉取后端配置并选中默认服务商/模板；config 已水合时立即兑现，保留面板 onMount 的懒加载语义。 */
+export function loadImageState(): Promise<void> {
+  if (imageaiStore.config) return Promise.resolve();
+  if (!loadPromise) {
+    loadPromise = (async () => {
+      imageaiStore.config = await api.getImageAiState();
+      selectProvider(imageaiStore.config.settings.defaultProviderId || 'openai');
+      const tpl =
+        imageaiStore.config.templates.find((x) => x.id === imageaiStore.templateId) ??
+        imageaiStore.config.templates[0];
+      if (tpl) await applyTemplate(tpl.id);
+    })().finally(() => {
+      loadPromise = null;
+    });
+  }
+  return loadPromise;
 }
 
 export function selectProvider(id: string) {
@@ -205,6 +239,8 @@ export function selectModel(model: string) {
   if (caps && imageaiStore.n > caps.maxN) imageaiStore.n = caps.maxN;
   // 改写默认值逐模型不同（z-image 关，开启即思考模式、单价翻倍）：切模型归位。
   imageaiStore.promptExtend = caps?.promptExtendDefault ?? true;
+  imageaiStore.promptExtendMode = caps?.promptExtendModeDefault || 'direct';
+  imageaiStore.enableThinking = caps?.enableThinkingDefault ?? true;
 }
 
 /** 选模板：回填负向文案，并把正文经后端渲染一次（与生成前渲染同一实现）；失败向上抛给调用方弹窗。 */
@@ -220,10 +256,6 @@ export async function applyTemplate(id: string) {
     imageaiStore.prompt = tpl.body;
     throw e;
   }
-}
-
-export function appendVariable(key: string) {
-  imageaiStore.prompt = `${imageaiStore.prompt}{{${key}}}`;
 }
 
 /** 设定/清除生图数据源球员（名单行「送生图」与单人预览「用此球员生成」共用入口）。 */
@@ -251,6 +283,8 @@ export async function generate(meta?: { size?: string; seed?: string }) {
     // 同参重生：meta 提供原图尺寸/Seed（'' = 随机）；不传则用工作台当前值。
     const size = meta?.size || imageaiStore.size;
     const seedRaw = meta ? meta.seed ?? '' : imageaiStore.seed;
+    const seedNum = parseSeed(seedRaw); // 无效输入按随机处理，结果卡展示的也是实际生效值
+    const usedSeed = seedNum === null ? '' : String(seedNum);
     const res = await api.generateImage({
       providerId: imageaiStore.providerId,
       model: imageaiStore.model,
@@ -259,13 +293,15 @@ export async function generate(meta?: { size?: string; seed?: string }) {
       size,
       n: imageaiStore.n,
       quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
-      seed: seedRaw === '' ? null : Number(seedRaw),
+      seed: seedNum,
       // 百炼开关仅当前模型声明支持时才带值，否则传 null（后端按同一能力集再门控一遍）。
       promptExtend: caps?.supportsPromptExtend ? imageaiStore.promptExtend : null,
       watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
+      promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
+      enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
     });
     // 实发参数快照随结果记录（结果卡展示 + 同参重生的入参来源）。
-    const used = { size, seed: seedRaw };
+    const used = { size, seed: usedSeed };
     const imgs: GeneratedImage[] = [];
     for (const im of res.images) {
       imgs.push({
@@ -334,10 +370,12 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
         size: imageaiStore.size,
         n: imageaiStore.n,
         quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
-        seed: imageaiStore.seed === '' ? null : Number(imageaiStore.seed),
+        seed: parseSeed(imageaiStore.seed),
         uid: r.uid,
         promptExtend: caps?.supportsPromptExtend ? imageaiStore.promptExtend : null,
         watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
+        promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
+        enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
       },
       status: 'queued',
       images: [],
@@ -353,21 +391,14 @@ export function setQueue(entries: QueueEntry[]) {
   imageaiStore.queueRunning = entries.some((e) => e.status === 'running');
 }
 
-/** 组装并入队，返回本次提交条数；后端全量快照写回 store，并记下入队作用域。 */
+/** 组装并入队，返回本次提交条数；后端全量快照写回 store。 */
 export async function enqueuePlayers(rows: ReadonlyArray<PlayerRow>): Promise<number> {
+  // 名单预览位于存档/替换工作台，用户可能从未打开过 AI 台：此时 config 尚未水合、model 还是初值 ''，
+  // 入队前按需拉一次后端持久化配置，让默认服务商/模型生效。
+  if (!imageaiStore.config) await loadImageState();
   const entries = await buildQueueEntries(rows);
-  imageaiStore.enqueueScope = currentScopeLabel();
   setQueue(await api.addToQueue(entries));
   return entries.length;
-}
-
-/** 当前作用域的「档 · 组」展示串（组名取末段）；两段皆空时返回空串（坞标题隐藏）。 */
-function currentScopeLabel(): string {
-  const s = appStore.snapshot;
-  if (!s) return '';
-  const base = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? '';
-  const g = s.currentGroup ? base(s.currentGroup) : '';
-  return [s.currentProfile, g].filter(Boolean).join(' · ');
 }
 
 /** 启动批量生成。后端校验失败（缺 Key/重入）会抛错；成功则乐观置 running。 */

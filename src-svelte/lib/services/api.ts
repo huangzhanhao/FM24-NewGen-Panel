@@ -7,7 +7,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, GenImage, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
+  AppSnapshot, GalleryItem, GenImage, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
   PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
@@ -73,6 +73,8 @@ export const api = {
   queryLogs: (level: string, only: boolean, offset: number, limit: number) =>
     invoke<PageResult<LogLine>>('query_logs', { level, only, offset, limit }),
   getImageAiState: () => invoke<ImageConfig>('get_image_ai_state'),
+  // 画廊记录：持久清单 + 查询期现算的图片存在性（imageAvailable；绝不写回后端文件）。
+  getGallery: () => invoke<GalleryItem[]>('get_gallery'),
   saveProvider: (provider: ProviderConfig) => invoke<ImageConfig>('save_provider', { provider }),
   deleteProvider: (id: string) => invoke<ImageConfig>('delete_provider', { id }),
   setProviderKey: (id: string, key: string) => invoke<void>('set_provider_key', { id, key }),

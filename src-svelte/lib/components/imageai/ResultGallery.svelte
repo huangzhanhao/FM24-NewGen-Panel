@@ -50,7 +50,7 @@
   }}
 />
 
-{#if imageaiStore.results.length === 0 && !imageaiStore.generating}
+{#if imageaiStore.gallery.length === 0 && !imageaiStore.generating}
   <div class="empty res-empty">
     <Icon name="image" stroke={1.6} />
     <p>{t.gen.empty}</p>
@@ -68,57 +68,70 @@
         </div>
       {/each}
     {/if}
-    {#each imageaiStore.results as img (img.id)}
+    <!-- 画廊 = 本会话结果 ∪ 持久记录（store.gallery 已按 id 去重）；持久记录图被会话清理时走下方占位分支 -->
+    {#each imageaiStore.gallery as img (img.id)}
+      {@const hasImg = img.imageAvailable !== false && !!img.url}
       <div class="img-card">
-        <button
-          type="button"
-          class="img-frame"
-          style={ratioStyle(img.size)}
-          title={t.gen.viewLarge}
-          onclick={() => (lightboxUrl = img.url)}
-        >
-          <img src={img.url} alt={t.gen.resultAlt} loading="lazy" decoding="async" />
-        </button>
-        <div class="img-meta mono">
-          <span>{img.size ? img.size.replace("*", "×") : ""}</span>
-          {#if img.seed}<span>{t.gen.metaSeed(img.seed)}</span>{/if}
-        </div>
-        <div class="actions">
-          <button class="btn sm" onclick={() => saveGeneratedImageAs(img.id)} title={t.gen.save}>
-            <Icon name="download" class="ic" />
-            {t.gen.save}
-          </button>
-          <!-- 保存并替换：需数据源球员，无数据源禁用并提示入口 -->
+        {#if hasImg}
           <button
-            class="btn sm"
-            disabled={!imageaiStore.sourcePlayer}
-            title={imageaiStore.sourcePlayer ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
-            onclick={() => onSaveReplace(img.id)}
-          >
-            {t.gen.saveReplace.btn}
-          </button>
-          <button
-            class="btn sm"
-            title={t.gen.regenTitle}
-            onclick={() => onregenerate({ size: img.size ?? "", seed: img.seed ?? "" })}
-          >
-            <Icon name="refresh" class="ic" />
-          </button>
-          <button
-            class="btn sm icon-as-btn"
+            type="button"
+            class="img-frame"
+            style={ratioStyle(img.size)}
             title={t.gen.viewLarge}
             onclick={() => (lightboxUrl = img.url)}
           >
-            <Icon name="zoom" class="ic" />
+            <img src={img.url} alt={t.gen.resultAlt} loading="lazy" decoding="async" />
           </button>
-          <button
-            class="icon-btn"
-            title={t.gen.removeImageTitle}
-            onclick={() => removeResult(img.id)}
-          >
-            <Icon name="x" size={13} />
-          </button>
-        </div>
+          <div class="img-meta mono">
+            <span>{img.size ? img.size.replace("*", "×") : ""}</span>
+            {#if img.seed}<span>{t.gen.metaSeed(img.seed)}</span>{/if}
+          </div>
+          <div class="actions">
+            <button class="btn sm" onclick={() => saveGeneratedImageAs(img.id)} title={t.gen.save}>
+              <Icon name="download" class="ic" />
+              {t.gen.save}
+            </button>
+            <!-- 保存并替换：需数据源球员，无数据源禁用并提示入口 -->
+            <button
+              class="btn sm"
+              disabled={!imageaiStore.sourcePlayer}
+              title={imageaiStore.sourcePlayer ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
+              onclick={() => onSaveReplace(img.id)}
+            >
+              {t.gen.saveReplace.btn}
+            </button>
+            <button
+              class="btn sm"
+              title={t.gen.regenTitle}
+              onclick={() => onregenerate({ size: img.size ?? "", seed: img.seed ?? "" })}
+            >
+              <Icon name="refresh" class="ic" />
+            </button>
+            <button
+              class="btn sm icon-as-btn"
+              title={t.gen.viewLarge}
+              onclick={() => (lightboxUrl = img.url)}
+            >
+              <Icon name="zoom" class="ic" />
+            </button>
+            <!-- 移除只对本会话结果有效；持久记录没有对应命令，故不渲染该钮（removable=false） -->
+            {#if img.removable !== false}
+              <button
+                class="icon-btn"
+                title={t.gen.removeImageTitle}
+                onclick={() => removeResult(img.id)}
+              >
+                <Icon name="x" size={13} />
+              </button>
+            {/if}
+          </div>
+        {:else}
+          <!-- 图片已不在（会话临时目录被清理）：复用 img-frame 几何的中置占位，不新造组件 -->
+          <div class="img-frame ph-frame" style={ratioStyle(img.size)} title={t.gen.imageMissing}>
+            <Icon name="image" class="ph-ic" stroke={1.6} />
+            <span class="ph-text">{t.gen.imageMissing}</span>
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -190,6 +203,25 @@
     object-fit: contain;
     display: block;
     border-radius: var(--radius-sm);
+  }
+  /* 图片已不在的占位：沿用 .img-frame 的几何与 inset 底，内部中置图标+说明；
+     覆盖 .img-frame 的 zoom-in 光标（此处不可点看大图） */
+  .ph-frame {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-2);
+    color: var(--text-3);
+    cursor: default;
+  }
+  :global(.ph-ic) {
+    width: 22px;
+    height: 22px;
+    opacity: 0.75;
+  }
+  .ph-text {
+    font-size: var(--fs-xs);
   }
   .img-meta {
     display: flex;

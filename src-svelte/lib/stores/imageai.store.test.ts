@@ -19,6 +19,15 @@ vi.mock('../services/api', () => ({
     ),
     queryQueue: vi.fn(async () => []),
     removeFromQueue: vi.fn(async () => []),
+    // 画廊记录：默认空表；个别用例 mockResolvedValueOnce 覆盖
+    getGallery: vi.fn(async () => []),
+    // loadImageState 拉取配置（默认给一份最小合法配置；用例可覆盖）
+    getImageAiState: vi.fn(async () => ({
+      providers: [],
+      settings: { defaultProviderId: 'openai', historyLimit: 20, galleryRecordLimit: 100, concurrency: 2, namingPattern: '{uid}_{index}' },
+      templates: [],
+      dictionary: {},
+    })),
   },
 }));
 
@@ -27,8 +36,15 @@ vi.mock('./app.svelte', () => ({
   appStore: { saveBackup: true },
 }));
 
+// formatError 只在弹窗侧用到 message；替身避免触碰 Tauri dialog 插件。
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  message: vi.fn(async () => {}),
+  confirm: vi.fn(async () => true),
+}));
+
 import { api } from '../services/api';
 import { appStore } from './app.svelte';
+import { formatError } from '../ui/dialog';
 import {
   applyTemplate,
   buildQueueEntries,
@@ -37,14 +53,21 @@ import {
   enqueuePlayers,
   generate,
   imageaiStore,
+  isRetryableErrorKind,
+  loadImageState,
   saveAndReplace,
   selectProvider,
+  parseSeed,
+  selectModel,
   setQueue,
   queueRetry,
   setSourcePlayer,
+  shouldShowRetriedBadge,
+  stageOwnerId,
   toggleSelect,
   toggleSelectPage,
   validateSizeRules,
+  SEED_MAX,
 } from './imageai.svelte';
 import type { ImageConfig, QueueEntry } from '../types';
 
@@ -64,7 +87,7 @@ const cfg: ImageConfig = {
       ],
     },
   ],
-  settings: { defaultProviderId: 'p1', historyLimit: 20, concurrency: 2, namingPattern: '{uid}_{index}' },
+  settings: { defaultProviderId: 'p1', historyLimit: 20, galleryRecordLimit: 100, concurrency: 2, namingPattern: '{uid}_{index}' },
   templates: [],
   dictionary: {},
 };
@@ -305,6 +328,7 @@ describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
         n: 1, quality: null, seed: null,
       },
       status: 'failed', images: [], error: 'boom',
+      attempts: 2, // 旧条目重试过：重新排队必须把尝试次数清零
     };
     await queueRetry(failed);
     expect(api.removeFromQueue).toHaveBeenCalledWith(['q9']);
@@ -313,7 +337,53 @@ describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
     expect(sent?.[0].id).toBe('');
     expect(sent?.[0].status).toBe('queued');
     expect(sent?.[0].error).toBe('');
+    expect(sent?.[0].errorKind).toBeNull();
+    expect(sent?.[0].attempts).toBe(0); // 归零：新任务不继承旧条目的尝试次数
     expect(sent?.[0].req).toEqual(failed.req);
+  });
+
+  it('shouldShowRetriedBadge：仅 attempts>1 显示徽标', () => {
+    expect(shouldShowRetriedBadge(0)).toBe(false); // 入队未跑
+    expect(shouldShowRetriedBadge(1)).toBe(false); // 首发即定稿
+    expect(shouldShowRetriedBadge(2)).toBe(true); // 重试过
+    expect(shouldShowRetriedBadge(3)).toBe(true);
+    expect(shouldShowRetriedBadge(undefined)).toBe(false); // 旧快照无该字段
+    expect(shouldShowRetriedBadge(null)).toBe(false);
+  });
+
+  it('stageOwnerId：优先 entryId，缺失回落 uid（重复入队时 uid 相同、id 不同）', () => {
+    // 同一球员重复入队：两个条目 uid 都是 u1、id 分别为 e1/e2。
+    // 若用 uid 命中，两个条目会同时显示阶段；用 entryId 才能唯一定位。
+    expect(stageOwnerId({ entryId: 'e1', uid: 'u1' })).toBe('e1');
+    expect(stageOwnerId({ entryId: 'e2', uid: 'u1' })).toBe('e2');
+    // 旧事件不带 entryId：回落到 uid。
+    expect(stageOwnerId({ uid: 'u1' })).toBe('u1');
+    expect(stageOwnerId({ entryId: null, uid: 'u1' })).toBe('u1');
+  });
+});
+
+describe('seed 官方取值范围（百炼 [0, 2147483647]）', () => {
+  it('parseSeed：范围内取整，超上限与非法输入一律按随机', () => {
+    expect(parseSeed('0')).toBe(0);
+    expect(parseSeed(String(SEED_MAX))).toBe(SEED_MAX);
+    expect(parseSeed('42.9')).toBe(42);
+    expect(parseSeed(String(SEED_MAX + 1))).toBeNull();
+    expect(parseSeed('')).toBeNull();
+    expect(parseSeed('abc')).toBeNull();
+    expect(parseSeed('-1')).toBeNull();
+  });
+
+  it('seedOutOfRange 只标记「看着合法但超上限」，供输入框标红', () => {
+    imageaiStore.seed = '';
+    expect(imageaiStore.seedOutOfRange).toBe(false);
+    imageaiStore.seed = String(SEED_MAX);
+    expect(imageaiStore.seedOutOfRange).toBe(false);
+    imageaiStore.seed = String(SEED_MAX + 1);
+    expect(imageaiStore.seedOutOfRange).toBe(true);
+    // 非数字/负数走既有的「非法即随机」契约，用户一眼知道自己填错了，不额外标红。
+    imageaiStore.seed = 'abc';
+    expect(imageaiStore.seedOutOfRange).toBe(false);
+    imageaiStore.seed = '';
   });
 });
 
@@ -352,5 +422,201 @@ describe('promptOver（提示词超限派生，D3 跨组件单点）', () => {
     expect(imageaiStore.promptOver).toBe(true);
     imageaiStore.prompt = 'x'.repeat(10);
     expect(imageaiStore.promptOver).toBe(false);
+  });
+});
+
+describe('画廊记录（A1：持久化 + 双闸门前端接线）', () => {
+  beforeEach(() => {
+    imageaiStore.config = cfg;
+    selectProvider('p1'); // model=m2, size=768x768, n=1, quality=auto, seed=''
+    imageaiStore.templateId = 'tpl1';
+    imageaiStore.prompt = '一张{{gender|男性}}脸';
+    imageaiStore.results = [];
+    imageaiStore.records = [];
+    clearSourcePlayer();
+    vi.mocked(api.generateImage).mockClear();
+    vi.mocked(api.renderPrompt).mockClear();
+    vi.mocked(api.getGallery).mockClear();
+  });
+
+  it('generate 单张路径把数据源球员的 uid/name 带入请求', async () => {
+    setSourcePlayer('u1', '甲');
+    vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: '甲的提示词', missing: [] });
+    vi.mocked(api.generateImage).mockResolvedValueOnce({ images: [] });
+    await generate();
+    const req = vi.mocked(api.generateImage).mock.calls[0][0];
+    expect(req.uid).toBe('u1');
+    expect(req.name).toBe('甲');
+    expect(req.templateId).toBe('tpl1');
+  });
+
+  it('buildQueueEntries 逐行把球员名带入请求', async () => {
+    const entries = await buildQueueEntries([
+      { uid: 'u1', name: '甲' },
+      { uid: 'u2', name: '乙' },
+    ]);
+    expect(entries[0].req.name).toBe('甲');
+    expect(entries[1].req.name).toBe('乙');
+    expect(entries[0].req.templateId).toBe('tpl1');
+  });
+
+  it('M1：请求携带当前模板 id（单张与队列、非硬编码）', async () => {
+    imageaiStore.templateId = 'tpl-m1';
+    setSourcePlayer('u1', '甲');
+    vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: 'x', missing: [] });
+    vi.mocked(api.generateImage).mockResolvedValueOnce({ images: [] });
+    await generate();
+    expect(vi.mocked(api.generateImage).mock.calls[0][0].templateId).toBe('tpl-m1');
+
+    imageaiStore.templateId = 'tpl-m2'; // 换一个：证明是取当前值而非写死
+    const entries = await buildQueueEntries([{ uid: 'u2', name: '乙' }]);
+    expect(entries[0].req.templateId).toBe('tpl-m2');
+  });
+
+  it('gallery 合并本会话 results 与载入 records，并按图 id 去重（results 优先）', () => {
+    imageaiStore.results = [{ id: 'x', path: '/p/x.png', url: 'blob:x' }];
+    imageaiStore.records = [
+      { id: 'x', path: '/p/x.png', url: 'blob:x-old', imageAvailable: true, removable: false },
+      { id: 'y', path: '', url: '', imageAvailable: false, removable: false },
+    ];
+    const g = imageaiStore.gallery;
+    expect(g.map((i) => i.id)).toEqual(['x', 'y']);
+    expect(g[0].url).toBe('blob:x'); // 去重保留本会话结果
+    expect(g[1].imageAvailable).toBe(false);
+  });
+
+  it('loadImageState 载入持久记录并入画廊（缺失图按占位）', async () => {
+    imageaiStore.config = null; // 触发真实拉取
+    imageaiStore.records = [];
+    imageaiStore.results = [];
+    vi.mocked(api.getImageAiState).mockResolvedValueOnce(cfg);
+    vi.mocked(api.getGallery).mockResolvedValueOnce([
+      {
+        id: 'g1', ts: '2026-09-26 10:00:00', uid: 'u1', name: '甲',
+        model: 'm', prompt: 'p', negativePrompt: '', templateId: '',
+        imageAvailable: false, path: null,
+      },
+    ]);
+    await loadImageState();
+    expect(imageaiStore.records).toHaveLength(1);
+    expect(imageaiStore.records[0].imageAvailable).toBe(false);
+    expect(imageaiStore.records[0].removable).toBe(false);
+    expect(imageaiStore.gallery.map((i) => i.id)).toContain('g1');
+  });
+});
+
+describe('生成错误分类（A2：格式化与重试判定）', () => {
+  it('formatError：Error 取 message，字符串原样，其余强转', () => {
+    expect(formatError(new Error('boom'))).toBe('boom');
+    expect(formatError('已取消')).toBe('已取消');
+    expect(formatError(42)).toBe('42');
+  });
+
+  it('formatError：结构化错误取 message 并追加 userAction 建议', () => {
+    const withAction = {
+      kind: 'auth',
+      message: '鉴权失败',
+      retryable: false,
+      userAction: '检查 API Key 是否正确或已过期',
+    };
+    expect(formatError(withAction)).toBe('鉴权失败\n建议：检查 API Key 是否正确或已过期');
+    // 无建议类别（cancelled/internal 的 userAction 为 null）只给 message
+    const noAction = {
+      kind: 'internal',
+      message: '队列正在执行中',
+      retryable: false,
+      userAction: null,
+    };
+    expect(formatError(noAction)).toBe('队列正在执行中');
+  });
+
+  it('isRetryableErrorKind：可重试类别与缺失类别为真，其余为假', () => {
+    for (const k of ['network', 'rate_limited', 'provider', 'internal'] as const) {
+      expect(isRetryableErrorKind(k)).toBe(true);
+    }
+    expect(isRetryableErrorKind(undefined)).toBe(true);
+    expect(isRetryableErrorKind(null)).toBe(true);
+    for (const k of [
+      'auth',
+      'invalid_param',
+      'not_configured',
+      'content_rejected',
+      'cancelled',
+      'io',
+    ] as const) {
+      expect(isRetryableErrorKind(k)).toBe(false);
+    }
+  });
+});
+
+describe('调用方式 callMode（A4：前端门控）', () => {
+  // 同一服务商两个模型：m2 支持异步、m-sync 不支持，用于验证「能力位 + 用户选择」双门控。
+  const asyncCfg: ImageConfig = {
+    ...cfg,
+    providers: [
+      {
+        ...cfg.providers[0],
+        models: [
+          {
+            model: 'm2',
+            capabilities: { ...cfg.providers[0].models[0].capabilities, supportsAsync: true },
+          },
+          {
+            model: 'm-sync',
+            capabilities: { ...cfg.providers[0].models[0].capabilities },
+          },
+        ],
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    imageaiStore.config = asyncCfg;
+    imageaiStore.prompt = '脸';
+    vi.mocked(api.generateImage).mockClear();
+    vi.mocked(api.renderPrompt).mockClear();
+    clearSourcePlayer();
+  });
+
+  it('selectModel 复位 callMode 为 sync', () => {
+    selectProvider('p1');
+    imageaiStore.callMode = 'async';
+    selectModel('m-sync');
+    expect(imageaiStore.callMode).toBe('sync');
+  });
+
+  it('selectProvider 复位 callMode 为 sync', () => {
+    imageaiStore.callMode = 'async';
+    selectProvider('p1');
+    expect(imageaiStore.callMode).toBe('sync');
+  });
+
+  it('generate：支持异步的模型 + callMode=async 才把 async 送进请求', async () => {
+    selectProvider('p1');
+    selectModel('m2'); // supportsAsync=true
+    imageaiStore.callMode = 'async';
+    await generate();
+    expect(vi.mocked(api.generateImage).mock.calls[0][0].callMode).toBe('async');
+  });
+
+  it('generate：模型不支持异步时即使 callMode=async 也送 null', async () => {
+    selectProvider('p1');
+    selectModel('m-sync'); // supportsAsync 缺省 false
+    imageaiStore.callMode = 'async'; // 强行置位，模拟脏状态
+    await generate();
+    expect(vi.mocked(api.generateImage).mock.calls[0][0].callMode).toBeNull();
+  });
+
+  it('buildQueueEntries：同样按能力位门控 callMode', async () => {
+    selectProvider('p1');
+    selectModel('m2');
+    imageaiStore.callMode = 'async';
+    const entries = await buildQueueEntries([{ uid: 'u1', name: '甲' }]);
+    expect(entries[0].req.callMode).toBe('async');
+
+    selectModel('m-sync'); // 换不支持异步的模型
+    imageaiStore.callMode = 'async'; // 再次强行置位
+    const sync = await buildQueueEntries([{ uid: 'u2', name: '乙' }]);
+    expect(sync[0].req.callMode).toBeNull();
   });
 });

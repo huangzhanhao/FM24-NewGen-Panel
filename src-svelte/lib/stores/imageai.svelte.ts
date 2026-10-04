@@ -6,6 +6,7 @@ import { appStore } from './app.svelte';
 import { loadImageBlobUrl } from '../services/images';
 import { t } from '../text';
 import type {
+  GenErrorKind,
   GeneratedImage,
   ImageConfig,
   PromptTemplate,
@@ -31,15 +32,23 @@ export function parseSize(s: string): [number, number] | null {
   return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
-/** 解析 Seed 输入：空串/非数字/负数一律视为随机（null）。
- *  输入框是 text 型（不渲染浏览器原生 × 清空钮），允许自由输入，非法值按随机处理。 */
+/** Seed 官方取值上限（百炼四份文生图 API 参考口径一致：[0, 2147483647]）。 */
+export const SEED_MAX = 2147483647;
+
+/** 解析 Seed 输入：空串/非数字/负数/超官方上限一律视为随机（null）。
+ *  输入框是 number 型且声明了 min/max，但浏览器不拦手输的越界值 ⇒ 生效判定只能在这里兜；
+ *  越界时的可见提示见 imageaiStore.seedOutOfRange，别让用户以为超限值生效了。 */
 export function parseSeed(s: string): number | null {
   if (s.trim() === '') return null;
   const n = Number(s);
-  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+  return Number.isFinite(n) && n >= 0 && n <= SEED_MAX ? Math.trunc(n) : null;
 }
 
-/** 自由尺寸前端校验（与 Rust validate_size 同口径）；返回 null = 通过。 */
+/**
+ * 自由尺寸的前端预校验（与 Rust provider 层共享的 validate_size 同口径）；返回 null = 通过。
+ * 这里只是「早提示」UX：权威判定在 Provider 层（image_ai_providers），前端放行不代表后端一定放行，
+ * 因此该函数只做提示，不据此跳过任何后端调用。
+ */
 export function validateSizeRules(size: string, rules: SizeRules | null | undefined): string | null {
   if (!rules) return null;
   const p = parseSize(size);
@@ -82,8 +91,12 @@ export const imageaiStore = $state({
   watermark: false, // 「AI生成」水印，官方默认关；仅模型支持时发送
   promptExtendMode: 'direct', // 改写模式 direct/agent；仅 3.0 支持，切模型归位官方默认档
   enableThinking: true, // 思考模式；官方默认开，且仅改写开启时生效
+  callMode: 'sync' as 'sync' | 'async', // 调用方式；仅支持异步的模型可选，切服务商/模型时归位同步
   generating: false,
   results: [] as GeneratedImage[],
+  /** 载入的持久画廊记录（跨会话留存；图片仅存会话临时目录，可能已被清理 → url 为空，渲染端显示占位）。
+   *  与 results 一起构成画廊数据源，去重见 gallery 派生。 */
+  records: [] as GeneratedImage[],
 
   /** 会话内「已设置 Key」指示。Key 本体只进后端会话内存、不回传不持久化，刷新即清。 */
   keysSet: {} as Record<string, boolean>,
@@ -148,9 +161,37 @@ export const imageaiStore = $state({
     return validateSizeRules(this.size, caps.sizeRules);
   },
 
+  /** Seed 超出官方取值范围 [0, SEED_MAX]：输入框标红 + 悬停说明。
+   *  非数字/负数不在此列（那是既有的「非法即随机」契约，用户一眼就知道自己填错了）；
+   *  只有「看着像合法 seed 但超上限」才需要提示，因为生成时会被 parseSeed 静默按随机处理。 */
+  get seedOutOfRange(): boolean {
+    const s = this.seed.trim();
+    if (s === '') return false;
+    const n = Number(s);
+    return Number.isFinite(n) && n > SEED_MAX;
+  },
+
   /** 全局勾选数（不校验 uid 是否仍在当前页）。名单表格按钮用的是组件内自算的「当前页勾选数」。 */
   get selectedCount() {
     return Object.values(this.selectedInTable).filter(Boolean).length;
+  },
+
+  /** 画廊数据源 = 本会话新增 results ∪ 载入的持久 records，按图 id 去重。
+   *  去重时本会话结果优先：它带可用的 blob URL，而同一张图的持久记录 url 可能为空（或未加载）。 */
+  get gallery(): GeneratedImage[] {
+    const seen = new Set<string>();
+    const out: GeneratedImage[] = [];
+    for (const r of this.results) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      out.push(r);
+    }
+    for (const r of this.records) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      out.push(r);
+    }
+    return out;
   },
 });
 
@@ -169,11 +210,36 @@ export function loadImageState(): Promise<void> {
         imageaiStore.config.templates.find((x) => x.id === imageaiStore.templateId) ??
         imageaiStore.config.templates[0];
       if (tpl) await applyTemplate(tpl.id);
+      // 画廊记录与 config 同批拉取；记录是次要信息，失败不阻断工作台可用性。
+      try {
+        await loadGalleryRecords();
+      } catch {
+        // 忽略：config 已水合，记录留待下次进入工作台时重试
+      }
     })().finally(() => {
       loadPromise = null;
     });
   }
   return loadPromise;
+}
+
+/** 载入持久画廊记录：图片仍在会话临时目录的，预读成 blob URL；已被清理的 url 留空（渲染端显示占位）。
+ *  单张图片读取失败只退化为该条占位，不阻塞整批。 */
+async function loadGalleryRecords() {
+  const items = await api.getGallery();
+  const recs: GeneratedImage[] = [];
+  for (const it of items) {
+    let url = '';
+    if (it.imageAvailable && it.path) {
+      try {
+        url = await loadImageBlobUrl(it.path);
+      } catch {
+        url = '';
+      }
+    }
+    recs.push({ id: it.id, path: it.path ?? '', url, imageAvailable: it.imageAvailable, removable: false });
+  }
+  imageaiStore.records = recs;
 }
 
 export function selectProvider(id: string) {
@@ -186,6 +252,8 @@ export function selectProvider(id: string) {
   // 改写开关回该模型的官方默认（千问/万相开、z-image 关），不把上一家的选择带过来。
   imageaiStore.promptExtend = imageaiStore.modelInfo?.capabilities.promptExtendDefault ?? true;
   imageaiStore.watermark = false;
+  // 调用方式随模型复位：不同模型异步支持不同，不把上一家的选择带过来（与 promptExtend 同口径）。
+  imageaiStore.callMode = 'sync';
 }
 
 /** Key 仅进后端会话内存；成功后标记本会话「已设置」。 */
@@ -241,6 +309,8 @@ export function selectModel(model: string) {
   imageaiStore.promptExtend = caps?.promptExtendDefault ?? true;
   imageaiStore.promptExtendMode = caps?.promptExtendModeDefault || 'direct';
   imageaiStore.enableThinking = caps?.enableThinkingDefault ?? true;
+  // 调用方式随模型复位：新模型未必支持异步（与 selectProvider 同口径）。
+  imageaiStore.callMode = 'sync';
 }
 
 /** 选模板：回填负向文案，并把正文经后端渲染一次（与生成前渲染同一实现）；失败向上抛给调用方弹窗。 */
@@ -290,6 +360,10 @@ export async function generate(meta?: { size?: string; seed?: string }) {
       model: imageaiStore.model,
       prompt: rendered.text,
       negativePrompt: imageaiStore.negative,
+      // 数据源球员身份与模板 id 随请求带入：后端据此写画廊记录（无数据源时为空）。
+      uid: imageaiStore.sourcePlayer?.uid ?? null,
+      name: imageaiStore.sourcePlayer?.name ?? null,
+      templateId: imageaiStore.templateId,
       size,
       n: imageaiStore.n,
       quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
@@ -299,6 +373,8 @@ export async function generate(meta?: { size?: string; seed?: string }) {
       watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
       promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
       enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
+      // 仅当模型支持异步且用户选了异步才传 'async'；否则传 null（后端默认同步）。
+      callMode: caps?.supportsAsync && imageaiStore.callMode === 'async' ? 'async' : null,
     });
     // 实发参数快照随结果记录（结果卡展示 + 同参重生的入参来源）。
     const used = { size, seed: usedSeed };
@@ -372,14 +448,19 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
         quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
         seed: parseSeed(imageaiStore.seed),
         uid: r.uid,
+        name: r.name,
+        templateId: imageaiStore.templateId,
         promptExtend: caps?.supportsPromptExtend ? imageaiStore.promptExtend : null,
         watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
         promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
         enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
+        // 仅当模型支持异步且用户选了异步才传 'async'；否则传 null（后端默认同步）。
+        callMode: caps?.supportsAsync && imageaiStore.callMode === 'async' ? 'async' : null,
       },
       status: 'queued',
       images: [],
       error: '',
+      errorKind: null,
     });
   }
   return entries;
@@ -416,6 +497,17 @@ export function queueRemove(ids: string[]) {
   return api.removeFromQueue(ids).then(setQueue);
 }
 
+/** 是否给失败条目提供「重试本条」手动入口：网络/限流/服务商/内部错误、或旧快照未标注类别时为真；
+ *  鉴权/参数/配置/内容审核/取消无意义（须先修配置或改提示词）。
+ * 【与后端 GenError.retryable 的职责分工】二者判据不同、各有用途，**不要互相替换**：
+ *  - 后端 `retryable` 是**自动重试**判据（队列执行期对同一请求自动再试）；
+ *  - 本函数是**是否展示手动入口**的判据——对 provider/internal 类错误，即使后端不自动重试，
+ *    让用户手动再试一次也始终合理。 */
+export function isRetryableErrorKind(kind?: GenErrorKind | null): boolean {
+  if (!kind) return true;
+  return kind === 'network' || kind === 'rate_limited' || kind === 'provider' || kind === 'internal';
+}
+
 /** 单条重试：移除旧条目、用原参入一条新任务（id 由后端补发）；仅队列未运行时允许。 */
 export async function queueRetry(entry: QueueEntry) {
   await api.removeFromQueue([entry.id]);
@@ -425,8 +517,22 @@ export async function queueRetry(entry: QueueEntry) {
     status: 'queued',
     images: [],
     error: '',
+    errorKind: null,
+    attempts: 0, // 全新任务：旧条目的尝试次数不得带入（后端 add 也会复位，这里显式对齐）
   };
   setQueue(await api.addToQueue([fresh]));
+}
+
+/** 是否展示「已重试 N 次」徽标：`attempts` 为总尝试次数（入队未跑为 0、首发为 1），
+ *  仅 >1（即确实重试过）才显示。抽成纯函数以便单测（组件模板不便断言）。 */
+export function shouldShowRetriedBadge(attempts?: number | null): boolean {
+  return (attempts ?? 0) > 1;
+}
+
+/** 阶段事件应归属的条目 id：优先 entryId（同一球员重复入队时 uid 会重复、id 唯一），
+ *  缺省回落到 uid（兼容不带该字段的旧事件）。抽成纯函数以便单测。 */
+export function stageOwnerId(progress: Pick<QueueProgress, 'entryId' | 'uid'>): string {
+  return progress.entryId ?? progress.uid;
 }
 
 export function queueQuery() {
@@ -472,6 +578,9 @@ export async function initQueueListeners(onError: (e: unknown) => void): Promise
       queueRefreshTimer = null;
     }
     void queueQuery().catch(queueErrorHandler);
+    // 批量生成把记录写进 gallery.json，但画廊只在进工作台时拉过一次：此处补拉，否则新产出的记录
+    // 要重进工作台才看得见（与队列快照同批刷新）。
+    void loadGalleryRecords().catch(queueErrorHandler);
   });
 }
 

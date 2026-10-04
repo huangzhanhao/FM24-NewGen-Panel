@@ -52,16 +52,14 @@
     | "supportsAsync";
   type EnumCapKey = "promptExtendModeDefault";
 
-  /** 附属项：挂在协议参数行下面，不占独立参数位（上限 / 推荐档 / 约束 / 默认档 / 运行策略）。
+  /** 附属项：挂在协议参数行下面，不占独立参数位（上限 / 推荐档 / 约束 / 默认档）。
    *  `prompt_extend` / `enable_thinking` / `watermark` 的官方默认值不在编辑区暴露：
    *  它们是模型出厂属性，由内置目录（或 JSON）维护，前端切模型时按此归位。 */
   type CapSub =
     | { t: "num"; label: string; bind: NumCapKey; hint?: string }
     | { t: "list"; label: string; bind: "sizes" | "qualities"; placeholder: string; rows?: number }
     | { t: "pair"; label: string; lo: RuleKey; hi: RuleKey; hint: string }
-    | { t: "enum"; label: string; bind: EnumCapKey; options: readonly { v: string; label: string }[]; hint?: string }
-    /** 只读说明；`showOn` = 该支持位为真时才显示（如异步的运行策略） */
-    | { t: "note"; label: string; text: string; showOn?: BoolCapKey };
+    | { t: "enum"; label: string; bind: EnumCapKey; options: readonly { v: string; label: string }[]; hint?: string };
 
   /** 协议参数行：`api` 是官方字段原名（挂在 title 上，便于对着文档核验）；
    *  有 `bind` = 模型可选参数（支持位），无 = 该协议恒有（如正向提示词）。
@@ -153,8 +151,7 @@
       bind: "supportsAsync",
       bindStyle: "mode",
       bindLabels: [t.gen.callModeSync, t.gen.callModeAsync],
-      hint: t.gen.callModeAsyncTodo,
-      subs: [{ t: "note", label: t.gen.capRuntimeLabel, text: t.gen.capAsyncRuntime, showOn: "supportsAsync" }],
+      subs: [],
     },
     // ---- 非 DashScope 协议的专有行：由 KIND_ROWS 决定是否出现在编辑区 ----
     {
@@ -168,10 +165,12 @@
   ];
 
   /** 行集合由「服务商协议」决定（适配器 build_* 实际发送的字段为准），模型只决定行上的勾选：
-   *  dashscope = 原生多模态生成并集；openai 不发 seed/负向/改写/水印，volcano 的 body 没有 n。 */
+   *  dashscope = 原生多模态生成并集（含异步）；openai = OpenAI 官方参数 + 百炼兼容模式平铺在
+   *  顶层的扩展字段（负向/seed/改写/改写模式/思考/水印），兼容模式**只有同步**故无「调用方式」行；
+   *  volcano 的 body 没有 n。 */
   const KIND_ROWS: Record<ProviderKindCode, readonly string[]> = {
     dashscope: ["prompt", "size", "n", "negative", "seed", "extend", "extendMode", "thinking", "watermark", "callMode"],
-    openai: ["prompt", "size", "n", "quality", "responseFormat"],
+    openai: ["prompt", "size", "n", "negative", "seed", "extend", "extendMode", "thinking", "watermark", "quality", "responseFormat"],
     volcano: ["prompt", "size", "seed"],
   };
 
@@ -200,12 +199,18 @@
     };
   }
 
-  /** 当前编辑协议下的行集合（kind 变了行集合就变，模型只影响勾选）。 */
-  const capRows = $derived(
-    (KIND_ROWS[editing?.kind ?? "openai"] ?? []).map(
-      (k) => CAP_ROWS.find((r) => r.key === k)!,
-    ),
-  );
+  /** 当前编辑协议下的行集合（kind 变了行集合就变，模型只影响勾选）。
+   *  官方字段名小字随协议换：DashScope 把参数嵌在 `parameters` 下、提示词在 `input.messages[]` 里，
+   *  OpenAI 兼容与火山方舟一律平铺在请求体顶层（字段同名、位置不同）。 */
+  const capRows = $derived.by(() => {
+    const kind = editing?.kind ?? "openai";
+    const flat = kind !== "dashscope";
+    return (KIND_ROWS[kind] ?? []).map((k) => {
+      const row = CAP_ROWS.find((r) => r.key === k)!;
+      const api = flat ? (t.gen.capApiFlat[row.key] ?? row.api) : row.api;
+      return api === row.api ? row : { ...row, api };
+    });
+  });
 
   /** 展开前补齐能力集：编辑表单要绑定每个字段（含 sizeRules 的六个子项） */
   function normalizeCaps(m: ModelInfo) {
@@ -356,6 +361,7 @@
                 type="text"
                 bind:value={editing.baseUrl}
                 placeholder="https://example.com/v1"
+                title={editing.kind === "dashscope" ? t.gen.baseUrlHintDashscope : ""}
               />
             </div>
             <!-- 默认模型：有清单时从清单里选（避免填出清单外不存在的模型名）；
@@ -512,11 +518,6 @@
                                         <option value={o.v}>{o.label}</option>
                                       {/each}
                                     </select>
-                                  </span>
-                                {:else if !s.showOn || caps[s.showOn]}
-                                  <span class="cap-sub">
-                                    <span class="cap-k">{s.label}</span>
-                                    <span class="cap-note">{s.text}</span>
                                   </span>
                                 {/if}
                               {/each}
@@ -753,11 +754,6 @@
     color: var(--text-3);
     font-size: var(--fs-sm);
     white-space: nowrap;
-  }
-  /* 只读的运行策略说明（异步轮询/超时/TTL）：常量口径，不做成可编辑控件 */
-  .cap-note {
-    color: var(--text-3);
-    font-size: var(--fs-xs);
   }
   /* 成对数值（≥ / ≤）：只锁不收缩，宽度由 type 选择器统一给 */
   .cap-pair {

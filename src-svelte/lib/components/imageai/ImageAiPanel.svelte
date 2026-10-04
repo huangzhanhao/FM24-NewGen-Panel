@@ -11,7 +11,7 @@
   import SourcePlayerCard from "./SourcePlayerCard.svelte"; // 数据源卡：ongenerate 转发主 CTA 链路
   import GenSettingsCard from "./GenSettingsCard.svelte"; // 生成设置卡：onopentemplates 回调
   import { t } from "../../text";
-  import { showError } from "../../ui/dialog";
+  import { formatError, showError } from "../../ui/dialog";
   import Icon from "../../ui/Icon.svelte";
   import ResultGallery from "./ResultGallery.svelte"; // 结果画廊/灯箱：onregenerate 回调
   import {
@@ -120,8 +120,8 @@
     try {
       await generate(meta);
     } catch (e) {
-      // 生成失败写进结果区的内联错误条，供就地重试。
-      genError = e instanceof Error ? e.message : String(e);
+      // 生成失败写进结果区的内联错误条，供就地重试；后端错误已是结构化对象，须走统一格式化。
+      genError = formatError(e);
     }
   }
 
@@ -257,7 +257,7 @@
         </div>
       {/if}
 
-      <!-- 本次结果：独立卡片——标题行（含张数与清空）+ 画廊；卡片占满右栏剩余高度，画廊在卡内滚动 -->
+      <!-- 本次结果：独立卡片——标题行（含张数与清空）+ 画廊；卡片按内容撑高，滚动归页面层 -->
       <section class="pcard grow">
         <div class="pcard-h">
           <span
@@ -429,7 +429,7 @@
     gap: var(--sp-3);
   }
 
-  /* 主操作钮：sticky 贴在生成设置卡与结果卡之间随时可点（右栏可整列滚动，滚动时它吸在底部）；
+  /* 主操作钮：sticky 贴在生成设置卡与结果卡之间随时可点（滚动在页面层，滚动时它吸在视口底部）；
      几何沿用 button.btn 标准档（30px） */
   .cta {
     position: sticky;

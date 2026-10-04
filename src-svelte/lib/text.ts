@@ -16,6 +16,8 @@ export const t = {
     error: "错误",
     info: "提示",
     warning: "警告",
+    /** 结构化错误里 userAction 的引导词（如「建议：检查 API Key」）。 */
+    suggestion: "建议：",
   },
 
   /** 根组件：替换结束的系统提示 */
@@ -226,7 +228,6 @@ export const t = {
     callMode: "调用方式",
     callModeSync: "同步",
     callModeAsync: "异步",
-    callModeAsyncTodo: "异步调用暂未实现",
     watermark: "添加「AI生成」水印",
     watermarkHint: "水印位于图片右下角",
     seed: "Seed",
@@ -241,6 +242,7 @@ export const t = {
     promptTooLong: (limit: number) =>
       `提示词超出该模型 ${limit} 字上限，超出部分不会生效`,
     seedPlaceholder: "留空=随机",
+    seedOutOfRange: (max: number) => `Seed 超出官方取值范围 0–${max}，本次生成将按随机处理`,
     generateShortcut: "Ctrl + Enter 直接生成",
     generate: "生成图片",
     generating: "生成中…",
@@ -256,6 +258,8 @@ export const t = {
     skeletonHint: "正在生成，通常 10–30 秒，智能改写开启时可能更久",
     empty:
       "填写提示词后点「生成图片」，结果会显示在这里；图片仅存于会话临时目录，手动保存才会落盘。",
+    /** 持久画廊里图片已被会话清理的条目占位文案 */
+    imageMissing: "图片已清理（仅存会话临时目录）",
     save: "保存",
     saved: "图片已保存",
     removeImageTitle: "移除",
@@ -300,6 +304,13 @@ export const t = {
     keyBarPlaceholder: "输入当前服务商的 Key，仅本会话记忆，不落盘",
     keyBarSetPlaceholder: "已设置（不回显），如需更换请重新输入",
     baseUrl: "接口地址 Base URL",
+    /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
+     *  地域必须与模型、API Key 一致，跨地域直接失败。 */
+    baseUrlHintDashscope:
+      "留空 = 华北2（北京）公共域 https://dashscope.aliyuncs.com/api/v1，官方明确仍可使用。" +
+      "官方建议迁移到业务空间专属域 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1" +
+      "（性能与稳定性更好；WorkspaceId 在控制台的业务空间详情页）。" +
+      "模型、接口地址、API Key 三者必须同地域，跨地域调用会直接失败。",
     kind: "类型",
     providerIdLabel: "ID",
     providerIdPlaceholder: "留空自动生成",
@@ -326,8 +337,6 @@ export const t = {
     capProtoCallMode: "调用方式",
     capProtoQuality: "质量档位",
     capProtoResponseFormat: "返回 base64",
-    capRuntimeLabel: "运行策略",
-    capAsyncRuntime: "轮询间隔 10 秒 · 总超时 600 秒 · 结果链接 24 小时",
     /** 枚举型参数的默认档（当前仅改写模式：官方默认 direct） */
     capFieldModeDefault: "默认档",
     /** 官方字段原名（英文，含大小写/下划线/嵌套层级）：只作悬停核验用，名称列一律显示上面的中文名 */
@@ -345,6 +354,22 @@ export const t = {
       quality: "quality",
       responseFormat: "response_format",
     },
+    /** 平铺协议（OpenAI 兼容 / 火山方舟）的官方字段名：字段同名，但没有 DashScope 的
+     *  `input.messages[]` 与 `parameters.` 两级嵌套，全部摆在请求体顶层。
+     *  小字是给人对着文档核验用的，位置写错就会照着发错。缺项回落 capApi。 */
+    capApiFlat: {
+      prompt: "prompt",
+      size: "size",
+      n: "n",
+      negative: "negative_prompt",
+      seed: "seed",
+      extend: "prompt_extend",
+      extendMode: "prompt_extend_mode",
+      thinking: "enable_thinking",
+      watermark: "watermark",
+      quality: "quality",
+      responseFormat: "response_format",
+    } as Record<string, string>,
     capFieldSizes: "取值",
     capRuleSide: "单边 px",
     capRuleTotal: "总像素",
@@ -400,9 +425,37 @@ export const t = {
       enqueued: (n: number) => `已加入 ${n} 条生成任务`,
       imagesDone: (n: number) => `生成 ${n} 张图`,
       progressLabel: "批量生成进度",
+      /** 队列进度计数：首个数字是**已完成数**（终态条目累计），不是派发序号。 */
+      progressCount: (done: number, total: number) => `已完成 ${done} / 总数 ${total}`,
+      /** 运行中条目的阶段文案：与后端 GenStage 的 as_str 取值一一对应（submitting/polling/downloading）。 */
+      stageLabel: (stage: string): string => {
+        const labels: Record<string, string> = {
+          submitting: "提交中",
+          polling: "排队中",
+          downloading: "下载中",
+        };
+        return labels[stage] ?? "";
+      },
       finishedSummary: (finished: number, failed: number, total: number) =>
         `批量生成结束：成功 ${finished} · 失败 ${failed} · 共 ${total} 条`,
       retryEntry: "重试本条",
+      /** 执行期重试徽标：attempts 是「总尝试次数」（首发即 1），故实际重试次数 = attempts - 1。
+       *  仅在 attempts > 1（即确实重试过）时展示。 */
+      retriedBadge: (attempts: number) => `已重试 ${attempts - 1} 次`,
+      /** 失败条目按错误类别给出的处置建议（对应后端 GenErrorKind）；无建议类别返回空串。 */
+      errorAction: (kind: string): string => {
+        const actions: Record<string, string> = {
+          auth: "检查 API Key 是否正确或已过期",
+          rate_limited: "稍后重试或降低并发",
+          not_configured: "到服务商设置填写 Key/模型",
+          invalid_param: "按提示调整参数",
+          content_rejected: "修改提示词后重试",
+          network: "检查网络后重试",
+          provider: "稍后重试，持续失败请查看服务商状态",
+          io: "检查磁盘空间与目录权限",
+        };
+        return actions[kind] ?? "";
+      },
       viewImages: "查看图片",
       collapseImages: "收起图片",
       saveImage: "另存",

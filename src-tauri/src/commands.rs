@@ -1958,21 +1958,30 @@ pub fn delete_prompt_template(state: State<'_, AppState>, id: String) -> Result<
 pub async fn generate_image(
     state: State<'_, AppState>,
     req: image_ai::GenRequest,
-) -> Result<image_ai::GenResult, String> {
+) -> Result<image_ai::GenResult, image_ai::ImageGenError> {
     // await 前把配置 clone 出锁，不跨 await 持锁。
-    let (cfg, key) = {
-        let cfg = state.image.lock().unwrap();
-        image_ai::validate_request(&cfg, &req)?;
-        let key = state
-            .image_keys
-            .lock()
-            .unwrap()
-            .get(&req.provider_id)
-            .cloned()
-            .ok_or("请先输入 API Key（仅本会话记忆，不会保存）")?;
-        (cfg.clone(), key)
-    };
-    image_ai::generate(&state.data_dir, &cfg, &key, req).await
+    // image 锁「即取即放」：语句末即释放，绝不与其后的 image_keys 嵌套持有（全仓单一锁序 image → image_keys → queue）。
+    let cfg = state.image.lock().unwrap().clone();
+    // 仅校验请求自身的完整性；厂商约束（尺寸/张数/提示词长度）由 provider 层解释，见 generate。
+    image_ai::validate_complete(&cfg, &req)?;
+    let key = state
+        .image_keys
+        .lock()
+        .unwrap()
+        .get(&req.provider_id)
+        .cloned()
+        .ok_or_else(|| {
+            image_ai::ImageGenError::not_configured("请先输入 API Key（仅本会话记忆，不会保存）")
+        })?;
+    // 单张直发不展示阶段：空回调（阶段进度只有队列批处理会呈现在界面上）。
+    image_ai::generate(&state.data_dir, &cfg, &key, req, &|_| {}).await
+}
+
+/// 读取持久画廊记录（data_dir/gallery.json），并逐条**现算**图片是否仍在会话临时目录。
+/// 存在性只在查询期计算，绝不写回 gallery.json（写回会在下次启动即刻失真）。
+#[tauri::command]
+pub fn get_gallery(state: State<'_, AppState>) -> Result<Vec<image_ai::GalleryItem>, String> {
+    Ok(image_ai::load_gallery_items(&state.data_dir))
 }
 
 #[tauri::command]
@@ -2137,15 +2146,31 @@ pub fn save_and_replace(
 
 // ---------------- 批量生成队列（image_ai_queue::run_queue 承担实际调度） ----------------
 
+/// add_to_queue 的纯主体：先整批校验（不合规则原样返回 Err、队列不变），通过后才并入队列。
+/// 抽成 pub(crate) 是为了让「整批拒绝时队列不变」这条契约可被单测直接钉住（命令层的 State 无法构造）。
+pub(crate) fn add_to_queue_inner(
+    cfg: &image_ai::Config,
+    queue: &Mutex<image_ai_queue::QueueState>,
+    entries: Vec<image_ai_queue::QueueEntry>,
+) -> Result<Vec<image_ai_queue::QueueEntry>, image_ai::ImageGenError> {
+    image_ai_queue::validate_entries(cfg, &entries)?;
+    let mut q = queue.lock().unwrap();
+    q.add(entries);
+    Ok(q.snapshot())
+}
+
 /// 追加一批生成任务，返回追加后的全量快照（条目 id 由后端统一生成，前端以此为准）。
+/// 任一待入队条目不满足完整性/厂商约束即整批拒绝（与 start_queue 的「跑一半才失败」同样的
+/// 防呆意图），返回该条目的结构化错误，队列保持不变。
 #[tauri::command]
 pub fn add_to_queue(
     state: State<'_, AppState>,
     entries: Vec<image_ai_queue::QueueEntry>,
-) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
-    let mut q = state.queue.lock().unwrap();
-    q.add(entries);
-    Ok(q.snapshot())
+) -> Result<Vec<image_ai_queue::QueueEntry>, image_ai::ImageGenError> {
+    // 锁序固定为 image → queue（与 generate_image/start_queue 同序）；先 clone 出 cfg（语句末即释放），
+    // 再进入 add_to_queue_inner 锁 queue，避免反序加锁把死锁面带进队列路径。
+    let cfg = state.image.lock().unwrap().clone();
+    add_to_queue_inner(&cfg, &state.queue, entries)
 }
 
 /// 按 id 批量移除条目，返回移除后的全量快照。
@@ -2171,20 +2196,28 @@ pub fn clear_queue(state: State<'_, AppState>) -> Result<Vec<image_ai_queue::Que
 /// 【为什么 async】run_queue 是异步的；用 tauri::async_runtime::spawn 让它跑在运行时上，
 /// 进度经事件推送（gen:queue:progress / gen:queue:finished），前端另行 query_queue 拉快照。
 #[tauri::command]
-pub async fn start_queue(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn start_queue(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), image_ai::ImageGenError> {
     // 出锁前把后台任务需要的全部数据 clone 下来：std Mutex 绝不跨 await 持有。
-    let (cfg, keys, concurrency) = {
+    // 锁序固定为 image → image_keys → queue（与 generate_image 的 image → image_keys 同序）；
+    // 每把锁都在各自语句末尾即释放，不与下一把嵌套持有——全仓单序可排除交叉加锁的死锁面。
+    let cfg = state.image.lock().unwrap().clone();
+    let concurrency = cfg.settings.concurrency;
+    let keys = state.image_keys.lock().unwrap().clone();
+    // queue 最后锁：重入检查与逐条 Key 校验都在这一层内完成（与在跑状态同源）。
+    {
         let q = state.queue.lock().unwrap();
         // 已有任务在跑（存在 Running 条目）：拒绝重入。
         if q.entries
             .iter()
             .any(|e| e.status == image_ai_queue::QueueStatus::Running)
         {
-            return Err("队列正在执行中".into());
+            return Err(image_ai::ImageGenError::internal("队列正在执行中"));
         }
         // 启动前逐条校验 Queued 条目的服务商 Key：任一缺失就整批不启动（跑一半才失败
         // 会白白烧掉前几条的配额）。Key 只在本会话内存（见 set_provider_key）。
-        let keys = state.image_keys.lock().unwrap().clone();
         for e in q
             .entries
             .iter()
@@ -2194,21 +2227,30 @@ pub async fn start_queue(app: AppHandle, state: State<'_, AppState>) -> Result<(
                 .get(&e.req.provider_id)
                 .is_some_and(|k| !k.trim().is_empty());
             if !ok {
-                return Err("请先输入该服务商 Key".into());
+                return Err(image_ai::ImageGenError::not_configured(
+                    "请先输入该服务商 Key",
+                ));
             }
         }
-        let cfg = state.image.lock().unwrap().clone();
-        let concurrency = cfg.settings.concurrency;
-        (cfg, keys, concurrency)
-    };
+    }
     let sink: Arc<dyn image_ai_queue::EventSink> = Arc::new(image_ai_queue::AppEventSink(app));
     let queue = Arc::clone(&state.queue);
     let data_dir = state.data_dir.clone();
     let executor: Arc<dyn image_ai_queue::GenExecutor> = Arc::new(image_ai_queue::RealExecutor);
+    // 真实睡眠：重试退避经 spawn_blocking 睡（不阻塞异步运行时）。
+    let sleeper: Arc<dyn image_ai_queue::Sleeper> = Arc::new(image_ai_queue::RealSleeper);
     tauri::async_runtime::spawn(async move {
-        let (finished, failed, total) =
-            image_ai_queue::run_queue(queue, data_dir, cfg, keys, concurrency, executor, sink)
-                .await;
+        let (finished, failed, total) = image_ai_queue::run_queue(
+            queue,
+            data_dir,
+            cfg,
+            keys,
+            concurrency,
+            executor,
+            sleeper,
+            sink,
+        )
+        .await;
         log::info!(
             target: "image_ai",
             "批量生成队列结束：成功 {finished}，失败 {failed}，共 {total}"

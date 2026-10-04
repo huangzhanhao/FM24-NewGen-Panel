@@ -2,7 +2,7 @@
      自上而下平铺——模板应用栏 / 正文 / 负向折叠（模型不支持则整项不出现）/ 调用方式 /
      参数区。参数区只有一层：左画幅帧（按宽高比实时缩放的输出预览，右侧一条竖分隔线），
      右参数流（比例 / 尺寸 / 张数 / Seed / 质量 / 水印 / 改写模式 / 思考模式 / 智能改写，
-     一个自动折行的流）；不再有 inset 面板与分组标题。
+     一个自动折行的流）；无嵌套面板、无分组标题。
      左缘：**盒型元素**（模板栏 / 文本域 / 画幅盒）外沿贴卡内容边 16px；**纯文字行**（正文标题 /
      负向条 / 调用方式 / 尺寸提示）缩进 --sp-4 落到 26px（= 文本域内文左缘）。画幅盒是盒不是文字，
      必须与文本域外沿齐平；画幅帧只在盒内居中缩放，不参与对齐。
@@ -16,7 +16,7 @@
   import Icon from "../../ui/Icon.svelte";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text";
-  import { applyTemplate, imageaiStore, parseSize } from "../../stores/imageai.svelte";
+  import { applyTemplate, imageaiStore, parseSize, SEED_MAX } from "../../stores/imageai.svelte";
   import NumberStepper from "./NumberStepper.svelte";
 
   let {
@@ -71,8 +71,8 @@
   let sizeH = $state(parseSize(imageaiStore.size)?.[1] ?? 350);
 
   const sizePresets = $derived(caps?.sizes ?? []);
-  /** 尺寸输入框的上下限来自模型声明的约束（缺省 = 不设限，不再用一套假范围骗人；
-   *  越界仍由 store.sizeError 按同一份约束兜底）。 */
+  /** 尺寸输入框的上下限来自模型声明的约束：缺省 = 不设限（不硬编一套与模型无关的假范围），
+   *  越界仍由 store.sizeError 按同一份约束兜底。 */
   const sideMin = $derived(caps?.sizeRules?.minSide || undefined);
   const sideMax = $derived(caps?.sizeRules?.maxSide || undefined);
   /** 输入框的悬停说明：摊开该模型真实的尺寸约束；无约束时不显示空提示。 */
@@ -84,9 +84,10 @@
     if (r.totalMin || r.totalMax) parts.push(`总像素 ${r.totalMin || "不限"}–${r.totalMax || "不限"}`);
     return parts.length > 0 ? parts.join("；") : undefined;
   });
-  /** 像素尺寸模型（gpt/qwen，预设可解析 WxH）与无预设自由尺寸模型（z-image）走「宽×高」双输入；
-   *  档位串模型（wan 的 1K/2K/4K，无法解析）保留尺寸下拉。 */
-  const pixelSizeMode = $derived(sizePresets.length === 0 || sizePresets.some((s) => parseSize(s) !== null));
+  /** 预设里只要出现解析不出宽×高的档位串（wan2.7 的 1K/2K/4K），就走「尺寸下拉 + 自定义宽高」分支；
+   *  预设全是像素值（gpt/qwen/z-image）或没有预设时，才用宽×高双输入。
+   *  判据必须是 every：wan2.7 的预设是档位串与官方推荐像素值混合的，用 some 会让档位下拉整个消失。 */
+  const pixelSizeMode = $derived(sizePresets.every((s) => parseSize(s) !== null));
   const sizeSelectValue = $derived(
     sizeCustomMode || !sizePresets.includes(imageaiStore.size) ? SIZE_CUSTOM : imageaiStore.size,
   );
@@ -134,7 +135,7 @@
 
   function syncCustomSize() {
     // 只拦「写不出合法尺寸」的输入（空/NaN/0）：真实边界由模型约束驱动（见 sideMin/sideMax
-    // 与 store.sizeError），这里不再复制一套硬编码区间
+    // 与 store.sizeError），此处不抄第二套区间，免得两处口径漂移
     const ok = (v: number) => Number.isFinite(v) && v >= 1;
     if (ok(sizeW) && ok(sizeH)) imageaiStore.size = `${sizeW}x${sizeH}`;
   }
@@ -346,10 +347,10 @@
   {/if}
 
   {#if caps?.supportsAsync}
-    <!-- 调用方式：异步端点与轮询取图的适配器尚未实现，切换项整体置灰占位 -->
-    <div class="call-row" title={t.gen.callModeAsyncTodo}>
+    <!-- 调用方式：仅支持异步的模型出现，可切换并随请求提交（后端按同一能力位再门控一遍） -->
+    <div class="call-row">
       <span class="g-label">{t.gen.callMode}</span>
-      <select value="sync" disabled>
+      <select bind:value={imageaiStore.callMode}>
         <option value="sync">{t.gen.callModeSync}</option>
         <option value="async">{t.gen.callModeAsync}</option>
       </select>
@@ -501,14 +502,22 @@
           {#if caps?.supportsSeed}
             <div class="gfield f-seed">
               <label for="ig-seed">{t.gen.seed}</label>
-              <!-- 文本型 + 数字键盘：非法输入由 store 的 parseSeed 按随机处理，清空即随机。
-                   【勿加外置清空/骰子按钮】清空一律走 type=search 的原生「×」 -->
+              <!-- number 型：min/max 把官方取值域 [0, SEED_MAX] 声明给平台（无障碍与校验 API 读得到），
+                   但浏览器不拦手输的越界值 ⇒ 生效判定仍在 store.parseSeed（越界按随机），
+                   可见反馈走 class:invalid + title。
+                   不用 bind:value：number 输入的 bind 会把值转成 number/null，而 store.seed 是
+                   字符串（'' = 随机、原样保留用户输入），parseSeed 与 seedOutOfRange 都按字符串读。 -->
               <input
                 id="ig-seed"
-                type="search"
-                inputmode="numeric"
+                type="number"
+                min="0"
+                max={SEED_MAX}
+                step="1"
                 placeholder={t.gen.seedPlaceholder}
-                bind:value={imageaiStore.seed}
+                title={imageaiStore.seedOutOfRange ? t.gen.seedOutOfRange(SEED_MAX) : ""}
+                class:invalid={imageaiStore.seedOutOfRange}
+                value={imageaiStore.seed}
+                oninput={(e) => (imageaiStore.seed = e.currentTarget.value)}
                 onkeydown={onGenerateKey}
               />
             </div>
@@ -730,7 +739,7 @@
     margin-top: var(--sp-2);
   }
   /* 调用方式行：位于参数区之上、与参数同族的「标签 + 控件」一行式；纯文字行，缩进 --sp-4。
-     适配器尚未实现异步，控件整体禁用（见 title 说明） */
+     仅支持异步的模型（supportsAsync）才渲染本行，控件可选可用 */
   .call-row {
     display: flex;
     align-items: center;
@@ -856,8 +865,8 @@
     color: var(--danger);
   }
 
-  /* 右栏参数流：所有生成旋钮平等排布、自动折行。
-     面板已用 inset 底色跟卡面划清边界，内部按一个流排布、不分组不加分隔条（再切一刀是过度表达） */
+  /* 右栏参数流：所有生成旋钮平等排布、自动折行；不分组、不加分隔条
+     （字段之间靠 gap 与折行已能读出节奏，再切一刀是过度表达） */
   .param-col {
     flex: 1;
     min-width: 0;
@@ -930,7 +939,8 @@
   /* Seed：弹性，basis 130px。
      min-width 130px 是硬下限 —— Seed 为 32 位数字（最多 10 字符）加「留空=随机」占位符，
      再窄占位符会被截成「留空=随」，读不出这框是干什么的；max-width 220px 防宽窗下拉出过长一行。
-     【勿加外置清空/骰子按钮】清空一律走 type=search 的原生「×」 */
+     【勿加外置清空/骰子按钮】留空即随机，清空靠选中删除；number 的步进器已被 app.css 全局隐去，
+     130px 全部留给数字与占位符，不会被控件吃掉。 */
   .f-seed {
     flex: 1 1 130px;
     min-width: 130px;

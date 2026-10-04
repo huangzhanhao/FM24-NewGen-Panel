@@ -353,6 +353,7 @@ pub fn run() {
             commands::save_prompt_template,
             commands::delete_prompt_template,
             commands::generate_image,
+            commands::get_gallery, // 画廊记录：读持久清单 + 现算图片存在性
             commands::save_generated_image,
             commands::save_and_replace, // 保存并替换：生成图落盘 _generated 后复用单人换脸链
             commands::add_to_queue,      // 批量生成：追加条目（返回快照）

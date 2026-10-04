@@ -17,11 +17,14 @@
   import { createAvatarSource } from "../../avatarBlobs.svelte"; // 头像路径查询+缩略图装载（与名单预览/球员源卡共用）
   import {
     imageaiStore,
+    isRetryableErrorKind,
     queueCancel,
     queueRemove,
     queueRetry,
     queueStart,
     setSourcePlayer,
+    shouldShowRetriedBadge,
+    stageOwnerId,
   } from "../../stores/imageai.svelte";
   import type { GenImage, PlayerRecord, QueueEntry, QueueStatus } from "../../types";
 
@@ -52,9 +55,21 @@
           ? t.gen.queue.statusSuccess
           : t.gen.queue.statusFailed;
   }
-  /** 详情行：失败显示原因，成功显示张数，其余留 —。 */
+  /** 运行中条目的阶段文案：仅当最近一次进度事件带 stage、且按 id（缺省回落 uid）命中该条目时显示。
+   *  用 id 而非 uid：同一球员可重复入队（uid 相同、id 不同），否则多个条目会同时显示同一阶段。
+   *  这是阶段在界面上的唯一展示点（挂在条目标题行），避免同一阶段在多处重复。 */
+  function stageTextFor(e: QueueEntry): string {
+    if (e.status !== "running") return "";
+    if (!progress?.stage || stageOwnerId(progress) !== e.id) return "";
+    return t.gen.queue.stageLabel(progress.stage);
+  }
+  /** 详情行：失败显示原因 + 按类别的处置建议，成功显示张数，其余留 —。 */
   function detailText(e: QueueEntry) {
-    if (e.status === "failed") return e.error || "—";
+    if (e.status === "failed") {
+      const base = e.error || "—";
+      const action = e.errorKind ? t.gen.queue.errorAction(e.errorKind) : "";
+      return action ? `${base}（${action}）` : base;
+    }
     if (e.status === "success") return t.gen.queue.imagesDone(e.images?.length ?? 0);
     return "—";
   }
@@ -231,7 +246,7 @@
   <div class="dock-head pcard-h">
     <span>{t.gen.queue.tabQueue}</span>
     {#if imageaiStore.queueRunning && progress}
-      <small class="muted small mono">{progress.current} / {progress.total}</small>
+      <small class="muted small mono">{t.gen.queue.progressCount(progress.current, progress.total)}</small>
     {/if}
   </div>
 
@@ -306,6 +321,12 @@
               placeholder=""
             />
             <span class="pill q-status {e.status}">{statusText(e.status)}</span>
+            {#if stageTextFor(e)}
+              <span class="muted small q-stage">{stageTextFor(e)}</span>
+            {/if}
+            {#if shouldShowRetriedBadge(e.attempts)}
+              <span class="pill q-retried">{t.gen.queue.retriedBadge(e.attempts ?? 0)}</span>
+            {/if}
           </div>
           {#if e.status === "success" || e.status === "failed"}
             <div class="q-detail">
@@ -320,7 +341,7 @@
                   {expandedId === e.id ? t.gen.queue.collapseImages : t.gen.queue.viewImages}
                 </button>
               {/if}
-              {#if e.status === "failed" && !imageaiStore.queueRunning}
+              {#if e.status === "failed" && !imageaiStore.queueRunning && isRetryableErrorKind(e.errorKind)}
                 <button type="button" class="btn sm link-btn" onclick={() => void onRetry(e)}>
                   {t.gen.queue.retryEntry}
                 </button>
@@ -428,6 +449,19 @@
   .q-status.failed {
     color: var(--danger);
     background: var(--danger-soft);
+  }
+  /* 执行期重试徽标：几何复用 .pill，仅覆盖为警示色；与状态胶囊同排故在 Running 期间即可见
+     （attempts 每次尝试前自增回写）。双类选择器提权以压过全局 .pill。 */
+  .pill.q-retried {
+    flex: none;
+    white-space: nowrap;
+    color: var(--warn);
+    background: var(--warn-soft);
+  }
+  /* 运行阶段文案：与状态胶囊同排，不收缩不换行（窄卡下优先保持可读）。 */
+  .q-stage {
+    flex: none;
+    white-space: nowrap;
   }
   /* 条目列表：顶行 = 勾选 + 姓名/副行 + 头像 + 状态胶囊；次行 = 详情与操作（仅成功/失败） */
   .list-scroll {

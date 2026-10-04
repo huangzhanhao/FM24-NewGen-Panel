@@ -93,6 +93,7 @@
   "settings": {
     "defaultProviderId": "openai",
     "historyLimit": 20,
+    "galleryRecordLimit": 100,
     "concurrency": 2,
     "namingPattern": "{uid}_{index}"
   }

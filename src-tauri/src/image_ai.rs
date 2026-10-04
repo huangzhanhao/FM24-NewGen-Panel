@@ -14,15 +14,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 // ===================== 数据契约（与前端 types.ts 一一对应，camelCase）=====================
 
 /// 服务商类型：决定适配器。
 /// 【为什么不设 custom】openai 兼容服务与官方 OpenAI 是**同一套 SDK**（请求/响应同构，
-/// 差异仅在 base_url 与模型名），此前单列的 Custom 变体在全仓无任何单独分支
-/// （适配器与校验里一律与 OpenAI 成对出现），属纯冗余标记 —— 已合并，用户自建兼容服务
-/// 直接用 OpenAI 这一档、改 base_url 即可。
+/// 差异仅在 base_url 与模型名），全仓没有任何一处需要按「是否官方」分流；
+/// 用户自建兼容服务直接用 OpenAI 这一档、改 base_url 即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
@@ -31,9 +31,175 @@ pub enum ProviderKind {
     Dashscope,
 }
 
-/// 自由尺寸规则（万相 2.5/2.6 等无固定尺寸枚举的模型）：0 表示该条约束不检查。
-/// 尺寸字符串仍为 `宽*高`/`宽x高` 形态，约束含义逐字对齐官方文档：
-/// 2.5/2.6 为总像素 [1280², 1440²]、宽高比 [1:4, 4:1]；2.2 及更早为单边 [512, 1440]。
+/// 生成链错误类别（snake_case 序列化，与前端 `GenErrorKind` 一一对应）。
+/// 分类的意义：前端据此给出可执行建议、并判断队列失败条目是否值得重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenErrorKind {
+    /// 服务商/模型/Key 等前置项缺省——用户补全即可，重试无意义。
+    NotConfigured,
+    /// 鉴权失败（401/403 或业务码 InvalidApiKey）。
+    Auth,
+    /// 限流/配额（429 或业务码 Throttling/QuotaExceeded），错峰重试有意义。
+    RateLimited,
+    /// 参数不合法（尺寸/张数/提示词长度等）。
+    InvalidParam,
+    /// 服务商内容审核拦截。
+    ContentRejected,
+    /// 服务商协议/服务端错误（JSON 解析、结构缺失、5xx 等）。
+    Provider,
+    /// 网络传输失败（连接、发送、读体），可重试。
+    Network,
+    /// 本地磁盘/目录 I/O。
+    Io,
+    /// 用户主动取消（队列自造，非服务商返回）。
+    Cancelled,
+    /// 内部异常（队列重入拒绝、任务 panic 兜底等）。
+    Internal,
+}
+
+impl GenErrorKind {
+    /// 类别默认是否可重试。Provider 因 4xx/5xx 而同类别不同结论，由构造点显式指定，不查此表。
+    fn default_retryable(self) -> bool {
+        matches!(self, GenErrorKind::Network | GenErrorKind::RateLimited)
+    }
+
+    /// 用户可执行的处置建议；Cancelled/Internal 无动作可给。
+    fn user_action(self) -> Option<&'static str> {
+        Some(match self {
+            GenErrorKind::Auth => "检查 API Key 是否正确或已过期",
+            GenErrorKind::RateLimited => "稍后重试或降低并发",
+            GenErrorKind::NotConfigured => "到服务商设置填写 Key/模型",
+            GenErrorKind::InvalidParam => "按提示调整参数",
+            GenErrorKind::ContentRejected => "修改提示词后重试",
+            GenErrorKind::Network => "检查网络后重试",
+            GenErrorKind::Provider => "稍后重试，持续失败请查看服务商状态",
+            GenErrorKind::Io => "检查磁盘空间与目录权限",
+            GenErrorKind::Cancelled | GenErrorKind::Internal => return None,
+        })
+    }
+}
+
+/// 生成链结构化错误：kind 供前端分类给建议，message 为既有中文文案（构造点不改文案），
+/// retryable 决定队列条目是否展示「重试本条」，user_action 为用户可执行动作。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageGenError {
+    pub kind: GenErrorKind,
+    pub message: String,
+    pub retryable: bool,
+    pub user_action: Option<String>,
+    /// 服务端 `Retry-After`（秒）：仅当 429 响应的该头可解析为整数秒时填；其余错误一律 None。
+    /// 队列重试退避会优先采用它（见 `image_ai_queue::backoff_delay`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
+}
+
+impl ImageGenError {
+    fn build(kind: GenErrorKind, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            retryable,
+            user_action: kind.user_action().map(str::to_string),
+            retry_after: None,
+        }
+    }
+
+    /// 附加 `Retry-After`（秒）。仅在确实读到响应头时由适配器调用，其它错误保持 None。
+    pub fn with_retry_after(mut self, secs: Option<u64>) -> Self {
+        self.retry_after = secs;
+        self
+    }
+
+    /// 按类别构造，retryable 取类别默认（仅 Network/RateLimited 为 true）。
+    pub fn new(kind: GenErrorKind, message: impl Into<String>) -> Self {
+        Self::build(kind, message, kind.default_retryable())
+    }
+
+    pub fn not_configured(message: impl Into<String>) -> Self {
+        Self::new(GenErrorKind::NotConfigured, message)
+    }
+
+    pub fn invalid_param(message: impl Into<String>) -> Self {
+        Self::new(GenErrorKind::InvalidParam, message)
+    }
+
+    pub fn network(message: impl Into<String>) -> Self {
+        Self::new(GenErrorKind::Network, message)
+    }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(GenErrorKind::Io, message)
+    }
+
+    /// Provider 类显式指定可重试位（5xx=true，其余 4xx/解析失败=false）。
+    pub fn provider(message: impl Into<String>, retryable: bool) -> Self {
+        Self::build(GenErrorKind::Provider, message, retryable)
+    }
+
+    pub fn cancelled() -> Self {
+        Self::new(GenErrorKind::Cancelled, "已取消")
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(GenErrorKind::Internal, message)
+    }
+}
+
+/// 业务错误码 → 类别（优先于 HTTP status）：InvalidApiKey→Auth；
+/// Throttling/Quota/限流→RateLimited；DataInspection/IPInfringement→ContentRejected；未命中返回 None。
+pub fn kind_from_business_code(code: &str) -> Option<GenErrorKind> {
+    let c = code.to_ascii_lowercase();
+    if c.contains("invalidapikey") || c.contains("invalid_api_key") {
+        return Some(GenErrorKind::Auth);
+    }
+    if c.contains("throttl")
+        || c.contains("quota")
+        || c.contains("ratelimit")
+        || c.contains("rate_limit")
+    {
+        return Some(GenErrorKind::RateLimited);
+    }
+    // 内容审核两种码：DataInspectionFailed（输入/输出违规）与 IPInfringementSuspect（疑似侵权）。
+    // 官方给的自救手段都在提示词侧（关掉 prompt_extend 重试、或改写涉及版权的角色名/作品名），
+    // 归 ContentRejected 才能让用户看到「修改提示词后重试」，而不是无因由地重试整个请求。
+    if c.contains("datainspection")
+        || c.contains("data_inspection")
+        || c.contains("ipinfringement")
+    {
+        return Some(GenErrorKind::ContentRejected);
+    }
+    None
+}
+
+/// HTTP 状态码 → 错误类别（必须在拼串前分流，status 是唯一稳定的分类依据）：
+/// 401/403→Auth、429→RateLimited、400→InvalidParam、5xx→Provider(可重试)、其余→Provider(不可重试)。
+pub fn from_http_status(status: u16, message: impl Into<String>) -> ImageGenError {
+    match status {
+        401 | 403 => ImageGenError::new(GenErrorKind::Auth, message),
+        429 => ImageGenError::new(GenErrorKind::RateLimited, message),
+        400 => ImageGenError::invalid_param(message),
+        500..=599 => ImageGenError::provider(message, true),
+        _ => ImageGenError::provider(message, false),
+    }
+}
+
+/// 厂商错误统一归类：业务 code 命中优先，否则回落 HTTP status。message 为既有中文文案。
+pub fn classify_provider_error(
+    status: u16,
+    code: Option<&str>,
+    message: impl Into<String>,
+) -> ImageGenError {
+    if let Some(kind) = code.and_then(kind_from_business_code) {
+        return ImageGenError::new(kind, message);
+    }
+    from_http_status(status, message)
+}
+
+/// 自由尺寸规则：约束**只对不在 `sizes` 预设里的自定义值**生效（见 `validate_model_caps`），
+/// 每条 0 = 不检查。尺寸字符串为 `宽*高`/`宽x高` 形态；各模型的具体区间由内置目录逐模型声明
+/// （见 `image_ai_providers::dashscope` 的各 `*_caps`），取值逐字对齐官方文档。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SizeRules {
@@ -84,7 +250,7 @@ pub struct Capabilities {
     #[serde(default)]
     pub supports_prompt_extend: bool,
     /// `prompt_extend` 的官方默认开关：千问/万相为开，z-image 为关（开启即思考模式、单价翻倍）。
-    /// 前端切模型时按此初始化开关；缺省 true 兼容旧配置。
+    /// 前端切模型时按此初始化开关；缺省 true 取官方多数系列的口径（不发该参数的服务商读不到它）。
     #[serde(default = "yes")]
     pub prompt_extend_default: bool,
     /// 百炼 `prompt_extend_mode`：智能改写模式（`direct`=DPE / `agent`=APE）。
@@ -108,19 +274,20 @@ pub struct Capabilities {
     #[serde(default)]
     pub watermark_default: bool,
     /// 请求体是否携带 `n` 参数：z-image 无此参数（固定 1 张）必须省略；其余百炼模型为 true。
-    /// 缺省 true 兼容 OpenAI/火山与旧配置（它们一律发 n）。
+    /// 缺省 true = OpenAI/火山一律发 n。
     #[serde(default = "yes")]
     pub supports_n: bool,
     /// 正向提示词字符/Token 上限（0 = 不展示计数、不校验；
-    /// qwen3.0=4500/qwen2.0=1300/wan2.7=5000/wan2.6=2100/z-image=800）。
+    /// qwen3.0=4500/wan2.7=5000/wan2.6=2100/z-image=800）。
     #[serde(default)]
     pub max_prompt_chars: u32,
-    /// 自由尺寸规则；None = 仅允许 sizes 枚举值（自定义走软警告，不做硬校验）。
+    /// 自由尺寸规则；`None` = **不做任何尺寸校验**（自定义宽高直接放行），`Some` = 只校验
+    /// 不在 `sizes` 预设里的自定义值（预设值是官方给的，天然合法）。见 `validate_model_caps`。
     #[serde(default)]
     pub size_rules: Option<SizeRules>,
     /// 是否支持异步调用（提交任务 → 轮询 `/tasks/{task_id}` 取结果）。
     /// 这是**协议级**能力位（同一模型在同步/异步下请求体逐字相同，差异只在 endpoint 与
-    /// 异步头），与其余能力位一样由编辑区勾选；适配器尚未实现异步，出厂一律 false。
+    /// 异步头），与其余能力位一样由编辑区勾选；当前由适配器按官方异步清单逐模型置位。
     #[serde(default)]
     pub supports_async: bool,
 }
@@ -165,9 +332,20 @@ pub struct ProviderConfig {
 #[serde(rename_all = "camelCase")]
 pub struct GenSettings {
     pub default_provider_id: String,
+    /// 临时图片上限：仅由 `enforce_image_limit` 消费（决定 `.imgtmp` 保留几张图）。
     pub history_limit: usize,
+    /// 画廊记录上限：仅由 `enforce_gallery_limit` 消费（决定 gallery.json 保留几行）。
+    /// 与 history_limit 是两条独立闸门的上限，**互不换算**；旧用户文件没有该字段，故带缺省。
+    #[serde(default = "gallery_limit")]
+    pub gallery_record_limit: usize,
     pub concurrency: u32,
     pub naming_pattern: String,
+}
+
+/// `gallery_record_limit` 的缺省（出厂 100）：旧用户文件缺该字段时兜底，
+/// 不能让一份没有它的设置整份解析失败。
+fn gallery_limit() -> usize {
+    100
 }
 
 impl Default for GenSettings {
@@ -175,6 +353,7 @@ impl Default for GenSettings {
         Self {
             default_provider_id: "openai".into(),
             history_limit: 20,
+            gallery_record_limit: 100,
             concurrency: 2,
             naming_pattern: "{uid}_{index}".into(),
         }
@@ -237,6 +416,18 @@ pub struct GenRequest {
     pub steps: Option<u32>,
     #[serde(default)]
     pub uid: Option<String>,
+    /// 球员名：仅用于画廊记录展示。前端单张取数据源球员名、批量取入队行名，
+    /// 无数据源时缺省 None（记录里 name 为空）。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 提示词模板 id：随请求带入以写入画廊记录；未选模板（或旧前端不传）时缺省 None。
+    #[serde(default)]
+    pub template_id: Option<String>,
+    /// 调用方式：`Some("async")` = 走异步任务端点，None/缺省 = 同步。
+    /// **这不是能力字段**：是否真走异步由 `generate` 依据模型 `supports_async` 门控后回填，
+    /// 前端只表达「想用异步」的意图。
+    #[serde(default)]
+    pub call_mode: Option<String>,
     /// 万相智能改写开关（仅百炼适配器消费；None = 按官方默认 true）。
     #[serde(default)]
     pub prompt_extend: Option<bool>,
@@ -250,39 +441,35 @@ pub struct GenRequest {
     #[serde(default)]
     pub enable_thinking: Option<bool>,
     /// 内部字段（前端不传，serde 缺省为空）：`generate` 解析出服务商后填入 base_url，
-    /// 适配器据此拼 endpoint。
+    /// 适配器据此拼 endpoint。它与能力无关，故独立于能力快照。
     #[serde(default)]
     pub base_url: String,
-    /// 内部字段：`generate` 从模型能力集 `supports_response_format` 拷入，
-    /// OpenAI 协议适配器据此决定是否传 response_format。
-    #[serde(default)]
-    pub supports_response_format: bool,
-    /// 内部字段：`generate` 从模型能力集拷入，百炼适配器据此决定是否发送对应参数
-    /// （OpenAI 官方端点不认这些字段，门控为 false 时一律不带，避免 400）。
-    #[serde(default)]
-    pub supports_negative_prompt: bool,
-    #[serde(default)]
-    pub supports_prompt_extend: bool,
-    #[serde(default)]
-    pub supports_watermark: bool,
-    #[serde(default)]
-    pub supports_seed: bool,
-    /// 内部字段：`generate` 从模型能力集拷入，百炼适配器据此决定请求体是否携带 n
-    /// （z-image 无 n 参数，必须省略）。
-    #[serde(default = "yes")]
-    pub supports_n: bool,
-    /// 内部字段：`generate` 从模型能力集拷入，百炼适配器据此决定是否发送改写模式/思考模式，
-    /// 并在用户未选择时回流该模型声明的默认档。
-    #[serde(default)]
-    pub supports_prompt_extend_mode: bool,
-    #[serde(default = "direct")]
-    pub prompt_extend_mode_default: String,
-    #[serde(default)]
-    pub supports_enable_thinking: bool,
-    #[serde(default = "yes")]
-    pub enable_thinking_default: bool,
-    #[serde(default)]
-    pub watermark_default: bool,
+    /// 内部字段：`generate` 从模型能力集**整体**拷入的能力快照（`None`/缺省 = 未回填，
+    /// 访问器 [`GenRequest::caps`] 按旧字段缺省语义兜底）。用快照而非逐字段摊平：
+    /// 新增一个能力位时只需改 `Capabilities` 与消费方两处，不必再动本结构体与拷贝行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<Capabilities>,
+}
+
+impl GenRequest {
+    /// 能力快照访问器：`generate` 已回填时直接返回；缺省（单测直接构造、旧快照回放）时
+    /// 走 [`default_caps`] 兜底。适配器一律经此读取，避免 `unwrap_or` 与默认值散落各处。
+    pub fn caps(&self) -> Capabilities {
+        self.caps.clone().unwrap_or_else(default_caps)
+    }
+}
+
+/// 能力快照缺省时的兜底：**逐条等价**于改前 `GenRequest` 各能力字段的 serde 缺省。
+/// 【为什么不能直接用 `Capabilities::default()`】其 `Default` 派生把 `supports_n` 置 false，
+/// 而旧 `GenRequest.supports_n` 缺省为 true（`#[serde(default = "yes")]`）——语义不同。
+fn default_caps() -> Capabilities {
+    Capabilities {
+        supports_n: true,
+        prompt_extend_mode_default: "direct".into(),
+        enable_thinking_default: true,
+        watermark_default: false,
+        ..Default::default()
+    }
 }
 
 /// 一张临时图片元信息。
@@ -303,13 +490,38 @@ pub struct GenResult {
     pub images: Vec<GenImage>,
 }
 
-/// 一条会话历史索引：指向 `.imgtmp` 里的一张临时图（文件名为 `{id}.{扩展名}`）。
-/// ts 为写入时间（now_ts 格式），该格式字典序即时间序，LRU 裁剪据此判断新旧。
+/// 一条画廊记录：持久保存在 `data_dir/gallery.json`（不随会话清理，与 `.imgtmp` 里的图片字节
+/// 是两条独立生命周期）。除 id/ts 外的字段都可缺省，兼容旧文件与后续字段演进。
+/// ts 为写入时间（now_ts 格式），该格式字典序即时间序，淘汰与排序据此判断新旧。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HistoryEntry {
+pub struct GalleryRecord {
     pub id: String,
     pub ts: String,
+    #[serde(default)]
+    pub uid: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub negative_prompt: String,
+    #[serde(default)]
+    pub template_id: String,
+}
+
+/// 画廊查询返回项：记录本体 + **查询期现算**的图片存在性。存在性绝不写回 gallery.json。
+/// path 是现算出的 `.imgtmp` 实际文件路径（扩展名随厂商返回格式变化），图片已被会话清理时为 None；
+/// 前端据此决定渲染真图还是占位。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryItem {
+    #[serde(flatten)]
+    pub record: GalleryRecord,
+    pub image_available: bool,
+    pub path: Option<String>,
 }
 
 // ===================== data/ 路径（与既有路径工具同居一层风格）=====================
@@ -326,8 +538,10 @@ pub fn dictionary_path(d: &Path) -> PathBuf {
 pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
 }
-pub fn history_path(d: &Path) -> PathBuf {
-    tmp_dir(d).join("history.json")
+/// 画廊记录文件：落在 data/ 根、**不在** `.imgtmp` 内——`.imgtmp` 启动即清，
+/// 记录必须留在这里才能跨会话存活。
+pub fn gallery_path(d: &Path) -> PathBuf {
+    d.join("gallery.json")
 }
 
 // ===================== Config：内置默认 + 用户文件双来源（仿 templates::RuleConfig）=====================
@@ -424,8 +638,8 @@ impl Config {
             Err(LoadError::Corrupt(e)) => return Err(format!("{}（{e}）", pp.display())),
         };
         let mut changed = false;
-        // 百炼模型目录代码托管：旧用户文件里的 dashscope 块在此迁移（模型行整表替换，
-        // 仅保留显示名/base_url），新模型随版本自动推送。
+        // 百炼服务商：已存在时只归位 kind，模型行与默认模型归用户所有（可增删改且不被复活），
+        // 故内置目录的变更不会自动推送到老配置。详见 reconcile_builtin_providers。
         if reconcile_builtin_providers(&mut file.providers) {
             changed = true;
         }
@@ -536,9 +750,9 @@ impl Config {
 /// - 列表中没有 dashscope：**整块补入内置服务商**（新装/首次导入即得到完整目录）；
 /// - 已有：**只归位 kind，模型行与默认模型一律不接管** —— 交还用户，
 ///   由「服务商设置」弹窗内的模型清单增删改。
-///   【代价，用户 10-03 00:06 明确接受】新内置模型不再随版本自动推送，
-///   旧模型下线的自动清理也不再发生；换来的是「对模型的增删改可保留」——
-///   若仍做「只补缺失」，用户删掉的内置模型会在下次启动复活，与「可删」自相矛盾。
+///   【刻意取舍，不是遗漏】代价是新内置模型不随版本推送、旧模型下线也不自动清理；
+///   换来的是「对模型的增删改可保留」——若改成「只补缺失」，用户删掉的内置模型
+///   会在下次启动复活，与「可删」自相矛盾。
 /// - name / base_url 本就不动（改名或指向代理平台是合法定制）。
 ///
 /// 返回是否发生需要落盘的变更（内容已一致时不重写，避免每次启动无谓写文件）。
@@ -581,7 +795,8 @@ pub fn upsert_provider(cfg: &mut Config, mut p: ProviderConfig) -> Result<(), St
 /// 删除服务商。判据是 **id**（不是 kind）——「能否删」讲的是「是不是内置」，
 /// 与 kind 讲的「用什么协议」是两个维度；前端删除按钮同用 id 判据（两处必须一致）。
 /// openai 不可删：它是 settings.default_provider_id 的兜底项（见 load/ensure 的悬空回退）。
-/// custom 曾在此列，已随 ProviderKind::Custom 合并而撤销保护（内置列表里不再有该条目）。
+/// dashscope 可删：下次启动 `reconcile_builtin_providers` 会把内置目录整块重新注入，
+/// 等于「恢复默认模型行」——这也是老配置同步内置目录变更的另一条路。
 pub fn remove_provider(cfg: &mut Config, id: &str) -> Result<(), String> {
     if id == "openai" {
         return Err("内置服务商不可删除（可改名/改地址）".into());
@@ -611,97 +826,40 @@ pub fn remove_template(cfg: &mut Config, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 生成前的统一校验（服务商/类型/地址/模型/张数/提示词）。
-pub fn validate_request(cfg: &Config, req: &GenRequest) -> Result<(), String> {
+/// 生成前的厂商无关完整性校验：提示词非空、张数 ≥ 1、服务商与模型存在。
+/// 厂商约束（张数上限/提示词长度/尺寸规则）一律由 Provider 的 `validate` 解释，本层不再碰。
+pub fn validate_complete(cfg: &Config, req: &GenRequest) -> Result<(), ImageGenError> {
     if req.prompt.trim().is_empty() {
-        return Err("提示词不能为空".into());
+        return Err(ImageGenError::invalid_param("提示词不能为空"));
     }
     if req.n < 1 {
-        return Err("张数至少为 1".into());
+        return Err(ImageGenError::invalid_param("张数至少为 1"));
     }
-    let provider = cfg.provider(&req.provider_id).ok_or("请先选择服务商")?;
-    // 三家均已适配（image_ai_providers 族）。
-    if provider.base_url.trim().is_empty()
-        && matches!(
-            provider.kind,
-            ProviderKind::OpenAI | ProviderKind::Volcano
-        )
-    {
-        // dashscope endpoint 为固定常量，不需要 base_url；其余两家必须填写。
-        return Err("请先在「服务商设置」中填写接口地址 Base URL".into());
-    }
-    let model = cfg
-        .model(&req.provider_id, &req.model)
-        .ok_or("请先选择模型，或在服务商设置中为该服务添加模型")?;
-    if model.capabilities.max_n > 0 && req.n > model.capabilities.max_n {
-        return Err(format!("该模型单次最多 {} 张", model.capabilities.max_n));
-    }
-    // 提示词长度：官方口径是「超长自动截断」，这里改为显式报错，避免用户以为全文生效。
-    if model.capabilities.max_prompt_chars > 0
-        && req.prompt.chars().count() > model.capabilities.max_prompt_chars as usize
-    {
-        return Err(format!(
-            "提示词超出该模型 {} 字上限（当前 {} 字），请精简后再生成",
-            model.capabilities.max_prompt_chars,
-            req.prompt.chars().count()
-        ));
-    }
-    // 自由尺寸模型（万相 2.5/2.6、2.2）：尺寸不在预设枚举时按规则硬校验。
-    if let Some(rules) = &model.capabilities.size_rules {
-        if !model.capabilities.sizes.iter().any(|s| s == &req.size) {
-            validate_size(&req.size, rules)?;
-        }
-    }
+    cfg.provider(&req.provider_id)
+        .ok_or_else(|| ImageGenError::not_configured("请先选择服务商"))?;
+    cfg.model(&req.provider_id, &req.model).ok_or_else(|| {
+        ImageGenError::not_configured("请先选择模型，或在服务商设置中为该服务添加模型")
+    })?;
     Ok(())
 }
 
-/// 解析 `宽*高`/`宽x高` 尺寸并按模型自由尺寸规则校验；0 值字段表示该约束不检查。
-pub fn validate_size(size: &str, rules: &SizeRules) -> Result<(), String> {
-    let caps: Vec<u32> = size
-        .split(['*', 'x'])
-        .filter_map(|s| s.trim().parse::<u32>().ok())
-        .collect();
-    let (w, h) = match caps.as_slice() {
-        [w, h] if *w > 0 && *h > 0 => (*w, *h),
-        _ => {
-            return Err(format!(
-                "尺寸「{size}」格式不正确，应为 宽*高（如 1280*1280）"
-            ))
-        }
-    };
-    if rules.min_side > 0 && (w < rules.min_side || h < rules.min_side) {
-        return Err(format!("尺寸宽/高不能小于 {} 像素", rules.min_side));
-    }
-    if rules.max_side > 0 && (w > rules.max_side || h > rules.max_side) {
-        return Err(format!("尺寸宽/高不能超过 {} 像素", rules.max_side));
-    }
-    let total = w as u64 * h as u64;
-    if rules.total_min > 0 && total < rules.total_min {
-        return Err(format!(
-            "总像素不能小于 {}（约 {}²）",
-            rules.total_min,
-            (rules.total_min as f64).sqrt() as u32
-        ));
-    }
-    if rules.total_max > 0 && total > rules.total_max {
-        return Err(format!(
-            "总像素不能超过 {}（约 {}²）",
-            rules.total_max,
-            (rules.total_max as f64).sqrt() as u32
-        ));
-    }
-    if rules.ratio_min > 0.0 || rules.ratio_max > 0.0 {
-        let ratio = w as f32 / h as f32;
-        if (rules.ratio_min > 0.0 && ratio + 1e-4 < rules.ratio_min)
-            || (rules.ratio_max > 0.0 && ratio - 1e-4 > rules.ratio_max)
-        {
-            return Err(format!(
-                "宽高比需在 {:.2}:1 至 {:.2}:1 之间（当前 {:.2}:1）",
-                rules.ratio_min, rules.ratio_max, ratio
-            ));
-        }
-    }
-    Ok(())
+/// 生图准入校验的**唯一入口**：解析服务商/模型，并按协议解释厂商约束（张数上限/提示词长度/尺寸规则）。
+/// `generate` 与回归测试都经此函数——这样「删掉准入校验」必然会有断言失败（结构性覆盖，而非靠人工 review）。
+pub(crate) fn validate_for_generate(cfg: &Config, req: &GenRequest) -> Result<(), ImageGenError> {
+    let provider = cfg
+        .provider(&req.provider_id)
+        .cloned()
+        .ok_or_else(|| ImageGenError::not_configured("请先选择服务商"))?;
+    let model = cfg
+        .model(&req.provider_id, &req.model)
+        .ok_or_else(|| ImageGenError::not_configured("请先选择模型"))?;
+    // base_url 与能力快照都只在服务商配置里，用探针副本补齐，使探针与 generate 实跑的请求同形。
+    // （真正读 req.caps() 的是适配器的请求体组装 build_body；validate 的 caps 走形参，
+    //  但同形可避免探针与实跑出现两套输入。）
+    let mut probe = req.clone();
+    probe.base_url = provider.base_url.clone();
+    probe.caps = Some(model.capabilities.clone());
+    crate::image_ai_providers::for_kind(provider.kind).validate(&probe, &model.capabilities)
 }
 // ===================== 码值转译 =====================
 
@@ -841,30 +999,36 @@ pub async fn generate(
     cfg: &Config,
     key: &str,
     mut req: GenRequest,
-) -> Result<GenResult, String> {
+    progress: &(dyn Fn(crate::image_ai_providers::GenStage) + Sync),
+) -> Result<GenResult, ImageGenError> {
     let (provider, model) = {
         let provider = cfg
             .provider(&req.provider_id)
             .cloned()
-            .ok_or("请先选择服务商")?;
+            .ok_or_else(|| ImageGenError::not_configured("请先选择服务商"))?;
         let model = cfg
             .model(&req.provider_id, &req.model)
-            .ok_or("请先选择模型")?;
+            .ok_or_else(|| ImageGenError::not_configured("请先选择模型"))?;
         (provider, model)
     };
     // 协议适配所需的服务商/能力信息随请求内部字段带入适配器（前端无需传）。
     req.base_url = provider.base_url.clone();
-    req.supports_response_format = model.capabilities.supports_response_format;
-    req.supports_negative_prompt = model.capabilities.supports_negative_prompt;
-    req.supports_prompt_extend = model.capabilities.supports_prompt_extend;
-    req.supports_watermark = model.capabilities.supports_watermark;
-    req.supports_seed = model.capabilities.supports_seed;
-    req.supports_n = model.capabilities.supports_n;
-    req.supports_prompt_extend_mode = model.capabilities.supports_prompt_extend_mode;
-    req.prompt_extend_mode_default = model.capabilities.prompt_extend_mode_default.clone();
-    req.supports_enable_thinking = model.capabilities.supports_enable_thinking;
-    req.enable_thinking_default = model.capabilities.enable_thinking_default;
-    req.watermark_default = model.capabilities.watermark_default;
+    // 能力位整体拷一份快照：新增能力位只改 Capabilities 与消费方，这里不再逐行维护。
+    req.caps = Some(model.capabilities.clone());
+
+    // 调用方式门控：仅当用户显式选异步、且该模型声明支持异步时才置 "async"，否则一律回落同步
+    // （校验与 HTTP 都据此分流，见 DashscopeProvider::generate）。
+    req.call_mode = if req.call_mode.as_deref() == Some("async")
+        && model.capabilities.supports_async
+    {
+        Some("async".into())
+    } else {
+        None
+    };
+
+    // 【唯一准入校验入口】厂商约束（张数上限/提示词长度/尺寸规则）在此解释；失败即返回，绝不发出 HTTP。
+    // 抽成 validate_for_generate 便于回归测试锚定「确实调用了校验」。
+    validate_for_generate(cfg, &req)?;
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -872,95 +1036,183 @@ pub async fn generate(
         // 该 client 四家共用，放宽上限不影响 OpenAI/火山的正常返回（它们本就秒级完成）。
         .timeout(Duration::from_secs(600))
         .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+        .map_err(|e| ImageGenError::network(format!("HTTP 客户端初始化失败: {e}")))?;
     let adapter = crate::image_ai_providers::for_kind(provider.kind);
-    // 适配器内部完成 POST/解析/（异步厂商的 submit→poll→fetch），图片已为字节。
-    let fetched = adapter.generate(&client, key, &req).await?;
+    // 适配器内部完成 POST/解析/（异步厂商的 submit→poll→fetch），图片已为字节；
+    // 执行阶段（提交/轮询/下载）由适配器经 progress 回调上报，本层只透传。
+    let fetched = adapter.generate(&client, key, &req, progress).await?;
 
     let tmp = tmp_dir(data_dir);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&tmp).map_err(|e| ImageGenError::io(e.to_string()))?;
     let mut images = Vec::new();
     for img in fetched.images {
         let id = new_id();
         let path = tmp.join(format!("{id}.{}", img.extension));
-        fs::write(&path, &img.bytes).map_err(|e| format!("临时图片写入失败: {e}"))?;
+        fs::write(&path, &img.bytes)
+            .map_err(|e| ImageGenError::io(format!("临时图片写入失败: {e}")))?;
         images.push(GenImage {
             id,
             path: path.to_string_lossy().to_string(),
             bytes: img.bytes.len() as u64,
         });
     }
-    // 会话历史只是临时图索引：记录/裁剪失败不应掩盖已成功的生成（图片已落盘）。
-    if let Err(e) = record_history(data_dir, &images, cfg.settings.history_limit) {
-        log::warn!(target: "image_ai", "记录会话历史失败（不影响本次生成）: {e}");
+    // 记录持久化与图片淘汰是两条互不越界的闸门：任一失败都不应掩盖已成功的生成（图片已落盘）。
+    if let Err(e) = record_gallery(data_dir, &images, &req, cfg.settings.gallery_record_limit) {
+        log::warn!(target: "image_ai", "写入画廊记录失败（不影响本次生成）: {e}");
+    }
+    if let Err(e) = enforce_image_limit(data_dir, cfg.settings.history_limit) {
+        log::warn!(target: "image_ai", "裁剪临时图片失败（不影响本次生成）: {e}");
     }
     Ok(GenResult { images })
 }
 
-// ===================== 会话历史：LRU 裁剪（清单在 .imgtmp/history.json，随会话清理）=====================
+// ===================== 画廊记录（data_dir/gallery.json）+ 两套独立淘汰闸门 =====================
+// 记录持久、图片仅存活于会话临时目录（.imgtmp，启动即清）——两条生命周期各自独立，
+// 淘汰因此拆成两条互不越界的闸门：记录闸门只删 gallery.json 的行、图片闸门只删 .imgtmp 的字节。
+// 任何「删记录行 + 连带删图」的一体实现都会让一条闸门的动作越界影响另一条，禁止再引入。
+//
+// 【并发】gallery.json 的写入是「read → push → save」的非原子读改写：批量生成默认并发 2，
+// 多个任务各读到同一份旧表再整体覆盖写，后写者会静默丢掉先写者刚追加的行（json_store::save
+// 的 tmp+rename 只保证单文件不损坏，不防丢更新）。故用一把模块级互斥把 gallery.json 的全部 I/O
+// 串行化。互斥只覆盖同步 fs 段、绝不跨 await；不碰 gallery.json 的 enforce_image_limit 不参与加锁。
+static GALLERY_IO: Mutex<()> = Mutex::new(());
 
-/// 读历史清单。缺失（首次生成）按空表；损坏同样按空表并告警——历史只是临时图索引，
-/// 不值得为它阻断生成（坏数据跳过的宽容口径），下次保存即完成重建。
-fn read_history(path: &Path) -> Vec<HistoryEntry> {
-    match json_store::load::<Vec<HistoryEntry>>(path) {
+/// 读画廊清单的**不加锁内核**：调用方必须已持有 GALLERY_IO。
+/// 把「加锁入口 / 不加锁内核」分开，是为了让取锁的调用方在自己的临界区内直接调它，
+/// 避免「加锁函数互相调用」造成的重入死锁（std Mutex 不可重入）。
+/// 缺失（首次写入前）按空表；损坏同样按空表并告警——记录损坏不值得阻断生成，下次写入即重建。
+fn read_gallery_inner(path: &Path) -> Vec<GalleryRecord> {
+    match json_store::load::<Vec<GalleryRecord>>(path) {
         Ok(v) => v,
         Err(LoadError::Missing) => Vec::new(),
         Err(LoadError::Corrupt(e)) => {
-            log::warn!(target: "image_ai", "生图历史损坏，按空历史重建: {}（{e}）", path.display());
+            log::warn!(target: "image_ai", "画廊记录损坏，按空记录重建: {}（{e}）", path.display());
             Vec::new()
         }
     }
 }
 
-/// 把本次生成的每张图记入历史（每图一条：裁剪粒度是图片文件，而非一次生成），
-/// 再按上限裁剪。仅 generate() 成功路径调用——失败路径图片未落盘，不产生历史。
-pub fn record_history(data_dir: &Path, images: &[GenImage], limit: usize) -> Result<(), String> {
-    // 目录可能不存在（极端情况下被外部清走）：自建父目录，不让索引写盘因目录缺失而失败。
-    fs::create_dir_all(tmp_dir(data_dir)).map_err(|e| e.to_string())?;
-    let path = history_path(data_dir);
+/// 把本次生成的每张图记入画廊（每图一条），再按记录上限淘汰旧行。
+/// 仅 generate() 成功路径调用——失败路径图片未落盘，不产生记录。
+/// 记录字段取自请求（model/prompt/negative/uid/name/template_id）。
+pub fn record_gallery(
+    data_dir: &Path,
+    images: &[GenImage],
+    req: &GenRequest,
+    limit: usize,
+) -> Result<(), String> {
+    let path = gallery_path(data_dir);
     let ts = now_ts();
-    let mut hist = read_history(&path);
-    for img in images {
-        hist.push(HistoryEntry {
-            id: img.id.clone(),
-            ts: ts.clone(),
-        });
+    {
+        // 「读—改—写」在同一临界区内完成：并发调用被串行化，杜绝后写者覆盖前写者的丢更新。
+        let _guard = GALLERY_IO.lock().unwrap();
+        let mut recs = read_gallery_inner(&path);
+        for img in images {
+            recs.push(GalleryRecord {
+                id: img.id.clone(),
+                ts: ts.clone(),
+                uid: req.uid.clone(),
+                name: req.name.clone(),
+                model: req.model.clone(),
+                prompt: req.prompt.clone(),
+                negative_prompt: req.negative_prompt.clone(),
+                template_id: req.template_id.clone().unwrap_or_default(),
+            });
+        }
+        json_store::save(&path, &recs)?;
     }
-    json_store::save(&path, &hist)?;
-    enforce_history_limit(data_dir, limit)
+    // 裁剪另起一次加锁（与上面的写不嵌套，避免 std Mutex 重入死锁）：只裁行、不碰图。
+    enforce_gallery_limit(data_dir, limit)
 }
 
-/// 按写入时间倒序保留最新 limit 条历史，超出的条目连同 `.imgtmp` 中的图片文件一并删除。
-/// limit==0 视为「不裁剪」：与 P1 的「无上限」语义对齐（出厂默认 20，0 是用户显式关闭裁剪的开关，
-/// 若按「全删」解释会在用户改配置的瞬间清空全部会话图片，代价不对称）。
-pub fn enforce_history_limit(data_dir: &Path, limit: usize) -> Result<(), String> {
+/// 图片淘汰闸门：`.imgtmp` 内最多保留修改时间最新的 limit 个文件，超出者删除。
+/// 【只碰图片字节】按文件自身 mtime 判新旧，**不读也不写 gallery.json**——这才与记录闸门解耦：
+/// 记录可以多于图片（图片被删后对应记录仍在，查询期现算为「无图」并显示占位）。
+/// limit==0 视为「不裁剪」（与记录闸门同口径，两闸门互不换算）。
+pub fn enforce_image_limit(data_dir: &Path, limit: usize) -> Result<(), String> {
     if limit == 0 {
         return Ok(());
     }
-    let path = history_path(data_dir);
-    let mut hist = read_history(&path);
-    if hist.len() <= limit {
+    let Ok(rd) = fs::read_dir(tmp_dir(data_dir)) else {
+        return Ok(());
+    };
+    let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        // 取不到 mtime 的文件不参与裁剪：宁可少删，不可误删新旧不明的图片。
+        if let Ok(m) = entry.metadata().and_then(|md| md.modified()) {
+            files.push((p, m));
+        }
+    }
+    if files.len() <= limit {
         return Ok(());
     }
-    // ts 为 "%Y-%m-%d %H:%M:%S"，字典序即时间序；按升序稳定排序后旧的聚在前，
-    // 同一秒内先写入的条目排前（先写入=更旧），与正常追加顺序一致，裁剪结果确定。
-    hist.sort_by(|a, b| a.ts.cmp(&b.ts));
-    let excess: Vec<HistoryEntry> = hist.drain(..hist.len() - limit).collect();
-    let tmp = tmp_dir(data_dir);
-    for e in &excess {
-        // 图片名 `{id}.{扩展名}`，扩展名随厂商返回格式变化，只能按文件主干匹配；
-        // 对应文件可能已被清走（prepare_session/手动清理），找不到即跳过；删除失败仅告警不阻断。
-        let Ok(rd) = fs::read_dir(&tmp) else { continue };
+    // mtime 升序（旧在前）；同刻按路径名兜底，确保裁剪结果确定。
+    files.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    for (p, _) in files.iter().take(files.len() - limit) {
+        if let Err(e) = fs::remove_file(p) {
+            log::warn!(target: "image_ai", "清理过期临时图片失败 {}: {e}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// 记录淘汰闸门：按 ts 升序保留最新的 limit 行，超出者从 gallery.json 删除。
+/// 【只碰记录行】绝不删除 `.imgtmp` 的图片——图片存亡只由 enforce_image_limit 决定。
+/// limit==0 视为「不裁剪」。
+pub fn enforce_gallery_limit(data_dir: &Path, limit: usize) -> Result<(), String> {
+    if limit == 0 {
+        return Ok(());
+    }
+    // 「读—裁—写」整段持锁：与 record_gallery 的追加写共用同一把锁，两处不嵌套（防重入死锁）。
+    let _guard = GALLERY_IO.lock().unwrap();
+    let path = gallery_path(data_dir);
+    let mut recs = read_gallery_inner(&path);
+    if recs.len() <= limit {
+        return Ok(());
+    }
+    // ts 为 "%Y-%m-%d %H:%M:%S"，字典序即时间序；升序后旧的聚在前，裁剪结果确定。
+    recs.sort_by(|a, b| a.ts.cmp(&b.ts));
+    recs.drain(..recs.len() - limit);
+    json_store::save(&path, &recs)
+}
+
+/// 组装画廊查询结果（最新在前）：逐条现算图片是否仍在 `.imgtmp`。
+/// 【存在性只在查询期计算】绝不把结果写回 gallery.json——否则一次查询就污染持久清单，
+/// 且图片的临时性会让写回的「存在」在下次启动即刻失真。
+pub fn load_gallery_items(data_dir: &Path) -> Vec<GalleryItem> {
+    // .imgtmp 只扫一次建 stem→路径 表：避免按记录逐条重扫目录（记录上限可达上百条）。
+    let mut by_stem: HashMap<String, PathBuf> = HashMap::new();
+    if let Ok(rd) = fs::read_dir(tmp_dir(data_dir)) {
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.is_file() && p.file_stem().map(|s| s == e.id.as_str()).unwrap_or(false) {
-                if let Err(err) = fs::remove_file(&p) {
-                    log::warn!(target: "image_ai", "清理过期临时图片失败 {}: {err}", p.display());
+            if p.is_file() {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    by_stem.insert(stem.to_string(), p);
                 }
             }
         }
     }
-    json_store::save(&path, &hist)
+    // 读清单也走同一把锁：把 gallery.json 的全部 I/O 收敛到单一串行点。save 是 tmp+rename 原子
+    // 替换、读本身不会见到半截文件，此处加锁只为与写共用同一条串行纪律（不拆分两套同步点）。
+    let mut recs = {
+        let _guard = GALLERY_IO.lock().unwrap();
+        read_gallery_inner(&gallery_path(data_dir))
+    };
+    recs.sort_by(|a, b| b.ts.cmp(&a.ts));
+    recs.into_iter()
+        .map(|record| {
+            let path = by_stem.get(&record.id).cloned();
+            GalleryItem {
+                image_available: path.is_some(),
+                path: path.map(|p| p.to_string_lossy().to_string()),
+                record,
+            }
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests {
@@ -986,22 +1238,16 @@ mod tests {
             seed: None,
             steps: None,
             uid: None,
+            name: None,
+            template_id: None,
+            call_mode: None,
             prompt_extend: None,
             watermark: None,
             prompt_extend_mode: None,
             enable_thinking: None,
             base_url: String::new(),
-            supports_response_format: false,
-            supports_negative_prompt: false,
-            supports_prompt_extend: false,
-            supports_watermark: false,
-            supports_seed: false,
-            supports_n: true,
-            supports_prompt_extend_mode: false,
-            prompt_extend_mode_default: "direct".into(),
-            supports_enable_thinking: false,
-            enable_thinking_default: true,
-            watermark_default: false,
+            // 单测直接构造：能力快照留空，由 caps() 兜底或由 validate_for_generate 回填。
+            caps: None,
         }
     }
 
@@ -1022,6 +1268,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v.n, 1);
+    }
+
+    #[test]
+    fn caps_none_falls_back_to_legacy_serde_defaults() {
+        // 快照缺省时 caps() 的兜底必须与改前 GenRequest 各能力字段的 serde 缺省**逐条等价**。
+        let r = gen_req(); // 直接构造：caps = None
+        assert!(r.caps.is_none());
+        let c = r.caps();
+        assert!(!c.supports_response_format); // 旧字段缺省 false
+        assert!(!c.supports_negative_prompt);
+        assert!(!c.supports_prompt_extend);
+        assert!(!c.supports_watermark);
+        assert!(!c.supports_seed);
+        assert!(c.supports_n); // 旧缺省 true
+        assert!(!c.supports_prompt_extend_mode);
+        assert_eq!(c.prompt_extend_mode_default, "direct");
+        assert!(!c.supports_enable_thinking);
+        assert!(c.enable_thinking_default);
+        assert!(!c.watermark_default);
+        // 对照：Capabilities::default() 的 supports_n 为 false，故兜底不能省。
+        assert!(!Capabilities::default().supports_n);
+    }
+
+    #[test]
+    fn caps_none_from_legacy_snapshot_uses_fallback() {
+        // 旧快照（JSON 无 caps 字段）反序列化后 caps==None，访问器同样给旧语义。
+        let v: GenRequest = serde_json::from_str(
+            r#"{"providerId":"dashscope","model":"z-image-turbo","prompt":"x","size":"1024x1024"}"#,
+        )
+        .unwrap();
+        assert!(v.caps.is_none());
+        assert!(v.caps().supports_n && v.caps().enable_thinking_default);
+        assert_eq!(v.caps().prompt_extend_mode_default, "direct");
     }
 
     #[test]
@@ -1138,51 +1417,116 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_rules() {
+    fn validate_complete_rejects_missing_fields_and_bad_counts() {
         let cfg = Config::builtin();
         let mut r = gen_req();
         r.prompt = " ".into();
-        assert!(validate_request(&cfg, &r).is_err());
+        assert_eq!(
+            validate_complete(&cfg, &r).unwrap_err().kind,
+            GenErrorKind::InvalidParam
+        );
         r = gen_req();
         r.provider_id = "nope".into();
-        assert!(validate_request(&cfg, &r).is_err());
+        assert_eq!(
+            validate_complete(&cfg, &r).unwrap_err().kind,
+            GenErrorKind::NotConfigured
+        );
         r = gen_req();
+        r.model = "nope-model".into();
+        assert_eq!(
+            validate_complete(&cfg, &r).unwrap_err().kind,
+            GenErrorKind::NotConfigured
+        );
+        r = gen_req();
+        r.n = 0;
+        assert_eq!(
+            validate_complete(&cfg, &r).unwrap_err().kind,
+            GenErrorKind::InvalidParam
+        );
+        // 厂商约束（张数上限/提示词长度/尺寸）不在此层：合规请求一律放行。
+        assert!(validate_complete(&cfg, &gen_req()).is_ok());
+    }
+
+    #[test]
+    fn validate_for_generate_rejects_over_limit_and_unknown_provider() {
+        // 结构性覆盖：断言 generate 的准入校验函数确实落到了 Provider 层并返回厂商约束错误——
+        // 若 generate 不再调用校验、或该函数不再委派 for_kind(...).validate，这些断言会失败。
+        let cfg = Config::builtin();
+        // 已知服务商/模型但张数超上限（openai/gpt-image-1 maxN=10）→ InvalidParam。
+        let mut r = gen_req();
         r.n = 99;
-        assert!(validate_request(&cfg, &r).is_err());
-        assert!(validate_request(&cfg, &gen_req()).is_ok());
+        assert_eq!(
+            validate_for_generate(&cfg, &r).unwrap_err().kind,
+            GenErrorKind::InvalidParam
+        );
+        // 未知服务商 → NotConfigured。
+        let mut r = gen_req();
+        r.provider_id = "nope".into();
+        assert_eq!(
+            validate_for_generate(&cfg, &r).unwrap_err().kind,
+            GenErrorKind::NotConfigured
+        );
+        // 合规请求放行。
+        assert!(validate_for_generate(&cfg, &gen_req()).is_ok());
     }
 
     #[test]
-    fn size_rules_match_wan25_26_official_constraints() {
-        // 官方 2.5/2.6：总像素 [1280², 1440²]，宽高比 [1:4, 4:1]。
-        let rules = SizeRules {
-            total_min: 1280 * 1280,
-            total_max: 1440 * 1440,
-            ratio_min: 0.25,
-            ratio_max: 4.0,
-            ..Default::default()
-        };
-        assert!(validate_size("1280*1280", &rules).is_ok());
-        assert!(validate_size("768x2700", &rules).is_ok()); // 文档举例的极端竖版（总像素恰为上限）
-                                                            // 注：官方推荐档 960*1696 总像素略小于 1280²，属文档近似边界；它在预设枚举里走豁免，不经规则校验。
-        assert!(validate_size("1024*1024", &rules).is_err()); // 总像素不足
-        assert!(validate_size("1440*1441", &rules).is_err()); // 总像素超限
-        assert!(validate_size("768*3100", &rules).is_err()); // 比例越界
-        assert!(validate_size("abc", &rules).is_err()); // 格式错误
+    fn gen_error_classifies_http_status_and_business_code() {
+        // 429 → RateLimited 且可重试
+        let e = from_http_status(429, "HTTP 429：限流");
+        assert_eq!(e.kind, GenErrorKind::RateLimited);
+        assert!(e.retryable);
+        // 401/403 → Auth 且不可重试（Key 错误重试无意义，先修配置）
+        for s in [401u16, 403] {
+            let e = from_http_status(s, "HTTP：鉴权失败");
+            assert_eq!(e.kind, GenErrorKind::Auth);
+            assert!(!e.retryable);
+        }
+        // 400 → InvalidParam
+        assert_eq!(from_http_status(400, "x").kind, GenErrorKind::InvalidParam);
+        // 5xx → Provider(可重试)；其余 4xx → Provider(不可重试)
+        let p5 = from_http_status(503, "x");
+        assert_eq!(p5.kind, GenErrorKind::Provider);
+        assert!(p5.retryable);
+        let p4 = from_http_status(418, "x");
+        assert_eq!(p4.kind, GenErrorKind::Provider);
+        assert!(!p4.retryable);
+        // 业务码优先于 status：InvalidApiKey→Auth、Throttling→RateLimited、DataInspection→ContentRejected
+        assert_eq!(
+            classify_provider_error(200, Some("InvalidApiKey"), "x").kind,
+            GenErrorKind::Auth
+        );
+        assert_eq!(
+            classify_provider_error(200, Some("Throttling"), "x").kind,
+            GenErrorKind::RateLimited
+        );
+        assert_eq!(
+            classify_provider_error(200, Some("DataInspection"), "x").kind,
+            GenErrorKind::ContentRejected
+        );
+        // 内容审核的另一个码（官方与 DataInspectionFailed 并列给出）：自救手段同在提示词侧。
+        assert_eq!(
+            classify_provider_error(200, Some("IPInfringementSuspect"), "x").kind,
+            GenErrorKind::ContentRejected
+        );
+        // 建议随类别给出；Cancelled/Internal 无建议
+        assert!(from_http_status(429, "x").user_action.is_some());
+        assert!(ImageGenError::cancelled().user_action.is_none());
+        assert!(ImageGenError::internal("x").user_action.is_none());
     }
 
     #[test]
-    fn size_rules_side_bounds_for_wan22() {
-        // 2.2 及更早：宽高均在 [512, 1440]。
-        let rules = SizeRules {
-            min_side: 512,
-            max_side: 1440,
-            ..Default::default()
-        };
-        assert!(validate_size("1024*1024", &rules).is_ok());
-        assert!(validate_size("512*1440", &rules).is_ok());
-        assert!(validate_size("500*1024", &rules).is_err());
-        assert!(validate_size("1024*1441", &rules).is_err());
+    fn gen_error_serializes_kind_snake_case_and_message() {
+        // 前端按 snake_case 的 kind 判断重试与建议，序列化形态是契约的一部分。
+        let e = ImageGenError::provider("HTTP 500：服务商错误", true);
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""kind":"provider""#), "{s}");
+        assert!(s.contains(r#""message":"HTTP 500：服务商错误""#), "{s}");
+        assert!(s.contains(r#""retryable":true"#), "{s}");
+        assert!(s.contains(r#""userAction":"#), "{s}");
+        let back: ImageGenError = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.kind, GenErrorKind::Provider);
+        assert!(back.retryable);
     }
 
     #[test]
@@ -1196,7 +1540,7 @@ mod tests {
         assert_eq!(flash.capabilities.max_n, 1);
         assert!(flash.capabilities.supports_seed);
         assert!(!flash.capabilities.supports_quality);
-        // 百炼模型目录代码内置：三系列 8 个模型抽查关键差异。
+        // 百炼模型目录代码内置：三系列 6 个模型抽查关键差异。
         let qwen = cfg.model("dashscope", "qwen-image-3.0-pro").unwrap();
         assert_eq!(qwen.capabilities.max_n, 6);
         assert!(qwen.capabilities.supports_negative_prompt);
@@ -1219,8 +1563,8 @@ mod tests {
         // assets/image_ai.json 已不含 dashscope 块：builtin 仍须注入代码内置目录。
         let cfg = Config::builtin();
         let p = cfg.provider("dashscope").expect("内置百炼服务商必须存在");
-        assert_eq!(p.default_model, "qwen-image-3.0-pro");
-        assert_eq!(p.models.len(), 8);
+        assert_eq!(p.default_model, "z-image-turbo");
+        assert_eq!(p.models.len(), 6);
     }
 
     #[test]
@@ -1325,9 +1669,9 @@ mod tests {
         );
     }
 
-    // ===================== 会话历史 LRU =====================
+    // ===================== 画廊记录 + 双淘汰闸门 =====================
 
-    /// 在 .imgtmp 造一张假图文件（裁剪按文件主干匹配，扩展名随意）。TempDir 必须先绑定再使用。
+    /// 在 .imgtmp 造一张假图文件（图片闸门按文件本身处理，扩展名任意）。TempDir 必须先绑定再使用。
     fn fake_image(root: &Path, id: &str) -> PathBuf {
         fs::create_dir_all(tmp_dir(root)).unwrap();
         let p = tmp_dir(root).join(format!("{id}.png"));
@@ -1335,113 +1679,240 @@ mod tests {
         p
     }
 
-    /// 造一条指定秒数的时间戳条目（"%H:%M:%S" 字典序即时间序，秒数递增即时间递增）。
-    fn hist_entry(id: &str, sec: u32) -> HistoryEntry {
-        HistoryEntry {
+    /// 把文件 mtime 设为给定秒数：图片闸门按 mtime 判新旧，测试必须显式控制顺序，
+    /// 不能依赖「写入先后」在文件系统时间粒度下是否可分。
+    fn set_mtime(p: &Path, secs: u64) {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// 造一条指定秒数时间戳的画面记录（"%H:%M:%S" 字典序即时间序，秒数递增即时间递增）。
+    fn gallery_rec(id: &str, sec: u32) -> GalleryRecord {
+        GalleryRecord {
             id: id.into(),
             ts: format!("2026-09-26 10:00:{sec:02}"),
+            uid: Some("u1".into()),
+            name: Some("甲".into()),
+            model: "m1".into(),
+            prompt: "p".into(),
+            negative_prompt: "n".into(),
+            template_id: String::new(),
         }
     }
 
-    /// 测试里读回历史清单（LoadError 未实现 Debug，不能对 json_store::load 直接 unwrap）。
-    fn load_history(root: &Path) -> Vec<HistoryEntry> {
-        serde_json::from_str(&fs::read_to_string(history_path(root)).unwrap()).unwrap()
+    /// 测试里读回画廊清单（LoadError 未实现 Debug，不能对 json_store::load 直接 unwrap）。
+    fn load_gallery(root: &Path) -> Vec<GalleryRecord> {
+        serde_json::from_str(&fs::read_to_string(gallery_path(root)).unwrap()).unwrap()
     }
 
     #[test]
-    fn enforce_keeps_newest_and_deletes_oldest_files() {
+    fn enforce_image_limit_deletes_only_images() {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
-        let ids: Vec<String> = (0..7).map(|_| new_id()).collect();
-        let hist: Vec<HistoryEntry> = ids
+        let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            let p = fake_image(dir.path(), id);
+            set_mtime(&p, 1_000_000 + i as u64); // ids[0] 最旧
+        }
+        let recs: Vec<GalleryRecord> = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| hist_entry(id, i as u32))
+            .map(|(i, id)| gallery_rec(id, i as u32))
             .collect();
-        json_store::save(&history_path(dir.path()), &hist).unwrap();
-        for id in &ids {
-            fake_image(dir.path(), id);
-        }
+        json_store::save(&gallery_path(dir.path()), &recs).unwrap();
+        let before = fs::read_to_string(gallery_path(dir.path())).unwrap();
 
-        enforce_history_limit(dir.path(), 5).unwrap();
+        enforce_image_limit(dir.path(), 2).unwrap();
 
-        // 最早 2 张连文件一起删，最新 5 张保留
-        assert!(!tmp_dir(dir.path()).join(format!("{}.png", ids[0])).exists());
-        assert!(!tmp_dir(dir.path()).join(format!("{}.png", ids[1])).exists());
-        for id in &ids[2..] {
-            assert!(tmp_dir(dir.path()).join(format!("{}.png", id)).exists());
-        }
-        let kept: Vec<HistoryEntry> = load_history(dir.path());
-        assert_eq!(kept.len(), 5);
-        assert_eq!(kept[0].id, ids[2]); // 清单保持时间升序：最旧在先
-        assert_eq!(kept[4].id, ids[6]);
-    }
-
-    #[test]
-    fn corrupt_history_rebuilds_and_trims() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
-        fs::write(history_path(dir.path()), "not json").unwrap();
-        // 损坏不报错，按空历史处理（空表不触发裁剪）
-        enforce_history_limit(dir.path(), 2).unwrap();
-
-        // 随后记录与裁剪恢复正常：3 张图 limit=2 → 最旧一张连文件一起删
-        let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
-        let images: Vec<GenImage> = ids
-            .iter()
-            .map(|id| GenImage {
-                id: id.clone(),
-                path: String::new(),
-                bytes: 0,
-            })
-            .collect();
-        for id in &ids {
-            fake_image(dir.path(), id);
-        }
-        record_history(dir.path(), &images, 2).unwrap();
+        // 最旧 1 张图被删，最新 2 张保留
         assert!(!tmp_dir(dir.path()).join(format!("{}.png", ids[0])).exists());
         assert!(tmp_dir(dir.path()).join(format!("{}.png", ids[1])).exists());
         assert!(tmp_dir(dir.path()).join(format!("{}.png", ids[2])).exists());
-        let kept: Vec<HistoryEntry> = load_history(dir.path());
-        assert_eq!(kept.len(), 2);
+        // 记录行一字未动：图片闸门绝不触碰 gallery.json
+        assert_eq!(before, fs::read_to_string(gallery_path(dir.path())).unwrap());
+        assert_eq!(load_gallery(dir.path()).len(), 3);
     }
 
     #[test]
-    fn trim_skips_missing_files() {
+    fn enforce_image_limit_tie_breaks_by_path_name() {
+        // 两文件 mtime 完全相同：覆盖排序的 tie-break 分支。必须按路径名确定性地删「较小者」，
+        // 否则该分支被改坏（比较反转、丢掉 then_with）时结果会随目录遍历顺序漂移，测试却照过。
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
-        let hist: Vec<HistoryEntry> = (0..3)
-            .map(|i| hist_entry(&format!("ghost{i}"), i as u32))
-            .collect();
-        json_store::save(&history_path(dir.path()), &hist).unwrap();
-        // 对应文件全都不存在，裁剪不应报错
-        enforce_history_limit(dir.path(), 1).unwrap();
-        let kept: Vec<HistoryEntry> = load_history(dir.path());
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].id, "ghost2");
+        let first = fake_image(dir.path(), "tieA");
+        let second = fake_image(dir.path(), "tieB");
+        set_mtime(&first, 2_000_000);
+        set_mtime(&second, 2_000_000); // 同刻
+
+        enforce_image_limit(dir.path(), 1).unwrap();
+
+        // 同刻按路径名升序：tieA.png < tieB.png → 删 tieA、留 tieB
+        assert!(!first.exists());
+        assert!(second.exists());
     }
 
     #[test]
-    fn zero_limit_means_no_trim() {
-        // limit==0 与 P1「无上限」语义对齐：不裁剪、不动文件
+    fn enforce_image_limit_zero_means_no_trim() {
+        // limit==0 视为「不裁剪」：三张图全留（图片闸门早返回）
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp_dir(dir.path())).unwrap();
         let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
-        let hist: Vec<HistoryEntry> = ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| hist_entry(id, i as u32))
-            .collect();
-        json_store::save(&history_path(dir.path()), &hist).unwrap();
         for id in &ids {
             fake_image(dir.path(), id);
         }
-        enforce_history_limit(dir.path(), 0).unwrap();
+        enforce_image_limit(dir.path(), 0).unwrap();
         for id in &ids {
             assert!(tmp_dir(dir.path()).join(format!("{}.png", id)).exists());
         }
-        let kept: Vec<HistoryEntry> = load_history(dir.path());
-        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn enforce_gallery_limit_deletes_only_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
+        for id in &ids {
+            fake_image(dir.path(), id);
+        }
+        let recs: Vec<GalleryRecord> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| gallery_rec(id, i as u32))
+            .collect();
+        json_store::save(&gallery_path(dir.path()), &recs).unwrap();
+
+        enforce_gallery_limit(dir.path(), 2).unwrap();
+
+        // 断言完整的保留集合（ts 升序 = 由旧到新）：只查首元素会漏判「保留最旧而非最新」这类排序错误。
+        let kept: Vec<String> = load_gallery(dir.path()).into_iter().map(|r| r.id).collect();
+        assert_eq!(kept, vec![ids[1].clone(), ids[2].clone()]);
+        // 三张图一个不少：记录闸门绝不删图
+        for id in &ids {
+            assert!(tmp_dir(dir.path()).join(format!("{}.png", id)).exists());
+        }
+    }
+
+    #[test]
+    fn enforce_gallery_limit_zero_means_no_trim() {
+        // limit==0 视为「不裁剪」：三行全留（记录闸门早返回，与图片闸门同口径、互不换算）
+        let dir = tempfile::tempdir().unwrap();
+        let recs = vec![gallery_rec("a", 0), gallery_rec("b", 1), gallery_rec("c", 2)];
+        json_store::save(&gallery_path(dir.path()), &recs).unwrap();
+        enforce_gallery_limit(dir.path(), 0).unwrap();
+        assert_eq!(load_gallery(dir.path()).len(), 3);
+    }
+
+    #[test]
+    fn prepare_session_keeps_gallery() {
+        let dir = tempfile::tempdir().unwrap();
+        let recs = vec![gallery_rec("a", 0), gallery_rec("b", 1)];
+        json_store::save(&gallery_path(dir.path()), &recs).unwrap();
+        let before = fs::read_to_string(gallery_path(dir.path())).unwrap();
+
+        Config::prepare_session(dir.path()).unwrap();
+
+        // 记录文件原样保留、且临时目录被重建：会话清理只针对 .imgtmp
+        assert_eq!(before, fs::read_to_string(gallery_path(dir.path())).unwrap());
+        assert!(tmp_dir(dir.path()).is_dir());
+    }
+
+    #[test]
+    fn gallery_record_round_trips_all_fields() {
+        let r = gallery_rec("id1", 0);
+        let s = serde_json::to_string(&r).unwrap();
+        for key in [
+            "\"id\"",
+            "\"ts\"",
+            "\"uid\"",
+            "\"name\"",
+            "\"model\"",
+            "\"prompt\"",
+            "\"negativePrompt\"",
+            "\"templateId\"",
+        ] {
+            assert!(s.contains(key), "序列化缺少字段 {key}: {s}");
+        }
+        let back: GalleryRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.id, r.id);
+        assert_eq!(back.ts, r.ts);
+        assert_eq!(back.uid, r.uid);
+        assert_eq!(back.name, r.name);
+        assert_eq!(back.model, r.model);
+        assert_eq!(back.prompt, r.prompt);
+        assert_eq!(back.negative_prompt, r.negative_prompt);
+        assert_eq!(back.template_id, r.template_id);
+        // 除 id/ts 外均可缺省：精简输入（旧文件）也能解析
+        let sparse: GalleryRecord = serde_json::from_str(r#"{"id":"x","ts":"t"}"#).unwrap();
+        assert_eq!(sparse.uid, None);
+        assert!(sparse.model.is_empty());
+        assert!(sparse.template_id.is_empty());
+    }
+
+    #[test]
+    fn record_gallery_wires_request_and_reports_availability() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = vec![
+            GenImage { id: "a".into(), path: String::new(), bytes: 0 },
+            GenImage { id: "b".into(), path: String::new(), bytes: 0 },
+        ];
+        let mut req = gen_req();
+        req.uid = Some("u9".into());
+        req.name = Some("乙".into());
+        req.template_id = Some("tpl9".into());
+        record_gallery(dir.path(), &images, &req, 100).unwrap();
+        fake_image(dir.path(), "a"); // 只留 a 的图：b 的图不存在，查询期应现算为「无图」
+
+        let items = load_gallery_items(dir.path());
+        assert_eq!(items.len(), 2);
+        let a = items.iter().find(|i| i.record.id == "a").unwrap();
+        let b = items.iter().find(|i| i.record.id == "b").unwrap();
+        assert!(a.image_available);
+        assert!(a.path.is_some());
+        assert!(!b.image_available);
+        assert!(b.path.is_none());
+        // 请求字段落进记录（含模板 id）
+        assert_eq!(a.record.uid.as_deref(), Some("u9"));
+        assert_eq!(a.record.name.as_deref(), Some("乙"));
+        assert_eq!(a.record.model, "gpt-image-1");
+        assert_eq!(a.record.prompt, "一张脸");
+        assert_eq!(a.record.template_id, "tpl9");
+        // 存在性只活在查询期：落盘的 gallery.json 必须**不含** imageAvailable / path 键，
+        // 否则一旦有人误把 GalleryItem 写回文件，读回时会被当成持久字段而掩盖。
+        let raw = fs::read_to_string(gallery_path(dir.path())).unwrap();
+        assert!(!raw.contains("imageAvailable"), "落盘不应含存在性字段: {raw}");
+        assert!(!raw.contains("\"path\""), "落盘不应含图片路径字段: {raw}");
+    }
+
+    #[test]
+    fn concurrent_record_gallery_keeps_all_rows() {
+        // 回归 H1：gallery.json 的「read→push→save」若非原子，批量并发（默认 2，这里放大到 8）
+        // 会各自读到同一份旧表再整体覆盖写，后写者丢掉先写者刚追加的行。8 线程各写一条，
+        // 断言最终 8 条一条不少——无锁实现下大概率只剩 1~3 条而失败。
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let n = 8usize;
+        let mut handles = Vec::new();
+        for i in 0..n {
+            let d = data_dir.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut req = gen_req();
+                req.template_id = Some(format!("t{i}"));
+                let images = vec![GenImage {
+                    id: format!("img{i}"),
+                    path: String::new(),
+                    bytes: 0,
+                }];
+                record_gallery(&d, &images, &req, 1000).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut ids: Vec<String> = load_gallery(dir.path()).into_iter().map(|r| r.id).collect();
+        ids.sort();
+        let expect: Vec<String> = (0..n).map(|i| format!("img{i}")).collect();
+        assert_eq!(ids, expect, "并发写入不得丢更新");
     }
 
     // ===================== build_vars：球员数据源 → 模板变量 =====================

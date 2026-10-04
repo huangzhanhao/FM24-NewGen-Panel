@@ -143,7 +143,7 @@ export interface Capabilities {
   supportsEnableThinking?: boolean;
   /** `enable_thinking` 的默认值（官方 true）。 */
   enableThinkingDefault?: boolean;
-  /** 是否支持异步调用（提交任务 → 轮询取结果）。适配器尚未实现异步，出厂一律 false。 */
+  /** 是否支持异步调用（提交任务 → 轮询取结果）。协议级能力位，按模型逐条声明。 */
   supportsAsync?: boolean;
 }
 
@@ -157,9 +157,11 @@ export interface ProviderConfig {
   baseUrl: string; defaultModel: string; models: ModelInfo[];
 }
 
-/** 生图设置。historyLimit/concurrency/namingPattern 在 P1 只随文件读写、不参与逻辑（分别 P2/P2/P3 生效）。 */
+/** 生图设置。concurrency/namingPattern 在 P1 只随文件读写、不参与逻辑（分别 P2/P3 生效）；
+ *  historyLimit 与 galleryRecordLimit 是两条独立淘汰闸门的上限（图片数 / 记录行数），互不换算。 */
 export interface GenSettings {
-  defaultProviderId: string; historyLimit: number; concurrency: number; namingPattern: string;
+  defaultProviderId: string; historyLimit: number; galleryRecordLimit: number;
+  concurrency: number; namingPattern: string;
 }
 
 export interface PromptTemplate { id: string; name: string; body: string; negative: string; }
@@ -177,6 +179,12 @@ export interface GenRequest {
   steps?: number | null;
   /** P3 生效（uid 依赖名单数据源）；字段先落下，P1 恒不传。 */
   uid?: string | null;
+  /** 球员名（随请求带入，仅用于画廊记录展示；无数据源时缺省 null）。 */
+  name?: string | null;
+  /** 提示词模板 id（随请求带入写入画廊记录；未选模板时缺省 null）。 */
+  templateId?: string | null;
+  /** 调用方式：'async' = 想走异步（后端仍按模型 supportsAsync 再门控一遍）；null/缺省 = 同步。 */
+  callMode?: string | null;
   /** 万相智能改写开关（null/缺省 = 按官方默认 true）。 */
   promptExtend?: boolean | null;
   /** 万相「AI生成」水印开关（null/缺省 = 按官方默认 false）。 */
@@ -186,10 +194,9 @@ export interface GenRequest {
   /** 百炼 `enable_thinking`（null/缺省 = 按该模型默认值 true）。 */
   enableThinking?: boolean | null;
   /** 内部字段（serde 缺省为空）：后端 generate 解析出服务商后回填 base_url，前端提交（单张/批量）
-   *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。 */
+   *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。
+   *  能力位不在此列：后端整体快照走 `caps`（前端亦不传）。 */
   baseUrl?: string;
-  /** 内部字段：generate 从模型能力集拷入，前端提交时不传（serde 缺省为 false）。 */
-  supportsResponseFormat?: boolean;
 }
 
 /** render_prompt 的返回：渲染后文本 + 无值且无默认值的占位符键名。 */
@@ -201,13 +208,32 @@ export interface GenResult {
   images: GenImage[];
 }
 
-/** 会话内生成结果（视图模型）：id/path/url 来自后端，size/seed 是生成时快照，供结果卡展示。 */
+/** 会话内生成结果（视图模型）：id/path/url 来自后端，size/seed 是生成时快照，供结果卡展示。
+ *  imageAvailable/removable 仅画廊合并视图使用：持久记录 imageAvailable 由后端查询期现算，
+ *  图已被会话清理时为 false；removable=false 表示该条来自持久记录（无移除入口）。 */
 export interface GeneratedImage {
   id: string;
   path: string;
   url: string;
   size?: string;
   seed?: string | null;
+  imageAvailable?: boolean;
+  removable?: boolean;
+}
+
+/** 一条持久画廊记录（对应 Rust 的 GalleryRecord）：与 `.imgtmp` 的图片字节是两条独立生命周期。
+ *  除 id/ts 外的字段在 Rust 侧可缺省，故前端按可选处理。 */
+export interface GalleryRecord {
+  id: string; ts: string;
+  uid?: string | null; name?: string | null;
+  model: string; prompt: string; negativePrompt: string; templateId: string;
+}
+
+/** get_gallery 的返回项（对应 Rust 的 GalleryItem）：记录字段平铺 + 查询期现算的图片存在性。
+ *  path 为 `.imgtmp` 实际路径（图片已被会话清理时为 null）；imageAvailable 只在查询期计算，绝不写回。 */
+export interface GalleryItem extends GalleryRecord {
+  imageAvailable: boolean;
+  path: string | null;
 }
 
 // ---------------- 批量生成队列（对应 image_ai_queue.rs，serde 均为 camelCase） ----------------
@@ -215,19 +241,49 @@ export interface GeneratedImage {
 /** 队列条目状态：对应 Rust QueueStatus（serde rename_all = "lowercase"）。 */
 export type QueueStatus = 'queued' | 'running' | 'success' | 'failed';
 
+/** 生成链错误类别（对应 Rust GenErrorKind，snake_case 序列化）。
+ *  前端据此判断失败条目是否值得重试、并给出处置建议。 */
+export type GenErrorKind =
+  | 'not_configured'
+  | 'auth'
+  | 'rate_limited'
+  | 'invalid_param'
+  | 'content_rejected'
+  | 'provider'
+  | 'network'
+  | 'io'
+  | 'cancelled'
+  | 'internal';
+
+/** 生成链结构化错误（对应 Rust ImageGenError）：单张生成的命令 Err 即此对象。
+ *  userAction 为可执行建议，无建议类别（cancelled/internal）为 null。 */
+export interface GenError {
+  kind: GenErrorKind;
+  message: string;
+  /** 后端「是否自动重试」的判据（队列执行期据它决定是否对同一请求自动再试）。
+   * 【与前端 isRetryableErrorKind 分工】后者决定是否给用户「重试本条」手动入口，二者判据不同、不可互替。 */
+  retryable: boolean;
+  userAction: string | null;
+}
+
 /** 一条批量生成任务（对应 Rust 的 QueueEntry）。
  *  images/error 在 Rust 侧带 skip_serializing_if：成功前/无错误时 JSON 里不出现这两个字段，
- *  消费侧用 ?? 兜底，不要直接 .length/.error 裸取。 */
+ *  消费侧用 ?? 兜底，不要直接 .length/.error 裸取；errorKind 同为可缺省。
+ *  attempts 为已尝试次数（执行前 +1，入队未跑为 0）；仅 > 1 表示发生过重试，据此显示「已重试 N 次」。 */
 export interface QueueEntry {
   id: string; uid: string; name: string;
   req: GenRequest;
   status: QueueStatus;
   images: GenImage[];
   error: string;
+  errorKind?: GenErrorKind | null;
+  attempts?: number;
 }
 
-/** 进度事件 gen:queue:progress 的载荷；current 是已派发序号（1 起）。 */
-export interface QueueProgress { status: 'running' | 'success' | 'failed'; current: number; total: number; uid: string; }
+/** 进度事件 gen:queue:progress 的载荷；current 是**已完成数**（终态条目累计，非派发序号）。
+ *  stage 仅运行中的阶段事件带值（submitting/polling/downloading），其余事件为 undefined。
+ *  entryId 是条目唯一 id：同一球员重复入队时 uid 会重复，阶段定位须用 entryId。 */
+export interface QueueProgress { status: 'running' | 'success' | 'failed'; current: number; total: number; uid: string; entryId?: string | null; stage?: string | null; }
 
 /** 收尾事件 gen:queue:finished 的载荷；failed 含「已取消」条目。 */
 export interface QueueFinished { finished: number; failed: number; total: number; }

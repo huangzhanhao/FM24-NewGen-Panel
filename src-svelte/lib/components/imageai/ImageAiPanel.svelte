@@ -54,7 +54,9 @@
 
   // ---- 连接就绪度：Key 已设置 + 模型已选（顶栏 ③chip 的绿档还额外要求名单可读，口径更严）----
   // 无真正的连通性测试命令，这里以「Key 已设置」为代理判据，措辞不冒充「已连通」。
-  const keySet = $derived(!!imageaiStore.keysSet[imageaiStore.providerId]);
+  // 本地 ComfyUI 无鉴权：免 Key（与后端 needs_key 口径一致），就绪度只看模型。
+  const kindNeedsKey = $derived(imageaiStore.provider?.kind !== "localcomfyui");
+  const keySet = $derived(!kindNeedsKey || !!imageaiStore.keysSet[imageaiStore.providerId]);
   const readyForKey = $derived(keySet && !!imageaiStore.model);
   const connStatus = $derived(readyForKey ? t.gen.statusReady : keySet ? t.gen.statusNoModel : t.gen.statusNoKey);
 

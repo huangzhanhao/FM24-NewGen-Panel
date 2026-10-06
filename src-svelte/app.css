@@ -709,8 +709,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   padding: 0 var(--sp-6); background: var(--bg-surface); border-top: 1px solid var(--hairline-2);
   font-size: var(--fs-sm); color: var(--text-2);
 }
-/* 日志入口：描边胶囊（不再是裸文字），悬停转强调色，错误徽章挂在其中 */
+/* 日志入口：描边胶囊（不再是裸文字），悬停转强调色，错误徽章挂在其中。
+   flex:none：不许被左侧长日志压缩宽度（否则胶囊会折行），挤压一律由 .last-log 省略号吸收 */
 .statusbar .link {
+  flex: none; white-space: nowrap;
   padding: var(--pill-padding-y) var(--pill-padding-x); border: 1px solid var(--hairline-2); border-radius: var(--radius-pill);
   background: var(--bg-raised); color: var(--text-2); font-size: var(--fs-sm);
   transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out),
@@ -722,6 +724,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   display: inline-block; font-size: 0; flex-shrink: 0;
 }
 .statusbar .dot.busy { background: var(--warn); animation: pulse 1.3s infinite; }
+/* 状态文字（就绪/任务名）：不许被长日志压缩折行，挤压同由 .last-log 省略号吸收 */
+.statusbar .status { flex: none; white-space: nowrap; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 /* 最新一行日志预览：允许收缩，空间不够时省略号截断（min-width:0 是 flex 子项能截断的前提）。 */
 .statusbar .last-log {

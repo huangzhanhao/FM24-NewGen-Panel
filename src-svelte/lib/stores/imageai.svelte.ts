@@ -44,6 +44,20 @@ export function parseSeed(s: string): number | null {
   return Number.isFinite(n) && n >= 0 && n <= SEED_MAX ? Math.trunc(n) : null;
 }
 
+/** 采样步数：留空 = 不发送（用服务端默认）；非数字按不发送处理。 */
+function parseSteps(s: string): number | null {
+  if (s.trim() === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 1 ? Math.trunc(n) : null;
+}
+
+/** 引导系数：留空 = 不发送（用服务端默认）；非数字按不发送处理。 */
+function parseGuidance(s: string): number | null {
+  if (s.trim() === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 /**
  * 自由尺寸的前端预校验（与 Rust provider 层共享的 validate_size 同口径）；返回 null = 通过。
  * 这里只是「早提示」UX：权威判定在 Provider 层（image_ai_providers），前端放行不代表后端一定放行，
@@ -87,6 +101,8 @@ export const imageaiStore = $state({
   n: 1,
   quality: 'auto',
   seed: '',
+  steps: '', // 采样步数（硅基流动 num_inference_steps / 魔搭 steps）；留空或模型不支持时不发送
+  guidance: '', // 引导系数（硅基流动 guidance_scale / 魔搭 guidance）；留空或模型不支持时不发送
   promptExtend: true, // 百炼智能改写；默认随模型能力走，切服务商/模型时归位
   watermark: false, // 「AI生成」水印，官方默认关；仅模型支持时发送
   promptExtendMode: 'direct', // 改写模式 direct/agent；仅 3.0 支持，切模型归位官方默认档
@@ -133,8 +149,10 @@ export const imageaiStore = $state({
           supportsQuality: false,
           supportsSeed: false,
           supportsSteps: false,
+          supportsGuidance: false,
           supportsNegativePrompt: false,
           supportsResponseFormat: false,
+          supportsOutputFormat: false,
           qualities: [],
           supportsPromptExtend: false,
           supportsWatermark: false,
@@ -242,12 +260,21 @@ async function loadGalleryRecords() {
   imageaiStore.records = recs;
 }
 
+/** 采样步数 / 引导系数随模型归位：支持则回模型声明默认值，不支持则留空（不发送）。 */
+function resetStepsGuidance() {
+  const caps = imageaiStore.modelInfo?.capabilities;
+  imageaiStore.steps = caps?.supportsSteps && caps.stepsDefault ? String(caps.stepsDefault) : '';
+  imageaiStore.guidance =
+    caps?.supportsGuidance && caps.guidanceDefault ? String(caps.guidanceDefault) : '';
+}
+
 export function selectProvider(id: string) {
   imageaiStore.providerId = id;
   imageaiStore.model = imageaiStore.provider?.defaultModel ?? '';
   imageaiStore.size = imageaiStore.modelInfo?.capabilities.sizes[0] ?? '350x350';
   imageaiStore.n = 1;
   imageaiStore.seed = '';
+  resetStepsGuidance();
   imageaiStore.quality = 'auto';
   // 改写开关回该模型的官方默认（千问/万相开、z-image 关），不把上一家的选择带过来。
   imageaiStore.promptExtend = imageaiStore.modelInfo?.capabilities.promptExtendDefault ?? true;
@@ -307,6 +334,8 @@ export function selectModel(model: string) {
   if (caps && imageaiStore.n > caps.maxN) imageaiStore.n = caps.maxN;
   // 改写默认值逐模型不同（z-image 关，开启即思考模式、单价翻倍）：切模型归位。
   imageaiStore.promptExtend = caps?.promptExtendDefault ?? true;
+  // 采样步数 / 引导系数逐模型不同（硅基流动 Qwen-Image 不支持 guidance 等）：切模型归位。
+  resetStepsGuidance();
   imageaiStore.promptExtendMode = caps?.promptExtendModeDefault || 'direct';
   imageaiStore.enableThinking = caps?.enableThinkingDefault ?? true;
   // 调用方式随模型复位：新模型未必支持异步（与 selectProvider 同口径）。
@@ -368,6 +397,9 @@ export async function generate(meta?: { size?: string; seed?: string }) {
       n: imageaiStore.n,
       quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
       seed: seedNum,
+      // 采样步数 / 引导系数仅在该模型声明支持时携带（后端按同一能力集再门控一遍）。
+      steps: caps?.supportsSteps ? parseSteps(imageaiStore.steps) : null,
+      guidance: caps?.supportsGuidance ? parseGuidance(imageaiStore.guidance) : null,
       // 百炼开关仅当前模型声明支持时才带值，否则传 null（后端按同一能力集再门控一遍）。
       promptExtend: caps?.supportsPromptExtend ? imageaiStore.promptExtend : null,
       watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
@@ -447,6 +479,8 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
         n: imageaiStore.n,
         quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
         seed: parseSeed(imageaiStore.seed),
+        steps: caps?.supportsSteps ? parseSteps(imageaiStore.steps) : null,
+        guidance: caps?.supportsGuidance ? parseGuidance(imageaiStore.guidance) : null,
         uid: r.uid,
         name: r.name,
         templateId: imageaiStore.templateId,

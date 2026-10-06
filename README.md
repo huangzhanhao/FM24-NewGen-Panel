@@ -251,7 +251,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       ├── replace_flow.rs      # ← services/replace_service.py（替换流水线：分段计时 + 阶段内进度折算）
 │       ├── image_ai.rs          # AI 生图配置与 CRUD（服务商 / 模型 / 能力声明）
 │       ├── image_ai_queue.rs    # AI 生成队列（会话内存态，不落盘）
-│       ├── image_ai_providers/  # 各服务商适配器：openai / volcano / dashscope（唯一外部 API 接触面）
+│       ├── image_ai_providers/  # 各服务商适配器：openai / volcano / dashscope / siliconflow / modelscope（唯一外部 API 接触面）
 │       ├── logger.rs            # ← core/NewGanLogManager.py（官方 log 插件管道 + 内存环形缓冲/批量事件）
 │       └── commands.rs          # ← services/* + 对话框原语（28 个 Tauri 命令）
 ├── tests/testing_data/          # RTF 测试样本（不入库）

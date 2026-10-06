@@ -231,6 +231,10 @@ export const t = {
     watermark: "添加「AI生成」水印",
     watermarkHint: "水印位于图片右下角",
     seed: "Seed",
+    steps: "采样步数",
+    stepsHint: "扩散采样步数，越大通常越慢、细节可能更充分",
+    guidance: "引导系数",
+    guidanceHint: "提示词引导强度，越大越贴合提示词，越小越多变",
     sizeError: {
       format: "尺寸格式不正确，应为 宽×高（如 1280×1280）",
       minSide: (v: number) => `宽/高不能小于 ${v} 像素`,
@@ -337,6 +341,10 @@ export const t = {
     capProtoCallMode: "调用方式",
     capProtoQuality: "质量档位",
     capProtoResponseFormat: "返回 base64",
+    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（适配器固定 png）；4.5/4.0 仅 jpeg */
+    capProtoOutputFormat: "输出格式",
+    capProtoSteps: "采样步数",
+    capProtoGuidance: "引导系数",
     /** 枚举型参数的默认档（当前仅改写模式：官方默认 direct） */
     capFieldModeDefault: "默认档",
     /** 官方字段原名（英文，含大小写/下划线/嵌套层级）：只作悬停核验用，名称列一律显示上面的中文名 */
@@ -353,6 +361,10 @@ export const t = {
       callMode: "X-DashScope-Async",
       quality: "quality",
       responseFormat: "response_format",
+      outputFormat: "output_format",
+      // steps/guidance 仅硅基流动/魔搭用，不在 DashScope 行集合内；这里给出平铺基名（实际由 capApiByKind 覆盖）。
+      steps: "steps",
+      guidance: "guidance",
     },
     /** 平铺协议（OpenAI 兼容 / 火山方舟）的官方字段名：字段同名，但没有 DashScope 的
      *  `input.messages[]` 与 `parameters.` 两级嵌套，全部摆在请求体顶层。
@@ -369,7 +381,37 @@ export const t = {
       watermark: "watermark",
       quality: "quality",
       responseFormat: "response_format",
+      outputFormat: "output_format",
+      steps: "steps",
+      guidance: "guidance",
     } as Record<string, string>,
+    /** 按服务商覆盖的官方字段名（优先于 capApiFlat）：硅基流动的尺寸/张数/步数/引导系数
+     *  字段名与 OpenAI 不同（image_size / batch_size / num_inference_steps / guidance_scale），
+     *  魔搭虽与 Openai 同名但也在此显式列出，避免小字写成会发错的字段名。 */
+    capApiByKind: {
+      siliconflow: {
+        size: "image_size",
+        n: "batch_size",
+        steps: "num_inference_steps",
+        guidance: "guidance_scale",
+      },
+      modelscope: {
+        size: "size",
+        n: "n",
+        steps: "steps",
+        guidance: "guidance",
+      },
+      // 本地 ComfyUI：参数是工作流节点输入（非扁平 API 字段），小字标注「节点.输入」便于对照导出的 workflow。
+      localcomfyui: {
+        prompt: "text (CLIPTextEncode)",
+        size: "width/height (EmptyLatentImage)",
+        n: "batch_size",
+        negative: "negative (KSampler)",
+        seed: "seed (KSampler)",
+        steps: "steps (KSampler)",
+        guidance: "cfg (KSampler)",
+      },
+    } as Record<string, Record<string, string>>,
     capFieldSizes: "取值",
     capRuleSide: "单边 px",
     capRuleTotal: "总像素",
@@ -377,6 +419,10 @@ export const t = {
     capZeroHint: "0 = 该条不检查",
     capFieldMaxN: "张数上限",
     capFieldMaxNHint: "0 = 不限张数",
+    capFieldStepsDefault: "默认步数",
+    capFieldStepsMax: "步数上限",
+    capFieldGuidanceDefault: "默认引导",
+    capFieldGuidanceMax: "引导上限",
     capFieldMaxChars: "提示词上限",
     capFieldMaxCharsHint: "0 = 不限字数",
     capFieldQualities: "取值",

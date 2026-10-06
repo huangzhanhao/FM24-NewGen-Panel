@@ -38,8 +38,11 @@
       return appStore.replaceReady ? 'ok' : 'warn';
     }
     // AI：模型已选 + 本会话已设 Key + 名单可读 → 绿；模型或 Key 至少设了一个但不齐 → 琥珀；都没设 → 灰
+    // 本地 ComfyUI 无鉴权：免 Key（与 ImageAiPanel / 后端 needs_key 同口径）。
     const modelSet = !!imageaiStore.model;
-    const keySet = !!imageaiStore.keysSet[imageaiStore.providerId];
+    const keySet =
+      imageaiStore.provider?.kind === "localcomfyui" ||
+      !!imageaiStore.keysSet[imageaiStore.providerId];
     if (modelSet && keySet && appStore.rosterReady) return 'ok';
     return modelSet || keySet ? 'warn' : 'idle';
   }

@@ -43,7 +43,7 @@
 <footer class="statusbar">
   <!-- 小圆点：class:busy 在替换中或有轻量任务在跑时加上（琥珀色呼吸动画，样式见 app.css） -->
   <span class="dot" class:busy={replacing || appStore.taskRunning}></span>
-  <span>{status}</span>
+  <span class="status">{status}</span>
   {#if showBar}
     <div class="progress-track mini"><div class="progress-fill" style="width:{value}%"></div></div>
     <span class="muted counter">{#if counter}{counter} · {/if}{value}%</span>

@@ -75,7 +75,10 @@ pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<ImagePayload>
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("未知错误");
-        return Err(ImageGenError::provider(format!("服务商返回错误：{msg}"), false));
+        return Err(ImageGenError::provider(
+            format!("服务商返回错误：{msg}"),
+            false,
+        ));
     }
     let items = resp
         .get("data")
@@ -100,26 +103,51 @@ pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<ImagePayload>
     Ok(out)
 }
 
-/// 把单个 payload 变为图片字节：b64 解码；URL 立即下载（链接有时效，不懒加载）。
-async fn fetch_payload(
+/// 由 URL 路径推断落盘后缀：兼容中转可能回 jpeg/webp；无扩展名或形态不可信回落 png。
+/// 查询串/锚点先剥掉（OSS 签名链接形如 `.../x.png?Expires=...`）。
+pub(crate) fn extension_from_url(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    let name = path.rsplit('/').next().unwrap_or("");
+    match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && (1..=5).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            ext.to_ascii_lowercase()
+        }
+        _ => "png".into(),
+    }
+}
+
+/// 把单个 payload 变为图片：b64 解码；URL 立即下载（链接有时效，不懒加载）。
+/// 后缀随载荷判定：URL 取路径扩展名；b64 无从判型（gpt-image-1 恒 png），回落 png。
+/// `pub(crate)`：硅基流动/魔搭等「返回 URL 列表」的协议复用它完成下载。
+pub(crate) async fn fetch_payload(
     client: &reqwest::Client,
     payload: ImagePayload,
-) -> Result<Vec<u8>, ImageGenError> {
+) -> Result<FetchedImage, ImageGenError> {
     match payload {
-        ImagePayload::B64(b64) => base64::engine::general_purpose::STANDARD
-            .decode(b64.trim())
-            .map_err(|e| ImageGenError::provider(format!("图片 base64 解码失败: {e}"), false)),
-        ImagePayload::Url(u) => Ok(client
-            .get(&u)
-            .send()
-            .await
-            .map_err(|e| ImageGenError::network(format!("图片下载失败: {e}")))?
-            .error_for_status()
-            .map_err(|e| ImageGenError::network(format!("图片下载失败: {e}")))?
-            .bytes()
-            .await
-            .map_err(|e| ImageGenError::network(format!("图片读取失败: {e}")))?
-            .to_vec()),
+        ImagePayload::B64(b64) => Ok(FetchedImage {
+            bytes: base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| ImageGenError::provider(format!("图片 base64 解码失败: {e}"), false))?,
+            extension: "png".into(),
+        }),
+        ImagePayload::Url(u) => Ok(FetchedImage {
+            bytes: client
+                .get(&u)
+                .send()
+                .await
+                .map_err(|e| ImageGenError::network(format!("图片下载失败: {e}")))?
+                .error_for_status()
+                .map_err(|e| ImageGenError::network(format!("图片下载失败: {e}")))?
+                .bytes()
+                .await
+                .map_err(|e| ImageGenError::network(format!("图片读取失败: {e}")))?
+                .to_vec(),
+            extension: extension_from_url(&u),
+        }),
     }
 }
 
@@ -164,11 +192,7 @@ impl ImageProvider for OpenAiProvider {
             progress(GenStage::Downloading);
             let mut images = Vec::with_capacity(payloads.len());
             for payload in payloads {
-                let bytes = fetch_payload(client, payload).await?;
-                images.push(FetchedImage {
-                    bytes,
-                    extension: "png".into(),
-                });
+                images.push(fetch_payload(client, payload).await?);
             }
             Ok(ProviderOutcome { images })
         })
@@ -201,6 +225,7 @@ mod tests {
             quality: Some("high".into()),
             seed: None,
             steps: None,
+            guidance: None,
             uid: None,
             name: None,
             template_id: None,
@@ -277,7 +302,10 @@ mod tests {
         assert_eq!(b["enable_thinking"], true);
         assert_eq!(b["watermark"], true, "用户显式选择压过默认");
         assert_eq!(b["n"], 2);
-        assert!(b.get("parameters").is_none(), "兼容模式没有 parameters 嵌套");
+        assert!(
+            b.get("parameters").is_none(),
+            "兼容模式没有 parameters 嵌套"
+        );
         assert_eq!(b["size"], "1024x1024", "分隔符保持 x，不转 *");
 
         // 官方 OpenAI 模型（能力位默认 false）：一个扩展字段都不发，避免陌生参数吃 400。
@@ -344,5 +372,20 @@ mod tests {
         assert_eq!(err.kind, crate::image_ai::GenErrorKind::Provider);
         let v: serde_json::Value = serde_json::from_str(r#"{"data":[]}"#).unwrap();
         assert_eq!(parse_images(&v).unwrap_err().message, "data 数组为空");
+    }
+
+    #[test]
+    fn extension_from_url_reads_path_and_ignores_query() {
+        // OSS 签名链接：扩展名在路径尾、查询串里没有第二个 '.' 干扰。
+        assert_eq!(
+            extension_from_url("https://r/a/ComfyUI_00001.png?Expires=1&x=a.b"),
+            "png"
+        );
+        assert_eq!(extension_from_url("https://r/out.jpeg"), "jpeg");
+        assert_eq!(extension_from_url("https://r/out.WEBP"), "webp");
+        // 无扩展名 / 不可信形态 → 回落 png。
+        assert_eq!(extension_from_url("https://r/download"), "png");
+        assert_eq!(extension_from_url("https://r/a.b.clongextension"), "png");
+        assert_eq!(extension_from_url("https://r/.png"), "png");
     }
 }

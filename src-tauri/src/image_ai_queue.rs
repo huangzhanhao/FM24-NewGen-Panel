@@ -540,6 +540,7 @@ mod tests {
                 quality: None,
                 seed: None,
                 steps: None,
+                guidance: None,
                 uid: Some(uid.into()),
                 name: Some(name.into()),
                 template_id: None,

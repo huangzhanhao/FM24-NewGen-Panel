@@ -1964,15 +1964,24 @@ pub async fn generate_image(
     let cfg = state.image.lock().unwrap().clone();
     // 仅校验请求自身的完整性；厂商约束（尺寸/张数/提示词长度）由 provider 层解释，见 generate。
     image_ai::validate_complete(&cfg, &req)?;
-    let key = state
-        .image_keys
-        .lock()
-        .unwrap()
-        .get(&req.provider_id)
-        .cloned()
-        .ok_or_else(|| {
-            image_ai::ImageGenError::not_configured("请先输入 API Key（仅本会话记忆，不会保存）")
-        })?;
+    // 免 Key 协议（本地 ComfyUI）传空串占位：适配器不使用，见 ProviderKind::needs_key。
+    let needs_key = cfg
+        .provider(&req.provider_id)
+        .map(|p| p.kind.needs_key())
+        .unwrap_or(true);
+    let key = if needs_key {
+        state
+            .image_keys
+            .lock()
+            .unwrap()
+            .get(&req.provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                image_ai::ImageGenError::not_configured("请先输入 API Key（仅本会话记忆，不会保存）")
+            })?
+    } else {
+        String::new()
+    };
     // 单张直发不展示阶段：空回调（阶段进度只有队列批处理会呈现在界面上）。
     image_ai::generate(&state.data_dir, &cfg, &key, req, &|_| {}).await
 }
@@ -2218,11 +2227,19 @@ pub async fn start_queue(
         }
         // 启动前逐条校验 Queued 条目的服务商 Key：任一缺失就整批不启动（跑一半才失败
         // 会白白烧掉前几条的配额）。Key 只在本会话内存（见 set_provider_key）。
+        // 免 Key 协议（本地 ComfyUI）直接放行，口径与 generate_image 一致（ProviderKind::needs_key）。
         for e in q
             .entries
             .iter()
             .filter(|e| e.status == image_ai_queue::QueueStatus::Queued)
         {
+            let needs_key = cfg
+                .provider(&e.req.provider_id)
+                .map(|p| p.kind.needs_key())
+                .unwrap_or(true);
+            if !needs_key {
+                continue;
+            }
             let ok = keys
                 .get(&e.req.provider_id)
                 .is_some_and(|k| !k.trim().is_empty());

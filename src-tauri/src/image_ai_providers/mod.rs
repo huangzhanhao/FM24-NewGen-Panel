@@ -3,15 +3,23 @@
 //! 【族内分工】
 //! - [`openai`]：OpenAI Images 协议。官方 OpenAI 与用户自填的 OpenAI 兼容服务同走这一档
 //!   （含阿里云百炼的 `/compatible-mode/v1`，它额外接受一批平铺在顶层的百炼扩展字段）；
-//! - [`volcano`]：火山方舟 Seedream，同步 Bearer，响应形态与 OpenAI 同构；
+//! - [`volcano`]：火山方舟豆包 Seedream（5.0 Pro/Flash/Lite、4.5、4.0 五模型），同步 Bearer，
+//!   响应形态与 OpenAI 同构，模型目录代码内置（缺失即整块注入）；
 //! - [`dashscope`]：阿里云百炼（千问/万相/Z-Image 三系列），同步多模态消息式调用 +
-//!   代码内置模型目录（模型能力不读 image_ai.json）。
+//!   代码内置模型目录（模型能力不读 image_ai.json）；
+//! - [`siliconflow`]：硅基流动（同步 Bearer），响应为 `images[].url`、尺寸字段是 `image_size`；
+//! - [`modelscope`]：魔搭 ModelScope（**强制异步**：提交任务 → 轮询 `/tasks/{id}` 取 `output_images[]`）；
+//! - [`comfyui`]：本地 ComfyUI（无鉴权），提交原生节点工作流到 `POST /prompt`，
+//!   轮询 `/history/{prompt_id}` 后经 `/view` 取图；Key 恒不需要（`ProviderKind::needs_key`）。
 //!
 //! 【对象安全】trait 用「返回 `Pin<Box<dyn Future>>`」形式而非 `async fn`，
 //! 故 [`for_kind`] 能返回 `Box<dyn ImageProvider>`。所有协议单测均为纯函数测试，不触网。
 
+pub(crate) mod comfyui;
 pub(crate) mod dashscope;
+pub(crate) mod modelscope;
 pub(crate) mod openai;
+pub(crate) mod siliconflow;
 pub(crate) mod volcano;
 
 use crate::image_ai::{Capabilities, GenRequest, ImageGenError, ProviderKind, SizeRules};
@@ -97,12 +105,19 @@ pub(crate) fn validate_size(size: &str, rules: &SizeRules) -> Result<(), ImageGe
     Ok(())
 }
 
-/// 按模型声明解释厂商无关的数值/尺寸约束（张数上限、提示词长度、自由尺寸规则）——三家共用。
+/// 按模型声明解释厂商无关的数值/尺寸约束（张数上限、提示词长度、seed 非负、自由尺寸规则）——多家共用。
 /// `0` = 不声明该约束（放行）；`size_rules` 只对不在 `sizes` 枚举内的尺寸生效。
 pub(crate) fn validate_model_caps(
     req: &GenRequest,
     caps: &Capabilities,
 ) -> Result<(), ImageGenError> {
+    // seed 官方域一律非负（DashScope [0, 4294967295]、SiliconFlow [0, 9999999999]、ModelScope 同）：
+    // 负值在本地拦下，避免直发厂商吃 400；上限各协议域不同，交服务端校验。
+    if let Some(seed) = req.seed {
+        if seed < 0 {
+            return Err(ImageGenError::invalid_param("seed 不能为负数"));
+        }
+    }
     if caps.max_n > 0 && req.n > caps.max_n {
         return Err(ImageGenError::invalid_param(format!(
             "该模型单次最多 {} 张",
@@ -116,6 +131,27 @@ pub(crate) fn validate_model_caps(
             caps.max_prompt_chars,
             req.prompt.chars().count()
         )));
+    }
+    // 采样步数与引导系数：只在该模型声明上限时校验（0 = 不声明、放行）。
+    if caps.supports_steps && caps.steps_max > 0 {
+        if let Some(s) = req.steps {
+            if s > caps.steps_max {
+                return Err(ImageGenError::invalid_param(format!(
+                    "采样步数不能超过 {}",
+                    caps.steps_max
+                )));
+            }
+        }
+    }
+    if caps.supports_guidance && caps.guidance_max > 0.0 {
+        if let Some(g) = req.guidance {
+            if g > caps.guidance_max {
+                return Err(ImageGenError::invalid_param(format!(
+                    "引导系数不能超过 {}",
+                    caps.guidance_max
+                )));
+            }
+        }
     }
     if let Some(rules) = &caps.size_rules {
         if !caps.sizes.iter().any(|s| s == &req.size) {
@@ -135,9 +171,7 @@ pub(crate) fn validate_model_caps(
 /// 「阿里云百炼扩展字段，不属于 OpenAI 官方参数」）。两处各写一份必然漂移，漂移的表现
 /// 是「勾了能力位却发不出字段」或「发了模型不认的字段吃 400」。
 /// 「能力不声明就不发字段」这条口径由本函数单点持有。
-pub(crate) fn capability_params(
-    req: &GenRequest,
-) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn capability_params(req: &GenRequest) -> serde_json::Map<String, serde_json::Value> {
     use serde_json::{json, Map, Value};
     let caps = req.caps();
     let mut m: Map<String, Value> = Map::new();
@@ -164,7 +198,11 @@ pub(crate) fn capability_params(
             .unwrap_or_else(|| caps.prompt_extend_mode_default.clone());
         m.insert(
             "prompt_extend_mode".into(),
-            json!(if chosen.is_empty() { "direct" } else { chosen.as_str() }),
+            json!(if chosen.is_empty() {
+                "direct"
+            } else {
+                chosen.as_str()
+            }),
         );
     }
     if caps.supports_enable_thinking {
@@ -234,6 +272,9 @@ pub fn for_kind(kind: ProviderKind) -> Box<dyn ImageProvider> {
         ProviderKind::OpenAI => Box::new(openai::OpenAiProvider),
         ProviderKind::Volcano => Box::new(volcano::VolcanoProvider),
         ProviderKind::Dashscope => Box::new(dashscope::DashscopeProvider),
+        ProviderKind::Siliconflow => Box::new(siliconflow::SiliconflowProvider),
+        ProviderKind::Modelscope => Box::new(modelscope::ModelscopeProvider),
+        ProviderKind::LocalComfyUI => Box::new(comfyui::ComfyUIProvider),
     }
 }
 
@@ -253,6 +294,7 @@ mod tests {
             quality: None,
             seed: None,
             steps: None,
+            guidance: None,
             uid: None,
             name: None,
             template_id: None,
@@ -346,6 +388,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, GenErrorKind::InvalidParam);
         assert!(err.message.contains("总像素不能小于"));
+    }
+
+    #[test]
+    fn provider_validate_rejects_negative_seed() {
+        // 官方 seed 域一律非负：负值本地拦下，绝不直发厂商。
+        let mut r = gen_req();
+        r.seed = Some(-1);
+        let err = for_kind(ProviderKind::Dashscope)
+            .validate(&r, &caps(0, 0, None))
+            .unwrap_err();
+        assert_eq!(err.kind, GenErrorKind::InvalidParam);
+        assert_eq!(err.message, "seed 不能为负数");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 // ===================== 数据契约（与前端 types.ts 一一对应，camelCase）=====================
 
 /// 服务商类型：决定适配器。
-/// 【为什么不设 custom】openai 兼容服务与官方 OpenAI 是**同一套 SDK**（请求/响应同构，
+/// openai 兼容服务与官方 OpenAI 是**同一套 SDK**（请求/响应同构，
 /// 差异仅在 base_url 与模型名），全仓没有任何一处需要按「是否官方」分流；
 /// 用户自建兼容服务直接用 OpenAI 这一档、改 base_url 即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,17 @@ pub enum ProviderKind {
     OpenAI,
     Volcano,
     Dashscope,
+    Siliconflow,
+    Modelscope,
+    LocalComfyUI,
+}
+
+impl ProviderKind {
+    /// 该协议是否需要 API Key（会话内存）。本地 ComfyUI 无鉴权，Key 恒不需要——
+    /// 后端两道 Key 门（generate_image / start_queue）与前端就绪度判据同用本口径。
+    pub fn needs_key(self) -> bool {
+        !matches!(self, ProviderKind::LocalComfyUI)
+    }
 }
 
 /// 生成链错误类别（snake_case 序列化，与前端 `GenErrorKind` 一一对应）。
@@ -164,9 +175,7 @@ pub fn kind_from_business_code(code: &str) -> Option<GenErrorKind> {
     // 内容审核两种码：DataInspectionFailed（输入/输出违规）与 IPInfringementSuspect（疑似侵权）。
     // 官方给的自救手段都在提示词侧（关掉 prompt_extend 重试、或改写涉及版权的角色名/作品名），
     // 归 ContentRejected 才能让用户看到「修改提示词后重试」，而不是无因由地重试整个请求。
-    if c.contains("datainspection")
-        || c.contains("data_inspection")
-        || c.contains("ipinfringement")
+    if c.contains("datainspection") || c.contains("data_inspection") || c.contains("ipinfringement")
     {
         return Some(GenErrorKind::ContentRejected);
     }
@@ -237,6 +246,21 @@ pub struct Capabilities {
     pub supports_seed: bool,
     #[serde(default)]
     pub supports_steps: bool,
+    /// 采样步数上限（0 = 不校验；配合 `supports_steps`）。硅基流动 `num_inference_steps`（≤100）、魔搭 `steps`（≤100）用。
+    #[serde(default)]
+    pub steps_max: u32,
+    /// 采样步数默认值（模型声明；前端切模型时据此归位）。
+    #[serde(default)]
+    pub steps_default: u32,
+    /// 引导系数（Classifier-Free Guidance）：硅基流动 `guidance_scale`、魔搭 `guidance`。
+    #[serde(default)]
+    pub supports_guidance: bool,
+    /// 引导系数默认值（硅基流动 Kolors 7.5 / 魔搭 3.5）。
+    #[serde(default)]
+    pub guidance_default: f32,
+    /// 引导系数上限（0 = 不校验）。
+    #[serde(default)]
+    pub guidance_max: f32,
     #[serde(default)]
     pub supports_negative_prompt: bool,
     /// 是否可传 `response_format`。OpenAI 官方 gpt-image-1 系列**不支持**该参数
@@ -244,6 +268,10 @@ pub struct Capabilities {
     /// 需要显式声明 b64_json 才能免去一次下载，故缺省为 true。
     #[serde(default = "yes")]
     pub supports_response_format: bool,
+    /// 火山 Seedream `output_format`（png/jpeg）：仅 5.0 Pro/Flash/Lite 可设；
+    /// 4.5/4.0 只回 jpeg、传参报错，故置 false 整条省略。OpenAI/百炼不用此参数。
+    #[serde(default)]
+    pub supports_output_format: bool,
     #[serde(default)]
     pub qualities: Vec<String>,
     /// 百炼 `prompt_extend`：大模型智能改写正向提示词（+3–4 秒；关闭可规避版权审核拦截）。
@@ -273,8 +301,8 @@ pub struct Capabilities {
     /// `watermark` 的默认值（官方 false，各系列一致；仍按模型存放，便于日后分化）。
     #[serde(default)]
     pub watermark_default: bool,
-    /// 请求体是否携带 `n` 参数：z-image 无此参数（固定 1 张）必须省略；其余百炼模型为 true。
-    /// 缺省 true = OpenAI/火山一律发 n。
+    /// 请求体是否携带 `n` 参数：z-image 与火山 Seedream 全系列无此参数（固定 1 张）必须省略；
+    /// 其余百炼模型为 true。缺省 true = OpenAI 协议默认发 n。
     #[serde(default = "yes")]
     pub supports_n: bool,
     /// 正向提示词字符/Token 上限（0 = 不展示计数、不校验；
@@ -415,6 +443,8 @@ pub struct GenRequest {
     #[serde(default)]
     pub steps: Option<u32>,
     #[serde(default)]
+    pub guidance: Option<f32>,
+    #[serde(default)]
     pub uid: Option<String>,
     /// 球员名：仅用于画廊记录展示。前端单张取数据源球员名、批量取入队行名，
     /// 无数据源时缺省 None（记录里 name 为空）。
@@ -431,7 +461,7 @@ pub struct GenRequest {
     /// 万相智能改写开关（仅百炼适配器消费；None = 按官方默认 true）。
     #[serde(default)]
     pub prompt_extend: Option<bool>,
-    /// 万相「AI生成」水印开关（仅百炼适配器消费；None = 按官方默认 false）。
+    /// 「AI生成」水印开关（百炼与火山 Seedream 适配器消费；None = 按模型声明的官方默认 false）。
     #[serde(default)]
     pub watermark: Option<bool>,
     /// 百炼 `prompt_extend_mode`（仅百炼适配器消费；None = 按该模型默认档 direct）。
@@ -638,8 +668,9 @@ impl Config {
             Err(LoadError::Corrupt(e)) => return Err(format!("{}（{e}）", pp.display())),
         };
         let mut changed = false;
-        // 百炼服务商：已存在时只归位 kind，模型行与默认模型归用户所有（可增删改且不被复活），
-        // 故内置目录的变更不会自动推送到老配置。详见 reconcile_builtin_providers。
+        // 代码内置服务商（百炼/火山）：缺失整块注入，已存在只归位 kind；模型行与默认模型
+        // 归用户所有（可增删改且不被复活），内置目录的更新不会自动推送到老配置。
+        // 详见 reconcile_builtin_providers。
         if reconcile_builtin_providers(&mut file.providers) {
             changed = true;
         }
@@ -744,32 +775,41 @@ impl Config {
     }
 }
 
-/// 把代码内置的百炼服务商并入一份服务商列表（builtin/load/ensure 三处同口径）。
+/// 把代码内置的服务商并入一份服务商列表（builtin/load/ensure 三处同口径）。
 ///
-/// 百炼模型目录代码托管（不写 assets/image_ai.json），故：
-/// - 列表中没有 dashscope：**整块补入内置服务商**（新装/首次导入即得到完整目录）；
-/// - 已有：**只归位 kind，模型行与默认模型一律不接管** —— 交还用户，
+/// 当前有五个代码内置服务商：百炼 dashscope、火山 volcano、硅基流动 siliconflow、
+/// 魔搭 modelscope、本地 ComfyUI，目录均不写 assets/image_ai.json。对每个内置服务商：
+/// - 列表中没有：**整块补入内置服务商**（新装/首次导入即得到完整目录）；
+/// - 已有：**只归位 kind，模型行/默认模型/名称/地址，
 ///   由「服务商设置」弹窗内的模型清单增删改。
 ///   【刻意取舍，不是遗漏】代价是新内置模型不随版本推送、旧模型下线也不自动清理；
 ///   换来的是「对模型的增删改可保留」——若改成「只补缺失」，用户删掉的内置模型
 ///   会在下次启动复活，与「可删」自相矛盾。
-/// - name / base_url 本就不动（改名或指向代理平台是合法定制）。
 ///
 /// 返回是否发生需要落盘的变更（内容已一致时不重写，避免每次启动无谓写文件）。
 fn reconcile_builtin_providers(providers: &mut Vec<ProviderConfig>) -> bool {
-    let builtin = crate::image_ai_providers::dashscope::builtin_provider();
-    match providers
-        .iter_mut()
-        .find(|p| p.id == crate::image_ai_providers::dashscope::PROVIDER_ID)
-    {
-        Some(slot) => {
-            // kind 是代码级不变量（决定适配器分发），必须归位；这是唯一仍由代码接管的字段。
-            if slot.kind != ProviderKind::Dashscope {
-                slot.kind = ProviderKind::Dashscope;
-                return true;
-            }
-            false
+    [
+        crate::image_ai_providers::dashscope::builtin_provider(),
+        crate::image_ai_providers::volcano::builtin_provider(),
+        crate::image_ai_providers::siliconflow::builtin_provider(),
+        crate::image_ai_providers::modelscope::builtin_provider(),
+        crate::image_ai_providers::comfyui::builtin_provider(),
+    ]
+    .into_iter()
+    .fold(false, |changed, builtin| {
+        changed | reconcile_one_builtin(providers, builtin)
+    })
+}
+
+/// 单个内置服务商的归并：缺失整块注入；已存在只归位 kind。
+fn reconcile_one_builtin(providers: &mut Vec<ProviderConfig>, builtin: ProviderConfig) -> bool {
+    match providers.iter_mut().find(|p| p.id == builtin.id) {
+        // kind 是代码级不变量（决定适配器分发），是唯一恒由代码接管的字段。
+        Some(slot) if slot.kind != builtin.kind => {
+            slot.kind = builtin.kind;
+            true
         }
+        Some(_) => false,
         None => {
             providers.push(builtin);
             true
@@ -1018,13 +1058,12 @@ pub async fn generate(
 
     // 调用方式门控：仅当用户显式选异步、且该模型声明支持异步时才置 "async"，否则一律回落同步
     // （校验与 HTTP 都据此分流，见 DashscopeProvider::generate）。
-    req.call_mode = if req.call_mode.as_deref() == Some("async")
-        && model.capabilities.supports_async
-    {
-        Some("async".into())
-    } else {
-        None
-    };
+    req.call_mode =
+        if req.call_mode.as_deref() == Some("async") && model.capabilities.supports_async {
+            Some("async".into())
+        } else {
+            None
+        };
 
     // 【唯一准入校验入口】厂商约束（张数上限/提示词长度/尺寸规则）在此解释；失败即返回，绝不发出 HTTP。
     // 抽成 validate_for_generate 便于回归测试锚定「确实调用了校验」。
@@ -1237,6 +1276,7 @@ mod tests {
             quality: Some("high".into()),
             seed: None,
             steps: None,
+            guidance: None,
             uid: None,
             name: None,
             template_id: None,
@@ -1256,6 +1296,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ProviderKind::Dashscope).unwrap(),
             r#""dashscope""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Siliconflow).unwrap(),
+            r#""siliconflow""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Modelscope).unwrap(),
+            r#""modelscope""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::LocalComfyUI).unwrap(),
+            r#""localcomfyui""#
         );
         // 已合并：兼容服务与官方同档，不存在 custom 变体
         assert!(serde_json::from_str::<ProviderKind>(r#""custom""#).is_err());
@@ -1316,6 +1368,46 @@ mod tests {
             before,
             fs::read_to_string(providers_path(root.path())).unwrap()
         );
+    }
+
+    #[test]
+    fn ensure_injects_siliconflow_and_modelscope_into_existing_file() {
+        // 升级路径：老用户文件里没有 siliconflow / modelscope —— 启动时 ensure_user_files
+        // 必须把两个服务商整块补入并落盘，否则界面上看不到它们（「正常加载」的可证证据）。
+        let root = tempfile::tempdir().unwrap();
+        let existing = serde_json::json!({
+            "providers": [{
+                "id": "openai",
+                "kind": "openai",
+                "name": "OpenAI",
+                "baseUrl": "https://api.openai.com/v1",
+                "defaultModel": "gpt-image-1",
+                "models": [{ "model": "gpt-image-1", "capabilities": {} }]
+            }],
+            "settings": {
+                "defaultProviderId": "openai",
+                "historyLimit": 20,
+                "concurrency": 2,
+                "namingPattern": "{uid}_{index}"
+            }
+        });
+        fs::write(providers_path(root.path()), existing.to_string()).unwrap();
+
+        Config::ensure_user_files(root.path()).unwrap();
+
+        let cfg = Config::load(root.path()).unwrap();
+        let sf = cfg.provider("siliconflow").expect("硅基流动必须被补入");
+        assert_eq!(sf.kind, ProviderKind::Siliconflow);
+        assert_eq!(sf.base_url, "https://api.siliconflow.cn/v1");
+        assert_eq!(sf.default_model, "Qwen/Qwen-Image");
+        assert_eq!(sf.models.len(), 2);
+        let ms = cfg.provider("modelscope").expect("魔搭必须被补入");
+        assert_eq!(ms.kind, ProviderKind::Modelscope);
+        assert_eq!(ms.base_url, "https://api-inference.modelscope.cn/v1");
+        assert_eq!(ms.default_model, "Qwen/Qwen-Image-2.1");
+        assert_eq!(ms.models.len(), 3);
+        // 用户原有的 openai 条不被覆盖。
+        assert_eq!(cfg.provider("openai").unwrap().default_model, "gpt-image-1");
     }
 
     #[test]
@@ -1530,16 +1622,45 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_three_providers() {
-        // OpenAI 兼容服务已并入 openai 档（原 custom 条目撤销），内置三条
+    fn builtin_has_six_providers() {
+        // openai 来自 assets JSON；dashscope/volcano/siliconflow/modelscope/comfyui 由 reconcile 顺序注入。
         let cfg = Config::builtin();
         let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["openai", "volcano", "dashscope"]);
-        // 火山能力抽查：单张、支持 seed、不支持 quality
-        let flash = cfg.model("volcano", "seedream-5.0-flash").unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                "openai",
+                "dashscope",
+                "volcano",
+                "siliconflow",
+                "modelscope",
+                "localcomfyui"
+            ]
+        );
+        // 本地 ComfyUI：免 Key（协议无鉴权），模型名 = checkpoint 文件名（占位行，归用户改）。
+        let comfy = cfg.provider("localcomfyui").unwrap();
+        assert_eq!(comfy.kind, ProviderKind::LocalComfyUI);
+        assert!(!comfy.kind.needs_key());
+        assert_eq!(comfy.base_url, "http://127.0.0.1:8188");
+        // 火山能力抽查：新模型 ID、单张、无 seed/n、有水印与 output_format。
+        let flash = cfg
+            .model("volcano", "doubao-seedream-5-0-flash-260915")
+            .unwrap();
         assert_eq!(flash.capabilities.max_n, 1);
-        assert!(flash.capabilities.supports_seed);
+        assert!(!flash.capabilities.supports_seed, "Seedream 全系列无 seed");
+        assert!(!flash.capabilities.supports_n, "Seedream 全系列无 n 参数");
         assert!(!flash.capabilities.supports_quality);
+        assert!(flash.capabilities.supports_watermark);
+        assert!(!flash.capabilities.watermark_default);
+        assert!(
+            flash.capabilities.supports_output_format,
+            "Flash 可设 png/jpeg"
+        );
+        // 4.5 只回 jpeg：不能发 output_format。
+        let v45 = cfg.model("volcano", "doubao-seedream-4-5-251128").unwrap();
+        assert!(!v45.capabilities.supports_output_format);
+        // 旧出厂模型名不得再查得到。
+        assert!(cfg.model("volcano", "seedream-5.0-flash").is_none());
         // 百炼模型目录代码内置：三系列 6 个模型抽查关键差异。
         let qwen = cfg.model("dashscope", "qwen-image-3.0-pro").unwrap();
         assert_eq!(qwen.capabilities.max_n, 6);
@@ -1556,6 +1677,22 @@ mod tests {
         assert!(!z.capabilities.prompt_extend_default);
         // 旧模型（wanx2.1）已下线：目录中查不到。
         assert!(cfg.model("dashscope", "wanx2.1-t2i-turbo").is_none());
+
+        // 硅基流动：Qwen-Image 无 batch_size、字段名走 image_size；Kolors 有 batch_size + guidance。
+        let sf_qwen = cfg.model("siliconflow", "Qwen/Qwen-Image").unwrap();
+        assert!(!sf_qwen.capabilities.supports_n, "Qwen-Image 无 batch_size");
+        assert!(sf_qwen.capabilities.supports_steps);
+        assert!(!sf_qwen.capabilities.supports_guidance);
+        let sf_kolors = cfg.model("siliconflow", "Kwai-Kolors/Kolors").unwrap();
+        assert!(sf_kolors.capabilities.supports_n, "Kolors 有 batch_size");
+        assert!(sf_kolors.capabilities.supports_guidance);
+        assert_eq!(sf_kolors.capabilities.max_n, 4);
+
+        // 魔搭：单张、无 n；支持 steps/guidance。
+        let ms = cfg.model("modelscope", "Qwen/Qwen-Image-2.1").unwrap();
+        assert_eq!(ms.capabilities.max_n, 1);
+        assert!(!ms.capabilities.supports_n);
+        assert!(ms.capabilities.supports_steps && ms.capabilities.supports_guidance);
     }
 
     #[test]
@@ -1571,6 +1708,8 @@ mod tests {
     fn reconcile_leaves_existing_dashscope_entry_to_user() {
         // 既有 dashscope 条：模型行与默认模型**归用户所有**（弹窗内可增删改），
         // reconcile 只做 kind 归位，绝不整表替换 —— 否则用户删掉的模型会在启动时复活。
+        // 列表同时带上已是新目录的 volcano：排除「火山注入」对变更返回值的干扰，
+        // 单用例锚定「百炼用户条 kind 正确时零变更（不触发无谓写盘）」这条口径。
         let mut providers = vec![
             ProviderConfig {
                 id: "openai".into(),
@@ -1591,8 +1730,12 @@ mod tests {
                     capabilities: Capabilities::default(),
                 }],
             },
+            crate::image_ai_providers::volcano::builtin_provider(),
+            crate::image_ai_providers::siliconflow::builtin_provider(),
+            crate::image_ai_providers::modelscope::builtin_provider(),
+            crate::image_ai_providers::comfyui::builtin_provider(),
         ];
-        // kind 已正确 → 无任何变更（不触发无谓写盘）。
+        // kind 已正确、其余内置项也都是新目录 → 无任何变更（不触发无谓写盘）。
         assert!(!reconcile_builtin_providers(&mut providers));
         let ds = providers.iter().find(|p| p.id == "dashscope").unwrap();
         // 用户定制全部保留：名称 / 地址 / 模型行 / 默认模型
@@ -1613,14 +1756,59 @@ mod tests {
             default_model: "qwen-image-3.0".into(),
             models: vec![],
         }];
+        // 首次调用：dashscope kind 归位 + 其余内置（volcano/siliconflow/modelscope）缺失被注入，
+        // 故整体为「有变更」。
         assert!(reconcile_builtin_providers(&mut providers));
-        assert_eq!(providers[0].kind, ProviderKind::Dashscope);
-        assert_eq!(
-            providers[0].models.len(),
-            0,
-            "kind 归位不得顺带补入内置模型行"
+        let ds = providers.iter().find(|p| p.id == "dashscope").unwrap();
+        assert_eq!(ds.kind, ProviderKind::Dashscope);
+        assert_eq!(ds.models.len(), 0, "kind 归位不得顺带补入内置模型行");
+        // 缺失的 volcano 已整块注入新目录。
+        let vol = providers.iter().find(|p| p.id == "volcano").unwrap();
+        assert_eq!(vol.default_model, "doubao-seedream-5-0-flash-260915");
+        assert_eq!(vol.models.len(), 5);
+        assert!(
+            !reconcile_builtin_providers(&mut providers),
+            "归位/注入后幂等"
         );
+    }
+
+    #[test]
+    fn reconcile_leaves_existing_volcano_entry_to_user() {
+        // 用户已有的火山块（哪怕模型是自己填的或旧的）：已存在就只归位 kind，
+        // 模型行/默认模型/名称/地址一律不接管（可增删改且不被覆盖），与百炼同口径。
+        let user_entry = ProviderConfig {
+            id: "volcano".into(),
+            kind: ProviderKind::OpenAI, // 错值：仍须归位
+            name: "我的火山".into(),
+            base_url: "https://example.com".into(),
+            default_model: "my-seedream".into(),
+            models: vec![ModelInfo {
+                model: "my-seedream".into(),
+                capabilities: Capabilities::default(),
+            }],
+        };
+        let mut providers = vec![user_entry];
+        assert!(
+            reconcile_builtin_providers(&mut providers),
+            "kind 归位算变更"
+        );
+        let vol = providers.iter().find(|x| x.id == "volcano").unwrap();
+        assert_eq!(vol.kind, ProviderKind::Volcano);
+        assert_eq!(vol.models.len(), 1, "用户模型不得被内置目录覆盖");
+        assert!(vol.models.iter().any(|m| m.model == "my-seedream"));
+        assert_eq!(vol.default_model, "my-seedream", "默认模型不被校正");
+        assert_eq!(vol.base_url, "https://example.com", "地址不被接管");
         assert!(!reconcile_builtin_providers(&mut providers), "归位后幂等");
+    }
+
+    #[test]
+    fn volcano_catalog_is_injected_even_when_json_has_no_entry() {
+        // assets/image_ai.json 已不含 volcano 块：builtin 仍须注入代码内置的五模型目录。
+        let cfg = Config::builtin();
+        let p = cfg.provider("volcano").expect("内置火山服务商必须存在");
+        assert_eq!(p.kind, ProviderKind::Volcano);
+        assert_eq!(p.default_model, "doubao-seedream-5-0-flash-260915");
+        assert_eq!(p.models.len(), 5);
     }
 
     #[test]
@@ -1732,7 +1920,10 @@ mod tests {
         assert!(tmp_dir(dir.path()).join(format!("{}.png", ids[1])).exists());
         assert!(tmp_dir(dir.path()).join(format!("{}.png", ids[2])).exists());
         // 记录行一字未动：图片闸门绝不触碰 gallery.json
-        assert_eq!(before, fs::read_to_string(gallery_path(dir.path())).unwrap());
+        assert_eq!(
+            before,
+            fs::read_to_string(gallery_path(dir.path())).unwrap()
+        );
         assert_eq!(load_gallery(dir.path()).len(), 3);
     }
 
@@ -1796,7 +1987,11 @@ mod tests {
     fn enforce_gallery_limit_zero_means_no_trim() {
         // limit==0 视为「不裁剪」：三行全留（记录闸门早返回，与图片闸门同口径、互不换算）
         let dir = tempfile::tempdir().unwrap();
-        let recs = vec![gallery_rec("a", 0), gallery_rec("b", 1), gallery_rec("c", 2)];
+        let recs = vec![
+            gallery_rec("a", 0),
+            gallery_rec("b", 1),
+            gallery_rec("c", 2),
+        ];
         json_store::save(&gallery_path(dir.path()), &recs).unwrap();
         enforce_gallery_limit(dir.path(), 0).unwrap();
         assert_eq!(load_gallery(dir.path()).len(), 3);
@@ -1812,7 +2007,10 @@ mod tests {
         Config::prepare_session(dir.path()).unwrap();
 
         // 记录文件原样保留、且临时目录被重建：会话清理只针对 .imgtmp
-        assert_eq!(before, fs::read_to_string(gallery_path(dir.path())).unwrap());
+        assert_eq!(
+            before,
+            fs::read_to_string(gallery_path(dir.path())).unwrap()
+        );
         assert!(tmp_dir(dir.path()).is_dir());
     }
 
@@ -1852,8 +2050,16 @@ mod tests {
     fn record_gallery_wires_request_and_reports_availability() {
         let dir = tempfile::tempdir().unwrap();
         let images = vec![
-            GenImage { id: "a".into(), path: String::new(), bytes: 0 },
-            GenImage { id: "b".into(), path: String::new(), bytes: 0 },
+            GenImage {
+                id: "a".into(),
+                path: String::new(),
+                bytes: 0,
+            },
+            GenImage {
+                id: "b".into(),
+                path: String::new(),
+                bytes: 0,
+            },
         ];
         let mut req = gen_req();
         req.uid = Some("u9".into());
@@ -1879,7 +2085,10 @@ mod tests {
         // 存在性只活在查询期：落盘的 gallery.json 必须**不含** imageAvailable / path 键，
         // 否则一旦有人误把 GalleryItem 写回文件，读回时会被当成持久字段而掩盖。
         let raw = fs::read_to_string(gallery_path(dir.path())).unwrap();
-        assert!(!raw.contains("imageAvailable"), "落盘不应含存在性字段: {raw}");
+        assert!(
+            !raw.contains("imageAvailable"),
+            "落盘不应含存在性字段: {raw}"
+        );
         assert!(!raw.contains("\"path\""), "落盘不应含图片路径字段: {raw}");
     }
 

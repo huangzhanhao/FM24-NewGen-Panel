@@ -474,28 +474,14 @@ fn error_detail(json: &Value, fallback: &str) -> String {
     format!("{code}: {msg}")
 }
 
-/// 下载结果 URL 为字节：24h 有效，调用方必须此刻拉取。
+/// 下载结果 URL 为字节：24h 有效，调用方必须此刻拉取；后缀由 URL 路径推断（OSS 链接带 .png）。
 async fn download_all(
     client: &reqwest::Client,
     urls: Vec<String>,
 ) -> Result<Vec<FetchedImage>, ImageGenError> {
     let mut images = Vec::with_capacity(urls.len());
     for u in urls {
-        let bytes = client
-            .get(&u)
-            .send()
-            .await
-            .map_err(|e| ImageGenError::network(format!("图片下载失败: {e}")))?
-            .error_for_status()
-            .map_err(|e| ImageGenError::network(format!("图片下载失败: {e}")))?
-            .bytes()
-            .await
-            .map_err(|e| ImageGenError::network(format!("图片读取失败: {e}")))?
-            .to_vec();
-        images.push(FetchedImage {
-            bytes,
-            extension: "png".into(),
-        });
+        images.push(super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u)).await?);
     }
     Ok(images)
 }
@@ -700,6 +686,7 @@ mod tests {
             quality: None,
             seed: Some(7),
             steps: None,
+            guidance: None,
             uid: None,
             name: None,
             template_id: None,

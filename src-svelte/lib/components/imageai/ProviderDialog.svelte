@@ -38,10 +38,12 @@
 
   /** 能力编辑字段的键类型：模板不写死字段名，全部由 CAP_ROWS 驱动。 */
   type RuleKey = "minSide" | "maxSide" | "totalMin" | "totalMax" | "ratioMin" | "ratioMax";
-  type NumCapKey = "maxN" | "maxPromptChars";
+  type NumCapKey = "maxN" | "maxPromptChars" | "stepsDefault" | "stepsMax" | "guidanceDefault" | "guidanceMax";
   type BoolCapKey =
     | "supportsN"
     | "supportsSeed"
+    | "supportsSteps"
+    | "supportsGuidance"
     | "supportsQuality"
     | "supportsNegativePrompt"
     | "supportsPromptExtend"
@@ -49,6 +51,7 @@
     | "supportsEnableThinking"
     | "supportsWatermark"
     | "supportsResponseFormat"
+    | "supportsOutputFormat"
     | "supportsAsync";
   type EnumCapKey = "promptExtendModeDefault";
 
@@ -56,7 +59,7 @@
    *  `prompt_extend` / `enable_thinking` / `watermark` 的官方默认值不在编辑区暴露：
    *  它们是模型出厂属性，由内置目录（或 JSON）维护，前端切模型时按此归位。 */
   type CapSub =
-    | { t: "num"; label: string; bind: NumCapKey; hint?: string }
+    | { t: "num"; label: string; bind: NumCapKey; hint?: string; step?: string }
     | { t: "list"; label: string; bind: "sizes" | "qualities"; placeholder: string; rows?: number }
     | { t: "pair"; label: string; lo: RuleKey; hi: RuleKey; hint: string }
     | { t: "enum"; label: string; bind: EnumCapKey; options: readonly { v: string; label: string }[]; hint?: string };
@@ -102,8 +105,34 @@
       bind: "supportsN",
       subs: [{ t: "num", label: t.gen.capFieldMaxN, bind: "maxN", hint: t.gen.capFieldMaxNHint }],
     },
-    { key: "negative", label: t.gen.capProtoNegative, api: t.gen.capApi.negative, bind: "supportsNegativePrompt", subs: [] },
+    {
+      key: "negative",
+      label: t.gen.capProtoNegative,
+      api: t.gen.capApi.negative,
+      bind: "supportsNegativePrompt",
+      subs: [],
+    },
     { key: "seed", label: t.gen.capProtoSeed, api: t.gen.capApi.seed, bind: "supportsSeed", subs: [] },
+    {
+      key: "steps",
+      label: t.gen.capProtoSteps,
+      api: t.gen.capApi.steps,
+      bind: "supportsSteps",
+      subs: [
+        { t: "num", label: t.gen.capFieldStepsDefault, bind: "stepsDefault" },
+        { t: "num", label: t.gen.capFieldStepsMax, bind: "stepsMax" },
+      ],
+    },
+    {
+      key: "guidance",
+      label: t.gen.capProtoGuidance,
+      api: t.gen.capApi.guidance,
+      bind: "supportsGuidance",
+      subs: [
+        { t: "num", label: t.gen.capFieldGuidanceDefault, bind: "guidanceDefault", step: "0.5" },
+        { t: "num", label: t.gen.capFieldGuidanceMax, bind: "guidanceMax", step: "0.5" },
+      ],
+    },
     {
       key: "extend",
       label: t.gen.capProtoExtend,
@@ -159,30 +188,77 @@
       label: t.gen.capProtoQuality,
       api: t.gen.capApi.quality,
       bind: "supportsQuality",
-      subs: [{ t: "list", label: t.gen.capFieldQualities, bind: "qualities", placeholder: t.gen.capFieldQualitiesPlaceholder }],
+      subs: [
+        {
+          t: "list",
+          label: t.gen.capFieldQualities,
+          bind: "qualities",
+          placeholder: t.gen.capFieldQualitiesPlaceholder,
+        },
+      ],
     },
-    { key: "responseFormat", label: t.gen.capProtoResponseFormat, api: t.gen.capApi.responseFormat, bind: "supportsResponseFormat", subs: [] },
+    {
+      key: "responseFormat",
+      label: t.gen.capProtoResponseFormat,
+      api: t.gen.capApi.responseFormat,
+      bind: "supportsResponseFormat",
+      subs: [],
+    },
+    // 火山 Seedream 专有：output_format（Pro/Flash/Lite 可设 png/jpeg；4.5/4.0 只回 jpeg、不发此参）
+    {
+      key: "outputFormat",
+      label: t.gen.capProtoOutputFormat,
+      api: t.gen.capApi.outputFormat,
+      bind: "supportsOutputFormat",
+      subs: [],
+    },
   ];
 
   /** 行集合由「服务商协议」决定（适配器 build_* 实际发送的字段为准），模型只决定行上的勾选：
    *  dashscope = 原生多模态生成并集（含异步）；openai = OpenAI 官方参数 + 百炼兼容模式平铺在
    *  顶层的扩展字段（负向/seed/改写/改写模式/思考/水印），兼容模式**只有同步**故无「调用方式」行；
-   *  volcano 的 body 没有 n。 */
+   *  volcano = Seedream 文生图官方字段（无 n/seed/负向/改写，有水印/返回格式/输出格式）。 */
   const KIND_ROWS: Record<ProviderKindCode, readonly string[]> = {
     dashscope: ["prompt", "size", "n", "negative", "seed", "extend", "extendMode", "thinking", "watermark", "callMode"],
-    openai: ["prompt", "size", "n", "negative", "seed", "extend", "extendMode", "thinking", "watermark", "quality", "responseFormat"],
-    volcano: ["prompt", "size", "seed"],
+    openai: [
+      "prompt",
+      "size",
+      "n",
+      "negative",
+      "seed",
+      "extend",
+      "extendMode",
+      "thinking",
+      "watermark",
+      "quality",
+      "responseFormat",
+    ],
+    volcano: ["prompt", "size", "watermark", "responseFormat", "outputFormat"],
+    // 硅基流动：字段名走 image_size / batch_size（见 t.gen.capApiByKind）；Qwen-Image 不支持 batch_size。
+    siliconflow: ["prompt", "size", "n", "negative", "seed", "steps", "guidance", "outputFormat"],
+    // 魔搭：单张无 n；size 字段名与 OpenAI 同名；有 steps / guidance。
+    modelscope: ["prompt", "size", "negative", "seed", "steps", "guidance"],
+    // 本地 ComfyUI：原生节点工作流（无鉴权）；张数走 batch_size、引导是 KSampler 的 cfg，
+    // 采样器固定 euler/normal（不在能力面暴露）。
+    localcomfyui: ["prompt", "size", "n", "negative", "seed", "steps", "guidance"],
   };
 
   /** 能力集默认值：新建模型行的起点，也是展开编辑前补齐缺失字段的兜底 */
-  function newCaps() {    return {
+  function newCaps() {
+    return {
       sizes: [] as string[],
       maxN: 1,
       supportsQuality: false,
       supportsSeed: false,
       supportsSteps: false,
+      stepsMax: 0,
+      stepsDefault: 0,
+      supportsGuidance: false,
+      guidanceDefault: 0,
+      guidanceMax: 0,
       supportsNegativePrompt: false,
       supportsResponseFormat: true,
+      supportsOutputFormat: false,
       qualities: [] as string[],
       supportsPromptExtend: false,
       supportsWatermark: false,
@@ -205,9 +281,12 @@
   const capRows = $derived.by(() => {
     const kind = editing?.kind ?? "openai";
     const flat = kind !== "dashscope";
+    // 按服务商覆盖的官方字段名优先（硅基流动的 image_size/batch_size/num_inference_steps/guidance_scale
+    // 与 OpenAI 不同）；未命中回落 flat（平铺）或 row.api（DashScope 嵌套）。
+    const byKind = t.gen.capApiByKind[kind];
     return (KIND_ROWS[kind] ?? []).map((k) => {
       const row = CAP_ROWS.find((r) => r.key === k)!;
-      const api = flat ? (t.gen.capApiFlat[row.key] ?? row.api) : row.api;
+      const api = byKind?.[row.key] ?? (flat ? (t.gen.capApiFlat[row.key] ?? row.api) : row.api);
       return api === row.api ? row : { ...row, api };
     });
   });
@@ -325,12 +404,7 @@
                 <span class="f-ro">{editing.id}</span>
               {:else}
                 <label for="pv-id">{t.gen.providerIdLabel}</label>
-                <input
-                  id="pv-id"
-                  type="text"
-                  bind:value={editing.id}
-                  placeholder={t.gen.providerIdPlaceholder}
-                />
+                <input id="pv-id" type="text" bind:value={editing.id} placeholder={t.gen.providerIdPlaceholder} />
               {/if}
               <span class="f-hint">{t.gen.providerIdFixedNote}</span>
             </div>
@@ -346,6 +420,9 @@
                 <option value="openai">openai</option>
                 <option value="volcano">volcano</option>
                 <option value="dashscope">dashscope</option>
+                <option value="siliconflow">siliconflow</option>
+                <option value="modelscope">modelscope</option>
+                <option value="localcomfyui">localcomfyui</option>
               </select>
             </div>
             <div class="f-row">
@@ -463,7 +540,7 @@
                                 {#if s.t === "num"}
                                   <span class="cap-sub">
                                     <span class="cap-k" title={s.hint}>{s.label}</span>
-                                    <input type="number" min="0" step="1" bind:value={caps[s.bind]} />
+                                    <input type="number" min="0" step={s.step ?? "1"} bind:value={caps[s.bind]} />
                                   </span>
                                 {:else if s.t === "list"}
                                   <span class="cap-sub">
@@ -684,10 +761,10 @@
      四个宽度是本节控件的唯一定宽旋钮 —— 这些值都短，拉满整行只会显得空；
      同类型的控件取同一宽度，右边界才能连成列 */
   .m-cap {
-    --cap-name-w: 96px;   /* 参数名列：中文名右对齐即可，留白越少越紧凑 */
-    --cap-num-w: 110px;   /* 数字输入（约束上下限、张数/字数上限） */
-    --cap-text-w: 260px;  /* 文本输入与多行文本（尺寸清单、质量档） */
-    --cap-sel-w: 124px;   /* 枚举下拉（改写模式默认档） */
+    --cap-name-w: 96px; /* 参数名列：中文名右对齐即可，留白越少越紧凑 */
+    --cap-num-w: 110px; /* 数字输入（约束上下限、张数/字数上限） */
+    --cap-text-w: 260px; /* 文本输入与多行文本（尺寸清单、质量档） */
+    --cap-sel-w: 124px; /* 枚举下拉（改写模式默认档） */
     display: flex;
     flex-direction: column;
     gap: var(--sp-4);
@@ -773,10 +850,10 @@
   /* 按 type 定宽，刻意不写裸 `.m-cap input`：组件选择器带 scope 类，优先级压过
      app.css 的 input[type='checkbox']，裸选择器会把 14px 的勾选框一起拉宽 */
   .m-cap textarea,
-  .m-cap input[type='text'] {
+  .m-cap input[type="text"] {
     width: var(--cap-text-w);
   }
-  .m-cap input[type='number'] {
+  .m-cap input[type="number"] {
     width: var(--cap-num-w);
   }
   .m-cap select {

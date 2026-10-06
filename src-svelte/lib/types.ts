@@ -101,8 +101,14 @@ export interface SnapshotEntry { uid: string; relPath: string; imagePath: string
 /** 一行日志（对应 Rust 的 LogLine）。 */
 export interface LogLine { ts: string; level: string; module: string; message: string; }
 
-/** 决定适配器。无 custom：OpenAI 兼容服务与官方同为一套 SDK，合并为 openai 一档（改 baseUrl 即可）。 */
-export type ProviderKindCode = 'openai' | 'volcano' | 'dashscope';
+/** 决定适配器（实为「协议方言」轴）。OpenAI 兼容服务与官方同为一套 SDK，合并为 openai 一档（改 baseUrl 即可）。 */
+export type ProviderKindCode =
+  | 'openai'
+  | 'volcano'
+  | 'dashscope'
+  | 'siliconflow'
+  | 'modelscope'
+  | 'localcomfyui';
 
 /** 自由尺寸规则（万相 2.5/2.6 等）；0/缺省 = 该条约束不检查。字段可部分给出。 */
 export interface SizeRules {
@@ -120,8 +126,21 @@ export interface Capabilities {
   supportsQuality: boolean;
   supportsSeed: boolean;
   supportsSteps: boolean;
+  /** 采样步数上限（0 = 不校验；配合 supportsSteps）。硅基流动 num_inference_steps / 魔搭 steps。 */
+  stepsMax?: number;
+  /** 采样步数默认值（切模型时据此归位）。 */
+  stepsDefault?: number;
+  /** 引导系数（Classifier-Free Guidance）：硅基流动 guidance_scale、魔搭 guidance。 */
+  supportsGuidance?: boolean;
+  /** 引导系数默认值（硅基流动 Kolors 7.5 / 魔搭 3.5）。 */
+  guidanceDefault?: number;
+  /** 引导系数上限（0 = 不校验）。 */
+  guidanceMax?: number;
   supportsNegativePrompt: boolean;
   supportsResponseFormat: boolean;
+  /** 火山 Seedream output_format（png/jpeg）：5.0 Pro/Flash/Lite 可设；4.5/4.0 仅回 jpeg、不可设。
+   *  其余协议不用。适配器固定要 png，本字段只决定参数是否发送。 */
+  supportsOutputFormat?: boolean;
   qualities: string[];
   /** 以下字段可缺省，消费侧按「缺省=false/0」处理。 */
   supportsPromptExtend?: boolean;
@@ -175,8 +194,10 @@ export interface ImageConfig {
 export interface GenRequest {
   providerId: string; model: string; prompt: string; negativePrompt: string;
   size: string; n: number; quality: string | null; seed: number | null;
-  /** P2 生效（steps 依赖支持该参数的适配器）；字段先落下，P1 恒不传。 */
+  /** P2 生效（steps 依赖支持该参数的适配器）；硅基流动/魔搭用；null/缺省 = 不发送（用服务端默认）。 */
   steps?: number | null;
+  /** 引导系数（硅基流动 guidance_scale / 魔搭 guidance）；null/缺省 = 不发送。 */
+  guidance?: number | null;
   /** P3 生效（uid 依赖名单数据源）；字段先落下，P1 恒不传。 */
   uid?: string | null;
   /** 球员名（随请求带入，仅用于画廊记录展示；无数据源时缺省 null）。 */

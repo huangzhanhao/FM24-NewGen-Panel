@@ -522,6 +522,40 @@
               />
             </div>
           {/if}
+          {#if caps?.supportsSteps}
+            <!-- 采样步数（硅基流动 num_inference_steps / 魔搭 steps）：留空 = 用服务端默认 -->
+            <div class="gfield f-steps">
+              <label for="ig-steps">{t.gen.steps}</label>
+              <input
+                id="ig-steps"
+                type="number"
+                min="1"
+                max={caps.stepsMax || undefined}
+                step="1"
+                placeholder={caps.stepsDefault ? String(caps.stepsDefault) : ""}
+                title={t.gen.stepsHint}
+                value={imageaiStore.steps}
+                oninput={(e) => (imageaiStore.steps = e.currentTarget.value)}
+              />
+            </div>
+          {/if}
+          {#if caps?.supportsGuidance}
+            <!-- 引导系数（硅基流动 guidance_scale / 魔搭 guidance）：留空 = 用服务端默认 -->
+            <div class="gfield f-guidance">
+              <label for="ig-guidance">{t.gen.guidance}</label>
+              <input
+                id="ig-guidance"
+                type="number"
+                min="0"
+                max={caps.guidanceMax || undefined}
+                step="0.5"
+                placeholder={caps.guidanceDefault ? String(caps.guidanceDefault) : ""}
+                title={t.gen.guidanceHint}
+                value={imageaiStore.guidance}
+                oninput={(e) => (imageaiStore.guidance = e.currentTarget.value)}
+              />
+            </div>
+          {/if}
           {#if caps?.supportsQuality}
             <!-- 质量分段：与其余参数同流排布，折行时整字段一起走 -->
             <div class="gfield f-quality">
@@ -569,16 +603,8 @@
           {#if caps?.supportsEnableThinking}
             <!-- 思考模式官方「仅 prompt_extend=true 时生效」：改写关闭时置灰而非隐藏，
                  免得参数凭空消失；置灰态的值仍是用户上次的选择 -->
-            <label
-              class="switch gfield f-thinking"
-              class:g-off={!imageaiStore.promptExtend}
-              title={t.gen.thinkingHint}
-            >
-              <input
-                type="checkbox"
-                disabled={!imageaiStore.promptExtend}
-                bind:checked={imageaiStore.enableThinking}
-              />
+            <label class="switch gfield f-thinking" class:g-off={!imageaiStore.promptExtend} title={t.gen.thinkingHint}>
+              <input type="checkbox" disabled={!imageaiStore.promptExtend} bind:checked={imageaiStore.enableThinking} />
               <span class="track"></span>
               <span class="wm-text">{t.gen.thinking}</span>
             </label>
@@ -945,6 +971,16 @@
     flex: 1 1 130px;
     min-width: 130px;
     max-width: 220px;
+  }
+  /* 采样步数 / 引导系数：窄数字输入，内容定宽（与尺寸双输入同档宽度） */
+  .f-steps,
+  .f-guidance {
+    flex: none;
+  }
+  .f-steps input,
+  .f-guidance input {
+    flex: none;
+    width: 72px;
   }
   /* 单图模型静态说明：与 label 同行、与控件等高，文字较长允许换行不跳动 */
   .static-note {

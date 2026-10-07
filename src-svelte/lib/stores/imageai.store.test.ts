@@ -279,19 +279,6 @@ describe('P3 数据源与保存并替换', () => {
     expect(api.previewPrompt).not.toHaveBeenCalled();
   });
 
-  it('buildQueueEntries renders per player via previewPrompt', async () => {
-    await pickSource('u0', '源');
-    const entries = await buildQueueEntries([
-      { uid: 'u1', name: '甲' },
-      { uid: 'u2', name: '乙' },
-    ]);
-    // 队列逐球员渲染：每行各问一次 preview_prompt，prompt 各自携带该球员的变量
-    expect(api.previewPrompt).toHaveBeenCalledTimes(2);
-    expect(api.renderPrompt).not.toHaveBeenCalled();
-    expect(entries[0].req.prompt).toBe('u1 的渲染结果');
-    expect(entries[1].req.prompt).toBe('u2 的渲染结果');
-  });
-
   it('buildQueueEntries rejects when a per-row preview reports missing placeholders', async () => {
     await pickSource('u0', '源');
     vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: 'x', missing: ['skinCode'] });

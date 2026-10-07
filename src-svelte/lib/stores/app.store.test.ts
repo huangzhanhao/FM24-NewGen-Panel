@@ -48,14 +48,9 @@ describe('runTask', () => {
     expect(appStore.taskRunning).toBe(false);
   });
 
-  it('命令没来得及上报就结束（小包几毫秒）：收尾补 100%', async () => {
-    await runTask('检查完整性', async () => {});
-    expect(appStore.taskRunning).toBe(false);
-    expect(appStore.task.value).toBe(100); // 不补的话进度条一闪而过，等于没有反馈
-  });
-
-  it('小包无子目录（total 恒为 0）：仍补 100%，计数留空', async () => {
+  it('命令没来得及上报就结束（小包几毫秒）：收尾补 100%，计数留空', async () => {
     await runTask('扫描头像', async () => {});
+    expect(appStore.taskRunning).toBe(false);
     expect(appStore.task).toEqual({ status: '扫描头像', value: 100, current: 0, total: 0 });
   });
 

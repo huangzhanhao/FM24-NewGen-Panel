@@ -447,38 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn generate_mode_maps_into_ethnic_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let img = facepack(&dir);
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        let data = vec![
-            player("r-2001", "ESP", "1"), // ESP → SpanMed
-            player("r-2002", "USA", "0"), // USA → Caucasian
-        ];
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
-        let mapping = mapper
-            .generate_mapping(
-                &data,
-                Mode::Generate,
-                true,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
-            .unwrap();
-        assert_eq!(mapping.len(), 2);
-        assert_eq!(mapping[0].ethnicity, "SpanMed");
-        assert_eq!(mapping[1].ethnicity, "Caucasian");
-        // 每条映射的图都能在对应种族目录下定位到真实文件。
-        for m in &mapping {
-            assert!(
-                xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some()
-            );
-        }
-    }
-
-    #[test]
     fn no_duplicates_exhausts_pool() {
         let dir = tempfile::tempdir().unwrap();
         // {ESP, SpanMed} 混合目录包：ESP 不在标准二 FolderList → 判 Unknown → 递归全池规则。

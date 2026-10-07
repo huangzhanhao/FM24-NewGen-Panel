@@ -910,158 +910,87 @@ mod tests {
         scan_and_total_progress(dir.to_str().unwrap(), &cfg.folder_lists(), &mut |_, _| {})
     }
 
+    /// 完整性判定的表驱动主矩阵：包形态 → (标准号, 状态, found, expected_total) + missing/extra。
+    /// 覆盖：平铺/空包、标准二三恰好、乱序不敏感、超集（多余目录进 extra、不进抽图池）、
+    /// 子集（missing 可一键补全，found + missing = expected_total）、未知名/跨套混用 → Unknown、
+    /// 垃圾目录不参与判定。missing/extra 按归属标准的 FolderList 原顺序计算。
     #[test]
-    fn standard1_images_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
-        let r = integrity(tmp.path());
-        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
-    }
-
-    #[test]
-    fn empty_dir_is_unknown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let r = integrity(tmp.path());
-        assert_eq!((r.standard, r.status.as_str()), (1, "unknown"));
-    }
-
-    #[test]
-    fn standard2_exact_regardless_of_order() {
-        let tmp = tempfile::tempdir().unwrap();
+    fn integrity_layout_matrix() {
+        let cfg = crate::templates::RuleConfig::builtin();
+        let f3: Vec<&str> = cfg.standard3.folder_list.iter().map(String::as_str).collect();
         let mut shuffled: Vec<&str> = FACEPACK_DIRS.to_vec();
         shuffled.reverse(); // 顺序不同仍应命中
-        mk_dirs(tmp.path(), &shuffled);
-        std::fs::write(tmp.path().join(FACEPACK_DIRS[0]).join("a.jpg"), b"x").unwrap();
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.missing.len(), r.expected_total),
-            (2, "complete", 0, 14)
-        );
+        let mut superset3 = f3.clone();
+        superset3.push("Scandinavian"); // 清单外（标准二的目录）
+        superset3.push("SomeUnusedDir"); // 清单外
+        // 标准三子集的缺失 = 62 清单按原顺序去掉已建 3 目录。
+        let subset3_missing: Vec<String> = cfg
+            .standard3
+            .folder_list
+            .iter()
+            .filter(|d| !["China", "Japan", "Korea"].contains(&d.as_str()))
+            .cloned()
+            .collect();
+        // (说明, 建包子目录, 根文件, (standard, status, found, expected_total), missing, extra)
+        let cases: Vec<(&str, Vec<&str>, Vec<&str>, (u8, &str, usize, usize), Vec<String>, Vec<String>)> = vec![
+            ("平铺单图", vec![], vec!["face.png"], (1, "complete", 0, 0), vec![], vec![]),
+            ("空目录", vec![], vec![], (1, "unknown", 0, 0), vec![], vec![]),
+            ("标准二乱序全量", shuffled, vec![], (2, "complete", 14, 14), vec![], vec![]),
+            ("标准三恰好全量", f3.clone(), vec![], (3, "complete", 62, 62), vec![], vec![]),
+            // 超集仍 complete；found 报包内全部（非垃圾）目录数，含 extra。
+            ("标准三超集", superset3, vec![], (3, "complete", 64, 62), vec![],
+             vec!["Scandinavian".into(), "SomeUnusedDir".into()]),
+            // 子集 fixable：缺失目录可一键补全。
+            ("标准二缺一", FACEPACK_DIRS[..13].to_vec(), vec![], (2, "fixable", 13, 14),
+             vec!["YugoGreek".into()], vec![]),
+            ("标准三子集", vec!["China", "Japan", "Korea"], vec![], (3, "fixable", 3, 62),
+             subset3_missing, vec![]),
+            ("未知名", vec!["African", "Asian", "NotARealRace"], vec![], (0, "unknown", 3, 0), vec![], vec![]),
+            // African 属标准二（14 目录清单）、China 属标准三（62 目录清单），跨套混用无法识别。
+            ("跨套混用", vec!["African", "China"], vec![], (0, "unknown", 2, 0), vec![], vec![]),
+            // 垃圾目录不进判定：平铺包不因 __MACOSX/.git 误判 Unknown。
+            ("垃圾目录不参与", vec!["__MACOSX", ".git"], vec!["face.png"], (1, "complete", 0, 0), vec![], vec![]),
+        ];
+        for (name, dirs, files, expected, missing, extra) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            mk_dirs(tmp.path(), &dirs);
+            for f in &files {
+                std::fs::write(tmp.path().join(f), b"png").unwrap();
+            }
+            let r = integrity(tmp.path());
+            assert_eq!(
+                (r.standard, r.status.as_str(), r.found, r.expected_total),
+                expected,
+                "用例 {name}"
+            );
+            assert_eq!(r.missing, missing, "用例 {name} 的缺失目录");
+            assert_eq!(r.extra, extra, "用例 {name} 的多余目录");
+        }
     }
 
+    /// 包内常见辅助文件（config.xml / README / 备注.txt）不得把判定带偏：三种布局各验一份。
     #[test]
-    fn standard3_exact() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 按内置标准三 FolderList（62 目录）建包 → 恰好相等 → complete。
-        let cfg = crate::templates::RuleConfig::builtin();
-        mk_dirs(
-            tmp.path(),
-            &cfg.standard3.folder_list.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.expected_total),
-            (3, "complete", 62)
-        );
-        assert!(r.extra.is_empty());
-    }
-
-    #[test]
-    fn standard3_superset_still_matches_with_extra() {
-        // 62 目录全在 + 多出清单外的未使用目录 → 仍判标准三 complete；多余目录进 extra、不参与抽图。
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = crate::templates::RuleConfig::builtin();
-        let mut dirs: Vec<String> = cfg.standard3.folder_list.clone();
-        dirs.push("Scandinavian".into()); // 清单外
-        dirs.push("SomeUnusedDir".into()); // 清单外
-        mk_dirs(tmp.path(), &dirs.iter().map(String::as_str).collect::<Vec<_>>());
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.expected_total),
-            (3, "complete", 62)
-        );
-        assert_eq!(
-            r.extra,
-            vec!["Scandinavian".to_string(), "SomeUnusedDir".to_string()]
-        );
-    }
-
-    #[test]
-    fn standard2_fixable_reports_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        // 标准二去掉最后一个（YugoGreek）→ 13 个，应判 fixable 且缺失正好是 YugoGreek。
-        let present: Vec<&str> = FACEPACK_DIRS[..13].to_vec();
-        mk_dirs(tmp.path(), &present);
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.found, r.expected_total),
-            (2, "fixable", 13, 14)
-        );
-        assert_eq!(r.missing, vec!["YugoGreek".to_string()]);
-    }
-
-    #[test]
-    fn standard3_fixable_subset() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]); // 全部 ⊆ 标准三 FolderList(62)
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.found, r.expected_total),
-            (3, "fixable", 3, 62)
-        );
-        assert_eq!(r.missing.len(), 59); // 62 - 3
-        assert!(!r.missing.contains(&"China".to_string()));
-    }
-
-    #[test]
-    fn unknown_when_unrecognized_name_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["African", "Asian", "NotARealRace"]);
-        let r = integrity(tmp.path());
-        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
-    }
-
-    #[test]
-    fn unknown_when_mixing_two_sets() {
-        let tmp = tempfile::tempdir().unwrap();
-        // African 属标准二（14 目录清单）、China 属标准三（62 目录清单），跨两套混用 → 无法识别。
-        mk_dirs(tmp.path(), &["African", "China"]);
-        let r = integrity(tmp.path());
-        assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));
-    }
-
-    #[test]
-    fn standard2_ignores_aux_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &FACEPACK_DIRS);
-        drop_aux_files(tmp.path());
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.missing.len()),
-            (2, "complete", 0)
-        );
-    }
-
-    #[test]
-    fn standard3_fixable_ignores_aux_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        mk_dirs(tmp.path(), &["China", "Japan", "Korea"]);
-        drop_aux_files(tmp.path());
-        let r = integrity(tmp.path());
-        assert_eq!(
-            (r.standard, r.status.as_str(), r.expected_total),
-            (3, "fixable", 62)
-        );
-    }
-
-    #[test]
-    fn standard1_complete_with_aux_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
-        drop_aux_files(tmp.path());
-        let r = integrity(tmp.path());
-        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
-    }
-
-    #[test]
-    fn check_integrity_ignores_junk_dirs() {
-        // __MACOSX / .git 等垃圾目录不参与判定：平铺包不因它们误判 Unknown。
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
-        std::fs::create_dir(tmp.path().join("__MACOSX")).unwrap();
-        std::fs::create_dir(tmp.path().join(".git")).unwrap();
-        let r = integrity(tmp.path());
-        assert_eq!((r.standard, r.status.as_str()), (1, "complete"));
+    fn aux_files_never_affect_judgement() {
+        // (说明, 建包子目录, 根图, (standard, status, missing 数, expected_total))
+        let cases: Vec<(&str, Vec<&str>, bool, (u8, &str, usize, usize))> = vec![
+            ("标准二全量", FACEPACK_DIRS.to_vec(), false, (2, "complete", 0, 14)),
+            ("标准三子集", vec!["China", "Japan", "Korea"], false, (3, "fixable", 59, 62)),
+            ("标准一平铺", vec![], true, (1, "complete", 0, 0)),
+        ];
+        for (name, dirs, with_root_image, expected) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            mk_dirs(tmp.path(), &dirs);
+            drop_aux_files(tmp.path());
+            if with_root_image {
+                std::fs::write(tmp.path().join("face.png"), b"png").unwrap();
+            }
+            let r = integrity(tmp.path());
+            assert_eq!(
+                (r.standard, r.status.as_str(), r.missing.len(), r.expected_total),
+                expected,
+                "用例 {name}"
+            );
+        }
     }
 
     #[test]

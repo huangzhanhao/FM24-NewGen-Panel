@@ -444,45 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_xml_entries_keeps_order_and_matches_dict() {
-        let dir = tempfile::tempdir().unwrap();
-        let pack = dir.path().join("pack");
-        std::fs::create_dir_all(&pack).unwrap();
-        write_xml(
-            &[
-                MappingEntry {
-                    uid: "2000000001".into(),
-                    ethnicity: "Asian".into(),
-                    image: "a1".into(),
-                },
-                MappingEntry {
-                    uid: "r-2000000002".into(),
-                    ethnicity: "MENA/sub".into(),
-                    image: "m9".into(),
-                },
-            ],
-            &pack,
-            false,
-        )
-        .unwrap();
-        // 有序版：保留文件顺序与多级目录拆分。
-        let list = parse_xml_entries(&pack.join("config.xml")).unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].uid, "2000000001");
-        assert_eq!(list[1].ethnicity, "MENA/sub");
-        assert_eq!(list[1].image, "m9");
-        // 字典版与有序版内容一致（同 UID 保留最后一条的语义不变）。
-        let map = parse_xml(&pack.join("config.xml")).unwrap();
-        assert_eq!(map.len(), 2);
-        assert_eq!(map["r-2000000002"].image, "m9");
-    }
-
-    #[test]
     fn written_mapping_reparses_identically_in_order() {
         // 【P0-3 的等价性依据】write_xml 按**传入顺序**逐行写出，parse_xml_entries 又按**文件顺序**
         // 返回，所以「拿本次 mapping 直填快照缓存」与「回读刚写出的文件」结果逐条相同（顺序也相同）。
         // 替换收尾省掉的正是那次回读（15 万行实测 1.4–1.5 s，且卡住按钮解禁）——
         // 这条断言就是那次省略的安全网：一旦 write/parse 的口径不再互逆，它会立刻失败。
+        // data 覆盖平铺 / 种族目录 / 多级目录+点号词干三种形态。
         let dir = tempfile::tempdir().unwrap();
         let pack = dir.path().join("pack");
         std::fs::create_dir_all(&pack).unwrap();
@@ -506,6 +473,10 @@ mod tests {
         write_xml(&data, &pack, false).unwrap();
         let parsed = parse_xml_entries(&pack.join("config.xml")).unwrap();
         assert_eq!(parsed, data, "直填（用写入的 Vec）必须与回读文件逐条相同");
+        // 字典版与有序版内容一致（同 UID 保留最后一条的语义不变）。
+        let map = parse_xml(&pack.join("config.xml")).unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["2000000003"].image, "deep");
     }
 
     #[test]

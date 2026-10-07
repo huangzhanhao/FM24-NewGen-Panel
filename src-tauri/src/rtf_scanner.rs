@@ -297,18 +297,26 @@ impl RtfScanner {
         self.format = RtfFormat::default();
         // 文件读取失败也要留痕：此前这里的 Err 直接返回、没有日志，用户只看到弹窗。
         let text = read_head(path, HEAD_BYTES).map_err(|e| {
-            logger.write(log::Level::Error,"rtf", format!("RTF 格式识别失败（读取文件 {}）：{e}", path.display()),
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("RTF 格式识别失败（读取文件 {}）：{e}", path.display()),
             );
             e
         })?;
         self.detect(&text).map_err(|e| {
-            logger.write(log::Level::Error, "rtf", format!("RTF 格式识别失败（{}）：{e}", path.display()),
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("RTF 格式识别失败（{}）：{e}", path.display()),
             );
             e
         })?;
         // 匹配结果：识别成功后的列结构与语言（Debug 级）。这份状态已并入「解析完成」汇总行，
         // 单独记 Info 只会让一次扫描出现两条内容相近的日志。
-        logger.debug("rtf", format!(
+        logger.debug(
+            "rtf",
+            format!(
                 "RTF 格式识别完成：{}（语言 {}）",
                 self.format.label(),
                 self.language
@@ -405,7 +413,10 @@ impl RtfScanner {
         if !self.is_valid {
             let err = "RTF 格式无效，请先执行格式识别".to_string();
             // 入口校验失败：属于调用方顺序错误，记 Error 便于定位（返回文案不变）。
-            logger.write(log::Level::Error,"rtf",format!("解析 RTF 被拒绝（{}）：{err}", path.display()),
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("解析 RTF 被拒绝（{}）：{err}", path.display()),
             );
             return Err(err);
         }
@@ -419,7 +430,10 @@ impl RtfScanner {
             ),
         );
         let text = fs::read_to_string(path).map_err(|e| {
-            logger.write(log::Level::Error, "rtf", format!("读取 RTF 失败（{}）：{e}", path.display()),
+            logger.write(
+                log::Level::Error,
+                "rtf",
+                format!("读取 RTF 失败（{}）：{e}", path.display()),
             );
             format!("读取 RTF 失败: {e}")
         })?;
@@ -437,7 +451,9 @@ impl RtfScanner {
                                    // 【逐行取消检查点】万行名单解析要跑几秒，而这一段在替换流水线的「取消」生效区间之内：
                                    // 原来这里没有检查点，取消后仍要把整份解析跑完才停（用户判定程序假死 → 强杀 → 正好写坏）。
             if cancel.load(Ordering::Relaxed) {
-                logger.warn("rtf", format!("名单解析已取消（停在第 {row_no} / {total} 行）"),
+                logger.warn(
+                    "rtf",
+                    format!("名单解析已取消（停在第 {row_no} / {total} 行）"),
                 );
                 return Err("名单解析被取消".into());
             }
@@ -453,7 +469,9 @@ impl RtfScanner {
                     } else {
                         // 追踪执行细节：逐行说明为何被过滤（Trace 级别默认被全局阈值挡住，不影响正常日志）。
                         counts.filtered += 1;
-                        logger.trace( "rtf", format!("第 {row_no} 行非随机人，已按「仅随机人」过滤"),
+                        logger.trace(
+                            "rtf",
+                            format!("第 {row_no} 行非随机人，已按「仅随机人」过滤"),
                         );
                     }
                 }
@@ -464,7 +482,9 @@ impl RtfScanner {
                     if row_no > 0 {
                         counts.stray += 1;
                         if counts.stray <= DROP_LOG_MAX {
-                            logger.warn( "rtf", format!("第 {row_no} 行编号列不是数字，不是名单数据行，已忽略该行"),
+                            logger.warn(
+                                "rtf",
+                                format!("第 {row_no} 行编号列不是数字，不是名单数据行，已忽略该行"),
                             );
                         }
                     }
@@ -473,17 +493,29 @@ impl RtfScanner {
                     // 逐行记日志（上限 DROP_LOG_MAX 条，超出合并汇总）；国籍查不到时可据此补表。
                     counts.dropped += 1;
                     if counts.dropped <= DROP_LOG_MAX {
-                        logger.write(log::Level::Warn, "rtf", format!("第 {row_no} 行「{field}」{detail}，已跳过该行"),
+                        logger.write(
+                            log::Level::Warn,
+                            "rtf",
+                            format!("第 {row_no} 行「{field}」{detail}，已跳过该行"),
                         );
                     }
                 }
             }
         }
         if counts.dropped > DROP_LOG_MAX {
-            logger.warn("rtf", format!("另有 {} 行不合法，已跳过", counts.dropped - DROP_LOG_MAX));
+            logger.warn(
+                "rtf",
+                format!("另有 {} 行不合法，已跳过", counts.dropped - DROP_LOG_MAX),
+            );
         }
         if counts.stray > DROP_LOG_MAX {
-            logger.warn("rtf", format!("另有 {} 行编号列非数字，已忽略", counts.stray - DROP_LOG_MAX));
+            logger.warn(
+                "rtf",
+                format!(
+                    "另有 {} 行编号列非数字，已忽略",
+                    counts.stray - DROP_LOG_MAX
+                ),
+            );
         }
         counts.kept = data.len();
         // 扫描完成：并入格式/语言，作为本模块唯一的汇总行，用 Debug 输出。
@@ -964,30 +996,12 @@ mod tests {
 ";
 
     #[test]
-    fn detect_basic_formats() {
+    fn detect_formats_basic_and_ext() {
         let logger = ChannelLogger::channel().0;
-        let mut s = RtfScanner::new();
-        s.detect_format(&write_rtf(EN_SAMPLE), &logger).unwrap();
-        assert_eq!(s.format, RtfFormat::Basic);
-        assert_eq!(s.language, "English");
-        let mut s = RtfScanner::new();
-        s.detect_format(&write_rtf(CN_SAMPLE), &logger).unwrap();
-        assert_eq!(s.format, RtfFormat::Basic);
-        assert_eq!(s.language, "简体中文");
-        // 乱码文件：第一个表格行的第 1 列不是「编号/UID」，所以报「未识别到表头行」。
-        let err = RtfScanner::new()
-            .detect_format(&write_rtf("乱七八糟没有数据行"), &logger)
-            .unwrap_err();
-        assert!(
-            err.contains("RTF 格式不合法") && err.contains("表头"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn detect_ext_formats() {
-        let logger = ChannelLogger::channel().0;
+        // 三种格式 × 双语样本：Basic / ExtPlayer / ExtStaff 的表头判别与语言识别。
         let cases = [
+            (EN_SAMPLE, RtfFormat::Basic, "English"),
+            (CN_SAMPLE, RtfFormat::Basic, "简体中文"),
             (EXT_PLAYER_EN_SAMPLE, RtfFormat::ExtPlayer, "English"),
             (EXT_PLAYER_CN_SAMPLE, RtfFormat::ExtPlayer, "简体中文"),
             (EXT_STAFF_CN_SAMPLE, RtfFormat::ExtStaff, "简体中文"),
@@ -999,6 +1013,14 @@ mod tests {
             assert_eq!(s.format, format);
             assert_eq!(s.language, language);
         }
+        // 乱码文件：第一个表格行的第 1 列不是「编号/UID」，所以报「未识别到表头行」。
+        let err = RtfScanner::new()
+            .detect_format(&write_rtf("乱七八糟没有数据行"), &logger)
+            .unwrap_err();
+        assert!(
+            err.contains("RTF 格式不合法") && err.contains("表头"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1057,14 +1079,24 @@ mod tests {
         // 同一份名单的行数账目必须对得上：4 个表行里 1 行编号列非数字（stray）、
         // 1 行种族码越界（dropped）。这两类过去只会让记录静默变少（stray 连一行日志都没有）。
         let (_, counts) = s
-            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {}, )
+            .parse_roster_progress(
+                &path,
+                true,
+                &logger,
+                &AtomicBool::new(false),
+                &mut |_, _| {},
+            )
             .unwrap();
         assert_eq!(
             (counts.rows, counts.kept, counts.dropped, counts.stray),
             (4, 1, 1, 1),
             "行数账目不对：{counts:?}"
         );
-        assert!(counts.log_tail().contains("编号列非数字 1"), "{}", counts.log_tail());
+        assert!(
+            counts.log_tail().contains("编号列非数字 1"),
+            "{}",
+            counts.log_tail()
+        );
     }
 
     #[test]
@@ -1080,10 +1112,20 @@ mod tests {
         let mut s = RtfScanner::new();
         s.detect_format(&path, &logger).unwrap();
         let (data, counts) = s
-            .parse_roster_progress(&path, true, &logger, &AtomicBool::new(false), &mut |_, _| {}, )
+            .parse_roster_progress(
+                &path,
+                true,
+                &logger,
+                &AtomicBool::new(false),
+                &mut |_, _| {},
+            )
             .unwrap();
         assert_eq!(data.len(), 1, "结尾没有管道符的行被整行拒了");
-        assert_eq!((counts.dropped, counts.stray), (0, 0), "行数账目不对：{counts:?}");
+        assert_eq!(
+            (counts.dropped, counts.stray),
+            (0, 0),
+            "行数账目不对：{counts:?}"
+        );
     }
 
     #[test]
@@ -1191,21 +1233,41 @@ mod tests {
     }
 
     #[test]
-    fn ext_player_extra_columns_stored() {
-        // 在第 18 列后面追加用户自定义列：仍然合法，原文会存进 extra_fields。
-        let sample = "\
+    fn ext_extra_columns_and_avatar_stored_verbatim() {
+        // 第 18 列之后的用户自定义列按原文存进 extra_fields：球员表（英文表头）与职员表
+        //（中文表头）共用同一收录规则，各验一份；职员表顺带锁定头像列与性别的原文入库。
+        let logger = ChannelLogger::channel().0;
+        let player = "\
 | UID | Nat | 2nd Nat | Name | | | | | | Is newgen | Gender | Age | Height | Club | Based | CA | PA | R.C.A |
 | 12315 | MKD | | Toni Micevski | 1 | 12 | 0 | 5 | | No | Male | 54 | 188 cm | Poeševo | North Macedonia (Fourth League) | 27 | 122 | 27 | 惯用脚 | 左 |
 ";
-        let path = write_rtf(sample);
-        let logger = ChannelLogger::channel().0;
+        let path = write_rtf(player);
         let mut s = RtfScanner::new();
         s.detect_format(&path, &logger).unwrap();
         assert_eq!(s.format, RtfFormat::ExtPlayer);
         let data = s.parse_roster(&path, false, &logger).unwrap();
         assert_eq!(
             data[0].detailed.as_ref().unwrap().extra_fields,
-            vec!["惯用脚".to_string(), "左".to_string()]
+            vec!["惯用脚".to_string(), "左".to_string()],
+            "球员表的自定义列"
+        );
+
+        let staff = "\
+| 编号 | 国籍/地区籍 | 第二国籍/地区籍 | 姓名 | 头发长度 | 发色 | 种族码 | 肤色 | 头像 | 是新生球员 | 性别 | 年龄 | 身高 | 俱乐部 | 偏好工作 | 能力 | 潜力 | NP R.C.A |
+| 306951 | 巴西 | | 库卡 | 1 | 11 | 0 | 8 | face_kuka | 否 | 男 | 68 | 182厘米 | 梅州客家 | 足球总监 | 142 | 160 | 138 | 合同年 | 2027 |
+";
+        let path = write_rtf(staff);
+        let mut s = RtfScanner::new();
+        s.detect_format(&path, &logger).unwrap();
+        assert_eq!(s.format, RtfFormat::ExtStaff);
+        let data = s.parse_roster(&path, false, &logger).unwrap();
+        let d = data[0].detailed.as_ref().unwrap();
+        assert_eq!(d.avatar, "face_kuka");
+        assert_eq!(d.gender, "男");
+        assert_eq!(
+            d.extra_fields,
+            vec!["合同年".to_string(), "2027".to_string()],
+            "职员表的自定义列"
         );
     }
 
@@ -1343,28 +1405,6 @@ mod tests {
         assert_eq!(d.rca, "195");
         assert_eq!(d.preferred_job, "Performance Analyst");
         assert_eq!(d.club, "");
-    }
-
-    #[test]
-    fn ext_staff_avatar_and_extras_stored() {
-        // 头像列有内容时按原文入库；第 19 列起的用户自定义列存进 extra_fields。
-        let sample = "\
-| 编号 | 国籍/地区籍 | 第二国籍/地区籍 | 姓名 | 头发长度 | 发色 | 种族码 | 肤色 | 头像 | 是新生球员 | 性别 | 年龄 | 身高 | 俱乐部 | 偏好工作 | 能力 | 潜力 | NP R.C.A |
-| 306951 | 巴西 | | 库卡 | 1 | 11 | 0 | 8 | face_kuka | 否 | 男 | 68 | 182厘米 | 梅州客家 | 足球总监 | 142 | 160 | 138 | 合同年 | 2027 |
-";
-        let path = write_rtf(sample);
-        let logger = ChannelLogger::channel().0;
-        let mut s = RtfScanner::new();
-        s.detect_format(&path, &logger).unwrap();
-        assert_eq!(s.format, RtfFormat::ExtStaff);
-        let data = s.parse_roster(&path, false, &logger).unwrap();
-        let d = data[0].detailed.as_ref().unwrap();
-        assert_eq!(d.avatar, "face_kuka");
-        assert_eq!(d.gender, "男");
-        assert_eq!(
-            d.extra_fields,
-            vec!["合同年".to_string(), "2027".to_string()]
-        );
     }
 
     #[test]

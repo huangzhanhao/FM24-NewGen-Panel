@@ -695,115 +695,60 @@ mod tests {
         }
     }
 
+    /// 「生成」模式映射为 0 条时的确认守卫，2×2 矩阵：档景（快照 1 条会被清空 / 损坏读不出）
+    /// × allow_blank（未确认 / 已确认）。为什么需要守卫：空表照写会把档景清掉——它是
+    /// Preserve/Overwrite 的判据源，也是本档映射历史的唯一记录；而「档景读不出」不等于
+    /// 「本来就没有」，放行等于让守卫在损坏时形同虚设。未确认 → 中止（config.xml 与档景都不动，
+    /// 文案说明拦下的是什么）；已确认 → 照写空表并留 WARN（中止只把用户意图堵回应用之外）。
     #[test]
-    fn generate_aborts_before_wiping_a_non_empty_snapshot() {
-        // 「生成」模式不携带既有条目：名单解析出 0 条时映射也是 0 条，照写就把本档的映射表清空；
-        // 而收尾同步还会把这份空表覆盖到档景——它是 Preserve/Overwrite 的判据源，也是「本档原来
-        // 有哪些映射」的唯一记录。所以未经确认时这一轮必须在写之前停下。
-        let (_dir, img, snap) = blanking_setup();
-        let params = blanking_params(&img, &snap, false);
-        let cancel = AtomicBool::new(false);
-        let (logger, _rx) = ChannelLogger::channel();
-        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
-        let Outcome::Failed(msg) = &result.outcome else {
-            panic!("应中止而不是照常写完：{:?}", result.outcome);
-        };
-        assert!(
-            msg.contains("已中止") && msg.contains("1 条"),
-            "消息要说明拦下了什么：{msg}"
-        );
-        assert!(
-            !img.join("config.xml").exists(),
-            "中止后 config.xml 不该被写出来"
-        );
-        assert_eq!(
-            fs::read_to_string(&snap)
-                .unwrap()
-                .matches("<record from=")
-                .count(),
-            1,
-            "档景不该被动过"
-        );
-    }
-
-    #[test]
-    fn confirmed_generate_writes_the_empty_mapping() {
-        // 同一套现场，唯一的区别是这一轮带 allow_blank＝用户在发起前的预检里确认过「知道会清空、
-        // 就是要清空」。此时必须照写：中止只把这个意图堵回应用之外（原先只剩手工删档景文件绕过守卫）。
-        let (_dir, img, snap) = blanking_setup();
-        let params = blanking_params(&img, &snap, true);
-        let cancel = AtomicBool::new(false);
-        let (logger, log_rx) = ChannelLogger::channel();
-        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
-        assert_eq!(result.outcome, Outcome::Finished);
-        assert_eq!(result.mapping.len(), 0);
-        // 空表真的落了盘（模板骨架在、0 条映射行）。
-        let written = fs::read_to_string(img.join("config.xml")).unwrap();
-        assert_eq!(
-            written.matches("<record from=").count(),
-            0,
-            "确认后就该写出空映射表：{written}"
-        );
-        let logs: Vec<LogLine> = log_rx.try_iter().collect();
-        assert!(
-            logs.iter()
-                .any(|l| l.level == "WARNING" && l.message.contains("已按你的确认继续")),
-            "清空这一步要在日志里留痕：{logs:?}"
-        );
-        // 档景由命令层收尾同步（run 之外），这里只确认流水线本身没把它当成判据偷偷改回去。
-        assert_eq!(
-            fs::read_to_string(&snap)
-                .unwrap()
-                .matches("<record from=")
-                .count(),
-            1,
-            "run() 不改档景（同步在命令层）"
-        );
-    }
-
-    #[test]
-    fn unreadable_snapshot_aborts_instead_of_being_treated_as_empty() {
-        // 档景文件在、但读不出（这里用非法 UTF-8 字节模拟损坏/无权限）：与「档景本就 0 条」是两回事。
-        // 读不出就当成「无可清空」放行，等于让确认守卫在档景损坏时形同虚设——口径必须与预检一致：
-        // 说不清会清掉多少条，未经确认就中止，config.xml 与档景都不动。
-        let (_dir, img, snap) = blanking_setup();
-        fs::write(&snap, [0xff, 0xfe, 0x00, 0xff]).unwrap(); // read_to_string 必失败，但 is_file() 仍为真
-        let params = blanking_params(&img, &snap, false);
-        let cancel = AtomicBool::new(false);
-        let (logger, _rx) = ChannelLogger::channel();
-        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
-        let Outcome::Failed(msg) = &result.outcome else {
-            panic!("档景读不出时应中止而不是照写：{:?}", result.outcome);
-        };
-        assert!(
-            msg.contains("已中止") && msg.contains("读不出"),
-            "消息要说明是读不出而非 0 条：{msg}"
-        );
-        assert!(
-            !img.join("config.xml").exists(),
-            "中止后 config.xml 不该被写出来"
-        );
-    }
-
-    #[test]
-    fn confirmed_generate_proceeds_even_with_unreadable_snapshot() {
-        // 同一份损坏档景，但用户已在预检里确认过「就是要清空」（allow_blank）：此时照写，
-        // 并记一条 WARN 留痕——读不出条数不该把已确认的清空意图堵死。
-        let (_dir, img, snap) = blanking_setup();
-        fs::write(&snap, [0xff, 0xfe, 0x00, 0xff]).unwrap();
-        let params = blanking_params(&img, &snap, true);
-        let cancel = AtomicBool::new(false);
-        let (logger, log_rx) = ChannelLogger::channel();
-        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
-        assert_eq!(result.outcome, Outcome::Finished);
-        assert_eq!(result.mapping.len(), 0);
-        assert!(img.join("config.xml").exists(), "确认后空表应落盘");
-        let logs: Vec<LogLine> = log_rx.try_iter().collect();
-        assert!(
-            logs.iter()
-                .any(|l| l.level == "WARNING" && l.message.contains("已按你的确认继续")),
-            "清空这一步要在日志里留痕：{logs:?}"
-        );
+    fn generate_blank_mapping_guard_matrix() {
+        // (说明, 档景可读, allow_blank)
+        let cases: Vec<(&str, bool, bool)> = vec![
+            ("未确认：档景 1 条", true, false),
+            ("已确认：档景 1 条", true, true),
+            ("未确认：档景读不出", false, false),
+            ("已确认：档景读不出", false, true),
+        ];
+        for (name, readable, allow_blank) in cases {
+            let (_dir, img, snap) = blanking_setup();
+            if !readable {
+                fs::write(&snap, [0xff, 0xfe, 0x00, 0xff]).unwrap(); // read_to_string 必失败，但 is_file() 仍为真
+            }
+            let params = blanking_params(&img, &snap, allow_blank);
+            let cancel = AtomicBool::new(false);
+            let (logger, log_rx) = ChannelLogger::channel();
+            let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
+            if allow_blank {
+                assert_eq!(result.outcome, Outcome::Finished, "{name}");
+                assert_eq!(result.mapping.len(), 0, "{name}");
+                // 空表真的落了盘（模板骨架在、0 条映射行）。
+                let written = fs::read_to_string(img.join("config.xml")).unwrap();
+                assert_eq!(written.matches("<record from=").count(), 0, "{name}: {written}");
+                let logs: Vec<LogLine> = log_rx.try_iter().collect();
+                assert!(
+                    logs.iter().any(|l| l.level == "WARNING" && l.message.contains("已按你的确认继续")),
+                    "{name}: 清空这一步要在日志里留痕：{logs:?}"
+                );
+            } else {
+                let Outcome::Failed(msg) = &result.outcome else {
+                    panic!("{name}: 应中止而不是照常写完：{:?}", result.outcome);
+                };
+                let why = if readable { "1 条" } else { "读不出" };
+                assert!(
+                    msg.contains("已中止") && msg.contains(why),
+                    "{name}: 消息要说明拦下了什么：{msg}"
+                );
+                assert!(!img.join("config.xml").exists(), "{name}: 中止后 config.xml 不该被写出来");
+            }
+            // 档景任何分支都不被 run() 动过（收尾同步在命令层；损坏档景读不出，跳过内容比对）。
+            if readable {
+                assert_eq!(
+                    fs::read_to_string(&snap).unwrap().matches("<record from=").count(),
+                    1,
+                    "{name}: 档景不该被动过"
+                );
+            }
+        }
     }
 
     #[test]

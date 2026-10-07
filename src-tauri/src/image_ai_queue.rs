@@ -194,7 +194,9 @@ pub trait GenExecutor: Send + Sync {
         key: &'a str,
         req: &'a image_ai::GenRequest,
         progress: &'a (dyn Fn(GenStage) + Sync),
-    ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>>;
+    ) -> Pin<
+        Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>,
+    >;
 }
 
 /// 真实执行器：直接调 `image_ai::generate`（写盘 + 画廊记录都在那一条链上）。
@@ -208,10 +210,17 @@ impl GenExecutor for RealExecutor {
         key: &'a str,
         req: &'a image_ai::GenRequest,
         progress: &'a (dyn Fn(GenStage) + Sync),
-    ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>,
+    > {
         // generate 按值收请求：克隆一份（一次生成的请求体就几行提示词，克隆可忽略）。
-        Box::pin(image_ai::generate(data_dir, cfg, key, req.clone(), progress))
+        Box::pin(image_ai::generate(
+            data_dir,
+            cfg,
+            key,
+            req.clone(),
+            progress,
+        ))
     }
 }
 
@@ -360,123 +369,126 @@ pub async fn run_queue(
         let task_data_dir = data_dir.clone();
         let task_cfg = Arc::clone(&cfg);
         let task_keys = Arc::clone(&keys);
-        handles.push((handle_id, tauri::async_runtime::spawn(async move {
-            // 短锁置 Running，随后 emit（锁绝不跨 await）。
-            {
-                let mut st = task_state.lock().unwrap();
-                if let Some(e) = st.entries.iter_mut().find(|e| e.id == id) {
-                    e.status = QueueStatus::Running;
-                }
-            }
-            // 本条的「已完成数」快照：本条尚未完成，故取当前累计值（终态事件再递增）。
-            let running_current = *task_completed.lock().unwrap();
-            task_sink.progress(QueueProgress {
-                status: "running".into(),
-                current: running_current,
-                total,
-                uid: uid.clone(),
-                entry_id: Some(id.clone()),
-                stage: None,
-            });
-            // 阶段进度回调：适配器上报阶段，这里按「阶段」去重——原子记录上一阶段（无锁无 await，
-            // 故可在回调内安全调用）。单值足够：一条任务内阶段单向推进，只需比较相邻是否相同。
-            let last_stage = AtomicU8::new(0);
-            let progress_cb = |stage: GenStage| {
-                let code = stage as u8 + 1; // 0 保留给「尚无阶段」
-                if last_stage.swap(code, Ordering::Relaxed) == code {
-                    return; // 同一阶段重复上报 → 丢弃
-                }
-                // current 在发射前即时短锁读一次，而非复用本条启动时的快照：并发下兄弟任务可能
-                // 已先收尾，复用旧快照会让「已完成」与进度条回跳。锁内只取值（不 await、不 emit）。
-                let now = *task_completed.lock().unwrap();
-                task_sink.progress(QueueProgress {
-                    status: "running".into(),
-                    current: now,
-                    total,
-                    uid: uid.clone(),
-                    entry_id: Some(id.clone()),
-                    stage: Some(stage.as_str().to_string()),
-                });
-            };
-
-            let key = task_keys
-                .get(&req.provider_id)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            // 执行期重试：仅 `retryable` 错误重试，最多 MAX_ATTEMPTS 次（1 首发 + 2 重试）。
-            // 【为什么留在此处】重试属于「跑一张图」的执行细节，主派发循环只管并发占位；
-            // 重试期间条目保持 Running（不新增状态），前端据 attempts>1 显示「已重试 N 次」。
-            // attempts 每次执行前自增并即刻回写（短锁），故运行中也能反映当前是第几次。
-            let mut attempts = 0u32;
-            let outcome = loop {
-                attempts += 1;
-                // 短锁回写 attempts；条目中途被移除时找不到 id，静默跳过（终态回写同款）。
+        handles.push((
+            handle_id,
+            tauri::async_runtime::spawn(async move {
+                // 短锁置 Running，随后 emit（锁绝不跨 await）。
                 {
                     let mut st = task_state.lock().unwrap();
                     if let Some(e) = st.entries.iter_mut().find(|e| e.id == id) {
-                        e.attempts = attempts;
+                        e.status = QueueStatus::Running;
                     }
                 }
-                match task_executor
-                    .execute(&task_data_dir, &task_cfg, key, &req, &progress_cb)
-                    .await
-                {
-                    // 还可重试且服务端判定可重试：退避后重来。attempt-1 是「已重试次数」，
-                    // 首次失败为 0 → backoff_delay 给出 2s（见其文档）。
-                    Err(err) if err.retryable && attempts < MAX_ATTEMPTS => {
-                        let delay = backoff_delay(attempts - 1, err.retry_after);
-                        task_sleeper.sleep(delay).await;
-                        // 【取消对「尚未开始的重试」生效】一次重试即一次新的派发，故退避结束、
-                        // 再次 execute 之前再读一次 cancel（短锁读，锁内不 await）。已请求取消
-                        // 就不再发起这次重试，定稿为与主派发循环取消分支一致的终态（Failed +
-                        // 「已取消」+ Cancelled）；正在执行中的那一次仍不中断（无中断通道）。
-                        // attempts 保留已真实发生的次数，不回零也不虚增。
-                        if task_state.lock().unwrap().cancel {
-                            break Err(image_ai::ImageGenError::cancelled());
-                        }
+                // 本条的「已完成数」快照：本条尚未完成，故取当前累计值（终态事件再递增）。
+                let running_current = *task_completed.lock().unwrap();
+                task_sink.progress(QueueProgress {
+                    status: "running".into(),
+                    current: running_current,
+                    total,
+                    uid: uid.clone(),
+                    entry_id: Some(id.clone()),
+                    stage: None,
+                });
+                // 阶段进度回调：适配器上报阶段，这里按「阶段」去重——原子记录上一阶段（无锁无 await，
+                // 故可在回调内安全调用）。单值足够：一条任务内阶段单向推进，只需比较相邻是否相同。
+                let last_stage = AtomicU8::new(0);
+                let progress_cb = |stage: GenStage| {
+                    let code = stage as u8 + 1; // 0 保留给「尚无阶段」
+                    if last_stage.swap(code, Ordering::Relaxed) == code {
+                        return; // 同一阶段重复上报 → 丢弃
                     }
-                    // 成功、不可重试、或已用尽次数：定稿退出循环。
-                    other => break other,
-                }
-            };
+                    // current 在发射前即时短锁读一次，而非复用本条启动时的快照：并发下兄弟任务可能
+                    // 已先收尾，复用旧快照会让「已完成」与进度条回跳。锁内只取值（不 await、不 emit）。
+                    let now = *task_completed.lock().unwrap();
+                    task_sink.progress(QueueProgress {
+                        status: "running".into(),
+                        current: now,
+                        total,
+                        uid: uid.clone(),
+                        entry_id: Some(id.clone()),
+                        stage: Some(stage.as_str().to_string()),
+                    });
+                };
 
-            let success = outcome.is_ok();
-            // 短锁回写终态；条目中途被移除时找不到 id，静默跳过。attempts 上一步已写，不动它。
-            {
-                let mut st = task_state.lock().unwrap();
-                if let Some(e) = st.entries.iter_mut().find(|e| e.id == id) {
-                    match outcome {
-                        Ok(res) => {
-                            e.status = QueueStatus::Success;
-                            e.images = res.images;
-                            e.error = String::new();
-                            e.error_kind = None;
+                let key = task_keys
+                    .get(&req.provider_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                // 执行期重试：仅 `retryable` 错误重试，最多 MAX_ATTEMPTS 次（1 首发 + 2 重试）。
+                // 【为什么留在此处】重试属于「跑一张图」的执行细节，主派发循环只管并发占位；
+                // 重试期间条目保持 Running（不新增状态），前端据 attempts>1 显示「已重试 N 次」。
+                // attempts 每次执行前自增并即刻回写（短锁），故运行中也能反映当前是第几次。
+                let mut attempts = 0u32;
+                let outcome = loop {
+                    attempts += 1;
+                    // 短锁回写 attempts；条目中途被移除时找不到 id，静默跳过（终态回写同款）。
+                    {
+                        let mut st = task_state.lock().unwrap();
+                        if let Some(e) = st.entries.iter_mut().find(|e| e.id == id) {
+                            e.attempts = attempts;
                         }
-                        Err(err) => {
-                            e.status = QueueStatus::Failed;
-                            e.error = err.message;
-                            e.error_kind = Some(err.kind);
+                    }
+                    match task_executor
+                        .execute(&task_data_dir, &task_cfg, key, &req, &progress_cb)
+                        .await
+                    {
+                        // 还可重试且服务端判定可重试：退避后重来。attempt-1 是「已重试次数」，
+                        // 首次失败为 0 → backoff_delay 给出 2s（见其文档）。
+                        Err(err) if err.retryable && attempts < MAX_ATTEMPTS => {
+                            let delay = backoff_delay(attempts - 1, err.retry_after);
+                            task_sleeper.sleep(delay).await;
+                            // 【取消对「尚未开始的重试」生效】一次重试即一次新的派发，故退避结束、
+                            // 再次 execute 之前再读一次 cancel（短锁读，锁内不 await）。已请求取消
+                            // 就不再发起这次重试，定稿为与主派发循环取消分支一致的终态（Failed +
+                            // 「已取消」+ Cancelled）；正在执行中的那一次仍不中断（无中断通道）。
+                            // attempts 保留已真实发生的次数，不回零也不虚增。
+                            if task_state.lock().unwrap().cancel {
+                                break Err(image_ai::ImageGenError::cancelled());
+                            }
+                        }
+                        // 成功、不可重试、或已用尽次数：定稿退出循环。
+                        other => break other,
+                    }
+                };
+
+                let success = outcome.is_ok();
+                // 短锁回写终态；条目中途被移除时找不到 id，静默跳过。attempts 上一步已写，不动它。
+                {
+                    let mut st = task_state.lock().unwrap();
+                    if let Some(e) = st.entries.iter_mut().find(|e| e.id == id) {
+                        match outcome {
+                            Ok(res) => {
+                                e.status = QueueStatus::Success;
+                                e.images = res.images;
+                                e.error = String::new();
+                                e.error_kind = None;
+                            }
+                            Err(err) => {
+                                e.status = QueueStatus::Failed;
+                                e.error = err.message;
+                                e.error_kind = Some(err.kind);
+                            }
                         }
                     }
                 }
-            }
-            // 终态即一条已完成：递增后再带上新值，进度条的「已完成 X」随之 +1。
-            let done = {
-                let mut c = task_completed.lock().unwrap();
-                *c += 1;
-                *c
-            };
-            task_sink.progress(QueueProgress {
-                status: if success { "success" } else { "failed" }.into(),
-                current: done,
-                total,
-                uid,
-                entry_id: Some(id),
-                stage: None,
-            });
-            *task_in_flight.lock().unwrap() -= 1;
-            success
-        })));
+                // 终态即一条已完成：递增后再带上新值，进度条的「已完成 X」随之 +1。
+                let done = {
+                    let mut c = task_completed.lock().unwrap();
+                    *c += 1;
+                    *c
+                };
+                task_sink.progress(QueueProgress {
+                    status: if success { "success" } else { "failed" }.into(),
+                    current: done,
+                    total,
+                    uid,
+                    entry_id: Some(id),
+                    stage: None,
+                });
+                *task_in_flight.lock().unwrap() -= 1;
+                success
+            }),
+        ));
     }
 
     // 等所有在跑任务收尾（cancel 只影响「尚未派发」的条目，在跑的必须等完）。
@@ -617,8 +629,13 @@ mod tests {
             _key: &'a str,
             req: &'a image_ai::GenRequest,
             progress: &'a (dyn Fn(GenStage) + Sync),
-        ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 self.calls
                     .lock()
@@ -652,8 +669,13 @@ mod tests {
             _key: &'a str,
             _req: &'a image_ai::GenRequest,
             _progress: &'a (dyn Fn(GenStage) + Sync),
-        ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 panic!("模拟执行器 panic");
             })
@@ -715,8 +737,13 @@ mod tests {
             _key: &'a str,
             req: &'a image_ai::GenRequest,
             progress: &'a (dyn Fn(GenStage) + Sync),
-        ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 if req.uid.as_deref() == Some("slow") {
                     self.slow_started.store(true, Ordering::Release);
@@ -747,8 +774,13 @@ mod tests {
             _key: &'a str,
             req: &'a image_ai::GenRequest,
             _progress: &'a (dyn Fn(GenStage) + Sync),
-        ) -> Pin<Box<dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<image_ai::GenResult, image_ai::ImageGenError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 if req.uid.as_deref() == Some("panic") {
                     wait_flag(&self.s_started).await;
@@ -886,48 +918,51 @@ mod tests {
 
     #[test]
     fn run_queue_all_success_sequential_and_backfills_images() {
-        let state = state_with(vec![
-            entry("u1", "甲"),
-            entry("u2", "乙"),
-            entry("u3", "丙"),
-        ]);
-        // 上一次运行遗留的取消标志：run 开始时必须复位，否则这批全被误杀。
-        state.lock().unwrap().cancel = true;
-        let stub = Arc::new(StubExecutor::new(vec![]));
-        let sink = Arc::new(CollectSink::default());
-        // tokio 不是本 crate 直接依赖（不引新依赖）：async 测试经 tauri 的 async_runtime 驱动。
-        let (finished, failed, total) = tauri::async_runtime::block_on(drive(
-            Arc::clone(&state),
-            1,
-            Arc::clone(&stub) as Arc<dyn GenExecutor>,
-            Arc::clone(&sink) as Arc<dyn EventSink>,
-        ));
+        // 并发 1 与 0（缺省归一为 1，避免除零/挂起）两种输入：都严格按入队顺序执行，断言一致。
+        for concurrency in [1, 0] {
+            let state = state_with(vec![
+                entry("u1", "甲"),
+                entry("u2", "乙"),
+                entry("u3", "丙"),
+            ]);
+            // 上一次运行遗留的取消标志：run 开始时必须复位，否则这批全被误杀。
+            state.lock().unwrap().cancel = true;
+            let stub = Arc::new(StubExecutor::new(vec![]));
+            let sink = Arc::new(CollectSink::default());
+            // tokio 不是本 crate 直接依赖（不引新依赖）：async 测试经 tauri 的 async_runtime 驱动。
+            let (finished, failed, total) = tauri::async_runtime::block_on(drive(
+                Arc::clone(&state),
+                concurrency,
+                Arc::clone(&stub) as Arc<dyn GenExecutor>,
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+            ));
 
-        assert_eq!((finished, failed, total), (3, 0, 3));
-        assert_eq!(
-            statuses(&state),
-            vec![
-                QueueStatus::Success,
-                QueueStatus::Success,
-                QueueStatus::Success
-            ]
-        );
-        // 成功条目回填 images；error 清空后不出现在序列化里（String::is_empty 跳过）。
-        let snap = state.lock().unwrap().snapshot();
-        assert_eq!(snap[0].images.len(), 1);
-        assert!(snap.iter().all(|e| e.error.is_empty()));
-        // 并发 1：严格按入队顺序执行。
-        assert_eq!(*stub.calls.lock().unwrap(), vec!["u1", "u2", "u3"]);
-        // running/success 各 3 条 + finished 1 条。
-        assert_eq!(sink.progress.lock().unwrap().len(), 6);
-        assert_eq!(
-            *sink.finished.lock().unwrap(),
-            vec![QueueFinished {
-                finished: 3,
-                failed: 0,
-                total: 3
-            }]
-        );
+            assert_eq!((finished, failed, total), (3, 0, 3));
+            assert_eq!(
+                statuses(&state),
+                vec![
+                    QueueStatus::Success,
+                    QueueStatus::Success,
+                    QueueStatus::Success
+                ]
+            );
+            // 成功条目回填 images；error 清空后不出现在序列化里（String::is_empty 跳过）。
+            let snap = state.lock().unwrap().snapshot();
+            assert_eq!(snap[0].images.len(), 1);
+            assert!(snap.iter().all(|e| e.error.is_empty()));
+            // 严格按入队顺序执行。
+            assert_eq!(*stub.calls.lock().unwrap(), vec!["u1", "u2", "u3"]);
+            // running/success 各 3 条 + finished 1 条。
+            assert_eq!(sink.progress.lock().unwrap().len(), 6);
+            assert_eq!(
+                *sink.finished.lock().unwrap(),
+                vec![QueueFinished {
+                    finished: 3,
+                    failed: 0,
+                    total: 3
+                }]
+            );
+        }
     }
 
     #[test]
@@ -971,9 +1006,9 @@ mod tests {
         // 执行器以普通 Err(Internal) 收尾（走 outcome 的 Err 分支，非 panic 兜底）时，
         // 条目的类别必须落到 Internal，前端据此仍允许重试（Internal 在可重试白名单内）。
         let state = state_with(vec![entry("u1", "甲")]);
-        let stub = Arc::new(StubExecutor::new(vec![Err(image_ai::ImageGenError::internal(
-            "任务异常退出",
-        ))]));
+        let stub = Arc::new(StubExecutor::new(vec![Err(
+            image_ai::ImageGenError::internal("任务异常退出"),
+        )]));
         let sink = Arc::new(CollectSink::default());
         let (_finished, failed, _total) = tauri::async_runtime::block_on(drive(
             Arc::clone(&state),
@@ -1366,79 +1401,59 @@ mod tests {
     }
 
     #[test]
-    fn run_queue_dedupes_repeated_stage() {
-        // 适配器可能重复上报同一阶段（如轮询期间多次自检）；队列层按阶段去重，相邻重复只发一次。
-        let state = state_with(vec![entry("u1", "甲")]);
-        let stub = Arc::new(StubExecutor::new(vec![Ok(blank_result())]));
-        *stub.report.lock().unwrap() = vec![
-            GenStage::Submitting,
-            GenStage::Submitting, // 相邻重复 → 丢弃
-            GenStage::Polling,
-            GenStage::Downloading,
-            GenStage::Downloading, // 相邻重复 → 丢弃
+    fn run_queue_dedupes_adjacent_stage_but_keeps_non_adjacent() {
+        // 适配器可能重复上报同一阶段（如轮询期间多次自检）；队列层按「上一个阶段」去重：
+        // 相邻重复只发一次；非相邻重复（Submitting→Polling→Submitting）必须放行。
+        let cases = [
+            (
+                vec![
+                    GenStage::Submitting,
+                    GenStage::Submitting, // 相邻重复 → 丢弃
+                    GenStage::Polling,
+                    GenStage::Downloading,
+                    GenStage::Downloading, // 相邻重复 → 丢弃
+                ],
+                vec!["submitting", "polling", "downloading"],
+            ),
+            (
+                vec![
+                    GenStage::Submitting,
+                    GenStage::Polling,
+                    GenStage::Submitting,
+                ],
+                vec!["submitting", "polling", "submitting"],
+            ),
         ];
-        let sink = Arc::new(CollectSink::default());
-        let (finished, failed, total) = tauri::async_runtime::block_on(drive(
-            Arc::clone(&state),
-            1,
-            Arc::clone(&stub) as Arc<dyn GenExecutor>,
-            Arc::clone(&sink) as Arc<dyn EventSink>,
-        ));
+        for (report, expected) in cases {
+            let state = state_with(vec![entry("u1", "甲")]);
+            let stub = Arc::new(StubExecutor::new(vec![Ok(blank_result())]));
+            *stub.report.lock().unwrap() = report;
+            let sink = Arc::new(CollectSink::default());
+            let (finished, failed, total) = tauri::async_runtime::block_on(drive(
+                Arc::clone(&state),
+                1,
+                Arc::clone(&stub) as Arc<dyn GenExecutor>,
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+            ));
 
-        assert_eq!((finished, failed, total), (1, 0, 1));
-        let events = sink.progress.lock().unwrap();
-        let reported: Vec<Option<String>> = events
-            .iter()
-            .map(|p| p.stage.clone())
-            .filter(|s| s.is_some())
-            .collect();
-        assert_eq!(
-            reported,
-            vec![
-                Some("submitting".into()),
-                Some("polling".into()),
-                Some("downloading".into()),
-            ],
-            "同一阶段相邻重复上报必须被去重"
-        );
-    }
-
-    #[test]
-    fn run_queue_reports_non_adjacent_repeat_stage() {
-        // 去重只比较「上一个阶段」：非相邻的重复（Submitting→Polling→Submitting）应全部放行。
-        let state = state_with(vec![entry("u1", "甲")]);
-        let stub = Arc::new(StubExecutor::new(vec![Ok(blank_result())]));
-        *stub.report.lock().unwrap() = vec![
-            GenStage::Submitting,
-            GenStage::Polling,
-            GenStage::Submitting,
-        ];
-        let sink = Arc::new(CollectSink::default());
-        let (finished, failed, total) = tauri::async_runtime::block_on(drive(
-            Arc::clone(&state),
-            1,
-            Arc::clone(&stub) as Arc<dyn GenExecutor>,
-            Arc::clone(&sink) as Arc<dyn EventSink>,
-        ));
-
-        assert_eq!((finished, failed, total), (1, 0, 1));
-        let reported: Vec<Option<String>> = sink
-            .progress
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|p| p.stage.clone())
-            .filter(|s| s.is_some())
-            .collect();
-        assert_eq!(
-            reported,
-            vec![
-                Some("submitting".into()),
-                Some("polling".into()),
-                Some("submitting".into()),
-            ],
-            "去重只比较相邻阶段，非相邻重复不得被吞"
-        );
+            assert_eq!((finished, failed, total), (1, 0, 1));
+            let reported: Vec<Option<String>> = sink
+                .progress
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.stage.clone())
+                .filter(|s| s.is_some())
+                .collect();
+            assert_eq!(
+                reported,
+                expected
+                    .into_iter()
+                    .map(|s| Some(s.to_string()))
+                    .collect::<Vec<_>>(),
+                "相邻重复去重、非相邻重复放行"
+            );
+        }
     }
 
     #[test]

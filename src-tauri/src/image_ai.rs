@@ -633,7 +633,6 @@ impl GenRequest {
     }
 }
 
-/// 【仅测试】GenRequest 夹具基底：非关键字段全取「空/无」，各测试模块用结构体更新语法
 /// 覆盖差异字段（如 `GenRequest { n: 2, ..test_req_base() }`），让夹具只呈现该用例真正
 /// 关心的字段。集中一份：GenRequest 增删字段时只有这里要改，各处夹具不再逐个同步。
 #[cfg(test)]

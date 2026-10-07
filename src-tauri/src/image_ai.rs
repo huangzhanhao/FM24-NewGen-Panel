@@ -7,9 +7,21 @@
 //! - 原子写复用 json_store。
 //! P2 起多家协议适配成「族」拆在 image_ai_providers/（openai 迁入 + volcano + dashscope），
 //! 本模块只保留契约/配置/渲染与生成编排，生成时按 ProviderKind 经 registry 分发。
+//!
+//! 【代码结构，自上而下】
+//! - 数据契约：ProviderKind、错误分类体系、Capabilities，以及配置/模板/请求/画廊各结构体
+//! - data/ 路径与通用小工具：文件路径约定、new_id / now_ts
+//! - Config：内置默认 + 用户文件双来源加载、内置服务商归并
+//! - CRUD 与准入校验：供命令层调用的增删改，以及生成前唯一校验入口
+//! - 模板渲染：{{key}} / {{key|默认值}}
+//! - 词库/码值回落：出厂默认缓存、随机选取工具
+//! - 球员数据源 → 模板变量：build_vars
+//! - 生成编排 generate：准入校验 → 适配器取字节 → 临时文件 → 画廊记录
+//! - 画廊记录与双淘汰闸门：gallery.json 记录 与 .imgtmp 图片两条独立生命周期
+//! - 单元测试：与源码同文件
 
 use crate::json_store::{self, LoadError};
-use rand::Rng; // new_id() 用 rand::rng().random()（本项目既有模块同样显式导入，见 templates/mod.rs）
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -19,19 +31,20 @@ use std::time::{Duration, SystemTime};
 
 // ===================== 数据契约（与前端 types.ts 一一对应，camelCase）=====================
 
+// ---- 服务商类型 -------------------------------------------------------------
+
 /// 服务商类型：决定适配器。
-/// openai 兼容服务与官方 OpenAI 是**同一套 SDK**（请求/响应同构，
-/// 差异仅在 base_url 与模型名），全仓没有任何一处需要按「是否官方」分流；
-/// 用户自建兼容服务直接用 OpenAI 这一档、改 base_url 即可。
+/// openai 兼容服务与官方 OpenAI 是**同一套 SDK**（请求/响应同构，差异仅在 base_url 与模型名），
+/// 全仓没有任何一处需要按「是否官方」分流；用户自建兼容服务直接用 OpenAI 这一档、改 base_url 即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
-    OpenAI,
-    Volcano,
-    Dashscope,
-    Siliconflow,
-    Modelscope,
-    LocalComfyUI,
+    OpenAI,       // OpenAI 官方 Images 协议（第三方 OpenAI 兼容服务同走此档，改 base_url 即可）
+    Volcano,      // 火山方舟豆包 Seedream（同步 Bearer，响应与 OpenAI 同构）
+    Dashscope,    // 阿里云百炼：千问 Qwen-Image / 万相 Wan / Z-Image（模型目录代码内置）
+    Siliconflow,  // 硅基流动（同步 Bearer，images[].url，尺寸字段 image_size）
+    Modelscope,   // 魔搭 ModelScope（强制异步：提交任务 → 轮询 /tasks/{id}）
+    LocalComfyUI, // 本地 ComfyUI（http://127.0.0.1:8188，无鉴权，提交原生节点工作流）
 }
 
 impl ProviderKind {
@@ -42,31 +55,23 @@ impl ProviderKind {
     }
 }
 
+// ---- 生成链错误分类：类别枚举、结构化错误与厂商错误归类 ------------------------
+
 /// 生成链错误类别（snake_case 序列化，与前端 `GenErrorKind` 一一对应）。
 /// 分类的意义：前端据此给出可执行建议、并判断队列失败条目是否值得重试。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GenErrorKind {
-    /// 服务商/模型/Key 等前置项缺省——用户补全即可，重试无意义。
-    NotConfigured,
-    /// 鉴权失败（401/403 或业务码 InvalidApiKey）。
-    Auth,
-    /// 限流/配额（429 或业务码 Throttling/QuotaExceeded），错峰重试有意义。
-    RateLimited,
-    /// 参数不合法（尺寸/张数/提示词长度等）。
-    InvalidParam,
-    /// 服务商内容审核拦截。
-    ContentRejected,
-    /// 服务商协议/服务端错误（JSON 解析、结构缺失、5xx 等）。
-    Provider,
-    /// 网络传输失败（连接、发送、读体），可重试。
-    Network,
-    /// 本地磁盘/目录 I/O。
-    Io,
-    /// 用户主动取消（队列自造，非服务商返回）。
-    Cancelled,
-    /// 内部异常（队列重入拒绝、任务 panic 兜底等）。
-    Internal,
+    NotConfigured,   // 服务商/模型/Key 等前置项缺省——用户补全即可，重试无意义
+    Auth,            // 鉴权失败（401/403 或业务码 InvalidApiKey）
+    RateLimited,     // 限流/配额（429 或业务码 Throttling/QuotaExceeded），错峰重试有意义
+    InvalidParam,    // 参数不合法（尺寸/张数/提示词长度等）
+    ContentRejected, // 服务商内容审核拦截
+    Provider,        // 服务商协议/服务端错误（JSON 解析、结构缺失、5xx 等）
+    Network,         // 网络传输失败（连接、发送、读体），可重试
+    Io,              // 本地磁盘/目录 I/O
+    Cancelled,       // 用户主动取消（队列自造，非服务商返回）
+    Internal,        // 内部异常（队列重入拒绝、任务 panic 兜底等）
 }
 
 impl GenErrorKind {
@@ -96,9 +101,13 @@ impl GenErrorKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageGenError {
+    /// 错误类别：前端据此分类展示、给出处置建议
     pub kind: GenErrorKind,
+    /// 中文错误文案：构造点原样保留，直接展示给用户
     pub message: String,
+    /// 是否值得重试：队列据此决定失败条目是否展示「重试本条」
     pub retryable: bool,
+    /// 用户可执行的处置建议：按 kind 自动带出，Cancelled/Internal 为 None
     pub user_action: Option<String>,
     /// 服务端 `Retry-After`（秒）：仅当 429 响应的该头可解析为整数秒时填；其余错误一律 None。
     /// 队列重试退避会优先采用它（见 `image_ai_queue::backoff_delay`）。
@@ -107,6 +116,7 @@ pub struct ImageGenError {
 }
 
 impl ImageGenError {
+    /// 私有统一构造：除显式三参外，user_action 按 kind 自动带出、retry_after 初始为 None。
     fn build(kind: GenErrorKind, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             kind,
@@ -128,18 +138,22 @@ impl ImageGenError {
         Self::build(kind, message, kind.default_retryable())
     }
 
+    /// 构造 NotConfigured 类（服务商/模型/Key 等前置项缺省，不可重试）。
     pub fn not_configured(message: impl Into<String>) -> Self {
         Self::new(GenErrorKind::NotConfigured, message)
     }
 
+    /// 构造 InvalidParam 类（参数不合法，不可重试）。
     pub fn invalid_param(message: impl Into<String>) -> Self {
         Self::new(GenErrorKind::InvalidParam, message)
     }
 
+    /// 构造 Network 类（连接/发送/读体失败，默认可重试）。
     pub fn network(message: impl Into<String>) -> Self {
         Self::new(GenErrorKind::Network, message)
     }
 
+    /// 构造 Io 类（本地磁盘/目录错误，不可重试）。
     pub fn io(message: impl Into<String>) -> Self {
         Self::new(GenErrorKind::Io, message)
     }
@@ -149,10 +163,12 @@ impl ImageGenError {
         Self::build(GenErrorKind::Provider, message, retryable)
     }
 
+    /// 构造 Cancelled 类，文案固定「已取消」（队列任务被用户取消时用）。
     pub fn cancelled() -> Self {
         Self::new(GenErrorKind::Cancelled, "已取消")
     }
 
+    /// 构造 Internal 类（队列重入拒绝、任务 panic 兜底等内部异常，不可重试）。
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(GenErrorKind::Internal, message)
     }
@@ -206,44 +222,45 @@ pub fn classify_provider_error(
     from_http_status(status, message)
 }
 
+// ---- 模型能力集：SizeRules（自由尺寸规则）/ Capabilities（UI 显隐与适配器发参依据）----
+
 /// 自由尺寸规则：约束**只对不在 `sizes` 预设里的自定义值**生效（见 `validate_model_caps`），
 /// 每条 0 = 不检查。尺寸字符串为 `宽*高`/`宽x高` 形态；各模型的具体区间由内置目录逐模型声明
 /// （见 `image_ai_providers::dashscope` 的各 `*_caps`），取值逐字对齐官方文档。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SizeRules {
-    /// 单边下限像素（宽/高各自，0 = 不检查）。
     #[serde(default)]
-    pub min_side: u32,
-    /// 单边上限像素（0 = 不检查）。
+    pub min_side: u32, // 单边下限像素（宽/高各自，0 = 不检查）
     #[serde(default)]
-    pub max_side: u32,
-    /// 总像素（宽×高）下限（0 = 不检查）。
+    pub max_side: u32, // 单边上限像素（0 = 不检查）
     #[serde(default)]
-    pub total_min: u64,
-    /// 总像素上限（0 = 不检查）。
+    pub total_min: u64, // 总像素（宽×高）下限（0 = 不检查）
     #[serde(default)]
-    pub total_max: u64,
-    /// 宽高比下限（短边/长边口径，如 1:4 = 0.25；0 = 不检查）。
+    pub total_max: u64, // 总像素上限（0 = 不检查）
     #[serde(default)]
-    pub ratio_min: f32,
-    /// 宽高比上限（如 4:1 = 4.0；0 = 不检查）。
+    pub ratio_min: f32, // 宽高比下限（短边/长边口径，如 1:4 = 0.25；0 = 不检查）
     #[serde(default)]
-    pub ratio_max: f32,
+    pub ratio_max: f32, // 宽高比上限（如 4:1 = 4.0；0 = 不检查）
 }
 
 /// 模型能力集：UI 按此显隐参数，适配器按此决定是否传参。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
+    /// 该模型支持的预设尺寸枚举（如 "1024x1024"、"4K"）；不在枚举内的自定义尺寸另由 size_rules 校验
     #[serde(default)]
     pub sizes: Vec<String>,
+    /// 单次请求最大张数（0 = 不声明上限）；缺省 1
     #[serde(default = "one")]
     pub max_n: u32,
+    /// 是否支持 quality（画质档）参数，可选值见 qualities
     #[serde(default)]
     pub supports_quality: bool,
+    /// 是否支持 seed（随机种子）参数
     #[serde(default)]
     pub supports_seed: bool,
+    /// 是否支持 steps（采样步数）参数
     #[serde(default)]
     pub supports_steps: bool,
     /// 采样步数上限（0 = 不校验；配合 `supports_steps`）。硅基流动 `num_inference_steps`（≤100）、魔搭 `steps`（≤100）用。
@@ -261,6 +278,7 @@ pub struct Capabilities {
     /// 引导系数上限（0 = 不校验）。
     #[serde(default)]
     pub guidance_max: f32,
+    /// 是否支持 negative_prompt（反向提示词）参数
     #[serde(default)]
     pub supports_negative_prompt: bool,
     /// 是否可传 `response_format`。OpenAI 官方 gpt-image-1 系列**不支持**该参数
@@ -272,6 +290,7 @@ pub struct Capabilities {
     /// 4.5/4.0 只回 jpeg、传参报错，故置 false 整条省略。OpenAI/百炼不用此参数。
     #[serde(default)]
     pub supports_output_format: bool,
+    /// quality 参数可选值枚举（如 standard/high）；空 = 该模型不支持画质档
     #[serde(default)]
     pub qualities: Vec<String>,
     /// 百炼 `prompt_extend`：大模型智能改写正向提示词（+3–4 秒；关闭可规避版权审核拦截）。
@@ -320,10 +339,12 @@ pub struct Capabilities {
     pub supports_async: bool,
 }
 
+/// serde 缺省值函数：`#[serde(default = "one")]` 在字段缺失时填 1（如 max_n、n）。
 fn one() -> u32 {
     1
 }
 
+/// serde 缺省值函数：`#[serde(default = "yes")]` 在字段缺失时填 true（各能力开关的缺省档）。
 fn yes() -> bool {
     true
 }
@@ -333,11 +354,15 @@ fn direct() -> String {
     "direct".into()
 }
 
+// ---- 配置文件结构：ModelInfo / ProviderConfig / GenSettings / ImageAiFile ------
+
 /// 一个模型行。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
+    /// 模型名：厂商 API 请求体 `model` 字段的原值（如 "gpt-image-1"）
     pub model: String,
+    /// 该模型的能力集：UI 据此显隐参数、适配器据此决定发哪些字段
     #[serde(default)]
     pub capabilities: Capabilities,
 }
@@ -346,11 +371,17 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
+    /// 服务商唯一标识：前端选择与增删改的判据；"openai" 为内置保留 id，不可删
     pub id: String,
+    /// 协议种类：决定适配器分发；内置服务商此项恒由代码归位（见 reconcile_one_builtin）
     pub kind: ProviderKind,
+    /// 界面显示名（用户可改）
     pub name: String,
+    /// API 基址：适配器据此拼端点（本地 ComfyUI 形如 http://127.0.0.1:8188）
     pub base_url: String,
+    /// 默认模型名；models 中无对应明细行时，Config::model 据此合成一行通用能力模型
     pub default_model: String,
+    /// 模型明细行（尺寸/张数/能力位）；可为空——空时只有 default_model 可放行且高级能力全关
     #[serde(default)]
     pub models: Vec<ModelInfo>,
 }
@@ -359,6 +390,7 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenSettings {
+    /// 默认服务商 id；若指向已不存在的服务商，启动时归位为 "openai"
     pub default_provider_id: String,
     /// 临时图片上限：仅由 `enforce_image_limit` 消费（决定 `.imgtmp` 保留几张图）。
     pub history_limit: usize,
@@ -366,7 +398,9 @@ pub struct GenSettings {
     /// 与 history_limit 是两条独立闸门的上限，**互不换算**；旧用户文件没有该字段，故带缺省。
     #[serde(default = "gallery_limit")]
     pub gallery_record_limit: usize,
+    /// 批量生成队列的并发任务数
     pub concurrency: u32,
+    /// 保存图片的文件名模板（支持 {uid}/{index} 等占位）
     pub naming_pattern: String,
 }
 
@@ -398,6 +432,8 @@ pub struct ImageAiFile {
     pub settings: GenSettings,
 }
 
+// ---- 提示词模板：DetailPools（随机词库）/ PromptTemplate / CodeMaps（码值映射）----
+
 /// 模板自带的随机细节词库：`{{hairStyle}}` 等占位符的候选池。
 /// 之所以挂在模板结构上而不是写成代码常量——这些全是**内容**（中文措辞），
 /// 要能即改即生效，和 body/negative 同等待遇。各池为空时回落内置默认模板的同名词库
@@ -410,17 +446,17 @@ pub struct DetailPools {
     #[serde(default)]
     pub hair_style_by_length: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub beard: Vec<String>,
+    pub beard: Vec<String>, // 胡须候选
     #[serde(default)]
-    pub expression: Vec<String>,
+    pub expression: Vec<String>, // 表情候选
     #[serde(default)]
-    pub pose: Vec<String>,
+    pub pose: Vec<String>, // 动作/姿态候选
     #[serde(default)]
-    pub lighting: Vec<String>,
+    pub lighting: Vec<String>, // 打光候选
     #[serde(default)]
-    pub bg_tone: Vec<String>,
+    pub bg_tone: Vec<String>, // 背景色调候选
     #[serde(default)]
-    pub kit_detail: Vec<String>,
+    pub kit_detail: Vec<String>, // 球衣细节候选
 }
 
 impl DetailPools {
@@ -517,28 +553,41 @@ impl Serialize for CodeMaps {
     }
 }
 
+// ---- 生成请求：GenRequest（含内部回填字段与能力快照访问器）--------------------
+
 /// 一次生成请求。
 /// 【Serialize】批量生成队列的条目（image_ai_queue::QueueEntry 内嵌本类型）要经 IPC
 /// 回传快照，序列化方向也需要——字段无新增，仅补派生。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenRequest {
+    /// 目标服务商 id（对应 ProviderConfig.id）
     pub provider_id: String,
+    /// 模型名（对应 ModelInfo.model，或该服务商的 default_model）
     pub model: String,
+    /// 正向提示词最终文本：模板渲染并经用户编辑确认后的全文
     pub prompt: String,
+    /// 反向提示词：模型不支持时适配器整条省略
     #[serde(default)]
     pub negative_prompt: String,
+    /// 尺寸字符串：sizes 预设值，或 `宽*高`/`宽x高` 形态的自定义值
     pub size: String,
+    /// 单次生成张数（缺省 1；上限由模型 max_n 校验）
     #[serde(default = "one")]
     pub n: u32,
+    /// 画质档：取模型 qualities 的声明值；None = 不传该参数
     #[serde(default)]
     pub quality: Option<String>,
+    /// 随机种子：仅模型 supports_seed 且用户填了才发（非负）
     #[serde(default)]
     pub seed: Option<i64>,
+    /// 采样步数：仅模型 supports_steps 时消费
     #[serde(default)]
     pub steps: Option<u32>,
+    /// 引导系数（CFG）：仅模型 supports_guidance 时消费
     #[serde(default)]
     pub guidance: Option<f32>,
+    /// 球员 UID：写入画廊记录用于关联；无数据源时为 None
     #[serde(default)]
     pub uid: Option<String>,
     /// 球员名：仅用于画廊记录展示。前端单张取数据源球员名、批量取入队行名，
@@ -597,14 +646,19 @@ fn default_caps() -> Capabilities {
     }
 }
 
+// ---- 生成结果：GenImage / GenResult ------------------------------------------
+
 /// 一张临时图片元信息。
 /// 【Deserialize】批量生成队列的条目经 IPC 往返（image_ai_queue::QueueEntry 内嵌本类型），
 /// 反序列化方向也需要它——前端提交的新条目 images 恒为空，字段本身不产生新契约。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenImage {
+    /// 图片 id（16 位随机十六进制）：同时是 .imgtmp 文件名 stem 与画廊记录 id
     pub id: String,
+    /// 临时图片绝对路径（`.imgtmp/{id}.{扩展名}`，扩展名随厂商返回格式而定）
     pub path: String,
+    /// 图片字节数
     pub bytes: u64,
 }
 
@@ -615,13 +669,17 @@ pub struct GenResult {
     pub images: Vec<GenImage>,
 }
 
+// ---- 画廊记录契约：GalleryRecord（持久记录）/ GalleryItem（查询期现算存在性）----
+
 /// 一条画廊记录：持久保存在 `data_dir/gallery.json`（不随会话清理，与 `.imgtmp` 里的图片字节
 /// 是两条独立生命周期）。除 id/ts 外的字段都可缺省，兼容旧文件与后续字段演进。
 /// ts 为写入时间（now_ts 格式），该格式字典序即时间序，淘汰与排序据此判断新旧。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GalleryRecord {
+    /// 记录 id（= GenImage.id = .imgtmp 文件 stem）：画廊查询据此 stem 匹配图片是否仍在
     pub id: String,
+    /// 写入时间（now_ts 格式）：字典序即时间序，淘汰与排序据此判新旧
     pub ts: String,
     #[serde(default)]
     pub uid: Option<String>,
@@ -649,14 +707,17 @@ pub struct GalleryItem {
     pub path: Option<String>,
 }
 
-// ===================== data/ 路径（与既有路径工具同居一层风格）=====================
+// ===================== data/ 路径与通用小工具（与既有路径工具同居一层风格）=========
 
+/// 服务商与设置文件：`{data_dir}/image_ai.json`。
 pub fn providers_path(d: &Path) -> PathBuf {
     d.join("image_ai.json")
 }
+/// 提示词模板文件：`{data_dir}/prompts/templates.json`。
 pub fn templates_path(d: &Path) -> PathBuf {
     d.join("prompts").join("templates.json")
 }
+/// 会话临时图片目录：`{data_dir}/.imgtmp`，每次启动清空重建（见 `Config::prepare_session`）。
 pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
 }
@@ -664,6 +725,17 @@ pub fn tmp_dir(d: &Path) -> PathBuf {
 /// 记录必须留在这里才能跨会话存活。
 pub fn gallery_path(d: &Path) -> PathBuf {
     d.join("gallery.json")
+}
+
+/// 临时图片/画廊记录共用的随机 id：8 字节十六进制（16 字符）。
+pub fn new_id() -> String {
+    let bytes: [u8; 8] = rand::rng().random();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 画廊记录时间戳：`%Y-%m-%d %H:%M:%S`，字典序即时间序，淘汰与排序据此判新旧。
+pub fn now_ts() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 // ===================== Config：内置默认 + 用户文件双来源（仿 templates::RuleConfig）=====================
@@ -747,8 +819,8 @@ impl Config {
             Err(LoadError::Corrupt(e)) => return Err(format!("{}（{e}）", pp.display())),
         };
         let mut changed = false;
-        // 代码内置服务商（百炼/火山）：缺失整块注入，已存在只归位 kind；模型行与默认模型
-        // 归用户所有（可增删改且不被复活），内置目录的更新不会自动推送到老配置。
+        // 代码内置服务商（百炼/火山/硅基流动/魔搭/ComfyUI）：缺失整块注入，已存在只归位 kind；
+        // 模型行与默认模型归用户所有（可增删改且不被复活），内置目录的更新不会自动推送到老配置。
         // 详见 reconcile_builtin_providers。
         if reconcile_builtin_providers(&mut file.providers) {
             changed = true;
@@ -829,16 +901,18 @@ impl Config {
         )
     }
 
+    /// 持久化模板列表（模板 CRUD 命令收尾调用）。
     pub fn save_templates(&self, d: &Path) -> Result<(), String> {
         json_store::save(&templates_path(d), &self.templates)
     }
 
+    /// 按 id 查服务商配置；不存在返回 None。
     pub fn provider(&self, id: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.id == id)
     }
 
     /// 查模型明细行；查不到时按「默认模型」兜底合成一行通用模型。
-    /// 【为什么兜底】custom（OpenAI 兼容服务）服务商只有 default_model 一个字符串，
+    /// 【为什么兜底】自建的 OpenAI 兼容服务商可能只有 default_model 一个字符串，
     /// 模型明细行（尺寸/能力）要手工编辑 image_ai.json 才有——若校验死盯明细行，
     /// 用户填了默认模型也会被「请先选择模型」拦住（实测反馈）。合成的行为：
     /// 不限张数（max_n=0）、不发 response_format/seed 等高级参数（能力默认 false）；
@@ -858,12 +932,14 @@ impl Config {
     }
 }
 
+// ---- 内置服务商归并（builtin/load/ensure 三处同口径）--------------------------
+
 /// 把代码内置的服务商并入一份服务商列表（builtin/load/ensure 三处同口径）。
 ///
 /// 当前有五个代码内置服务商：百炼 dashscope、火山 volcano、硅基流动 siliconflow、
 /// 魔搭 modelscope、本地 ComfyUI，目录均不写 assets/image_ai.json。对每个内置服务商：
 /// - 列表中没有：**整块补入内置服务商**（新装/首次导入即得到完整目录）；
-/// - 已有：**只归位 kind，模型行/默认模型/名称/地址，
+/// - 已有：**只归位 kind**；模型行/默认模型/名称/地址
 ///   由「服务商设置」弹窗内的模型清单增删改。
 ///   【刻意取舍，不是遗漏】代价是新内置模型不随版本推送、旧模型下线也不自动清理；
 ///   换来的是「对模型的增删改可保留」——若改成「只补缺失」，用户删掉的内置模型
@@ -902,6 +978,7 @@ fn reconcile_one_builtin(providers: &mut Vec<ProviderConfig>, builtin: ProviderC
 
 // ===================== CRUD 辅助（命令层调用；校验失败返回中文错误）=====================
 
+/// 新增或更新服务商（按 id 去重：同 id 整体替换、否则追加）；id/name trim 后为空则报中文错误。
 pub fn upsert_provider(cfg: &mut Config, mut p: ProviderConfig) -> Result<(), String> {
     p.id = p.id.trim().to_string();
     p.name = p.name.trim().to_string();
@@ -928,6 +1005,7 @@ pub fn remove_provider(cfg: &mut Config, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 新增或更新模板（按 id 去重：同 id 整体替换、否则追加）；id/name/body trim 后为空则报中文错误。
 pub fn upsert_template(cfg: &mut Config, mut t: PromptTemplate) -> Result<(), String> {
     t.name = t.name.trim().to_string();
     t.body = t.body.trim().to_string();
@@ -941,6 +1019,7 @@ pub fn upsert_template(cfg: &mut Config, mut t: PromptTemplate) -> Result<(), St
     Ok(())
 }
 
+/// 删除模板（按 id）；"default" 为内置默认模板，受保护不可删。
 pub fn remove_template(cfg: &mut Config, id: &str) -> Result<(), String> {
     if id == "default" {
         return Err("默认模板不可删除".into());
@@ -984,6 +1063,7 @@ pub(crate) fn validate_for_generate(cfg: &Config, req: &GenRequest) -> Result<()
     probe.caps = Some(model.capabilities.clone());
     crate::image_ai_providers::for_kind(provider.kind).validate(&probe, &model.capabilities)
 }
+
 // ===================== 模板渲染：{{key}} / {{key|默认值}} =====================
 
 /// 渲染结果（跨 IPC 返回给前端，故需 Serialize + camelCase）。
@@ -992,10 +1072,18 @@ pub(crate) fn validate_for_generate(cfg: &Config, req: &GenRequest) -> Result<()
 pub struct RenderOutcome {
     /// 渲染后的文本（有默认值的占位符展开为默认值，命中 vars 的展开为变量值）。
     pub text: String,
-    /// 既无 vars 值、又无默认值的占位符键名（P1 无数据源，出现即需用户手工处理）。
+    /// 既无 vars 值、又无默认值的占位符键名（无数据源时出现即需用户手工处理）。
     pub missing: Vec<String>,
 }
 
+/// 渲染模板正文：`{{key}}` 展开为 vars 中的值，`{{key|默认值}}` 在 vars 缺该键时展开为
+/// 默认值；普通文本（含孤立的单个 `{`）原样输出。
+///
+/// - `body`：模板正文，占位符中的键名与默认值会先 trim；
+/// - `vars`：模板变量表（通常由 build_vars 从球员记录构建）。
+///
+/// 既无变量值又无默认值的占位符展开为空串，键名去重后按首次出现顺序计入 missing，
+/// 供前端提示用户手工补全。
 pub fn render(body: &str, vars: &HashMap<String, String>) -> RenderOutcome {
     let mut out = String::new();
     let mut missing: Vec<String> = Vec::new();
@@ -1054,6 +1142,8 @@ static BUILTIN_CODES: LazyLock<CodeMaps> = LazyLock::new(|| {
         .unwrap_or_default()
 });
 
+// ---- 基础名单肤色随机区间（按族裔的统计分位，build_vars 随机补足时用）------------
+
 /// 肤色随机区间（族裔 0–10 各一项，取自真实导出名单的 5%~95% 分位）。
 /// 肤色码 0 = 最浅、19 = 最深；区间是统计值，编辑器对个别球员的赋值可能偏离，
 /// 取用时上下各放 1 档余量（见 build_vars），宁可略宽也不制造人为聚集。
@@ -1071,6 +1161,8 @@ const SKIN_RANGE_BY_ETHNICITY: [(u32, u32); 11] = [
     (6, 16),  // 9 黑白混血
     (5, 8),   // 10 东亚
 ];
+
+// ---- 随机选取与「模板优先、出厂兜底」的逐组回落工具 ----------------------------
 
 /// 从候选池随机取一项。调用方须保证池非空（空池在 build_vars 处直接跳过该变量，
 /// 让模板自己的 `{{key|默认值}}` 接管）。
@@ -1114,9 +1206,13 @@ fn random_hair_color(hair_colors: &HashMap<String, String>) -> String {
     pick(&pool).to_string()
 }
 
-// ===================== 球员数据源 → 模板变量（P3：与 render 同层的纯函数） =====================
+// ===================== 球员数据源 → 模板变量（与 render 同层的纯函数）=====================
 
 /// 从球员记录构建模板变量，并补足 RTF 未声明的维度。
+///
+/// # 参数
+/// - `rec`：RTF 扫出的球员记录（基础名单 detailed=None，或带拓展信息的详细名单）；
+/// - `tpl`：本次使用的提示词模板，其 codes/pools 为空的分组逐组回落出厂默认。
 ///
 /// 【缺字段不入 map vs 随机补足】码值类字段（`ethnicity`/`hairColor`/`skinCode`）为空
 /// 或映射里查不到该码时一律不入 map，留给模板 `{{key|默认值}}` 兜底——裸数字（如 `15`）
@@ -1141,8 +1237,8 @@ pub fn build_vars(
         vars.insert("nationality".into(), cn.clone());
     }
     let codes = &tpl.codes;
-    if let Some(v) = codes_or_builtin(&codes.ethnicity, &BUILTIN_CODES.ethnicity)
-        .get(&rec.ethnicity_code)
+    if let Some(v) =
+        codes_or_builtin(&codes.ethnicity, &BUILTIN_CODES.ethnicity).get(&rec.ethnicity_code)
     {
         vars.insert("ethnicity".into(), v.clone());
     }
@@ -1163,8 +1259,8 @@ pub fn build_vars(
     let mut club = String::new();
     if let Some(d) = &rec.detailed {
         if !d.skin_code.is_empty() {
-            if let Some(v) = codes_or_builtin(&codes.skin_code, &BUILTIN_CODES.skin_code)
-                .get(&d.skin_code)
+            if let Some(v) =
+                codes_or_builtin(&codes.skin_code, &BUILTIN_CODES.skin_code).get(&d.skin_code)
             {
                 vars.insert("skinCode".into(), v.clone());
             }
@@ -1205,7 +1301,12 @@ pub fn build_vars(
     if !vars.contains_key("gender") {
         vars.insert(
             "gender".into(),
-            if rand::rng().random_bool(0.85) { "男" } else { "女" }.into(),
+            if rand::rng().random_bool(0.85) {
+                "男"
+            } else {
+                "女"
+            }
+            .into(),
         );
     }
     if !vars.contains_key("age") {
@@ -1264,18 +1365,17 @@ pub fn build_vars(
     vars
 }
 
-// ===================== 生成编排：适配器 → 字节 → 临时文件 → 估价 =====================
+// ===================== 生成编排：准入校验 → 适配器取字节 → 临时文件 → 画廊记录 =====
 
-pub fn new_id() -> String {
-    let bytes: [u8; 8] = rand::rng().random();
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-pub fn now_ts() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
-}
-
-/// 执行一次生成并写台账（成功/失败都写）。失败台账写入失败不掩盖原始错误。
+/// 执行一次生成：解析服务商/模型 → 唯一准入校验 → 适配器取回图片字节 → 落盘 `.imgtmp`
+/// → 写画廊记录并按上限裁剪。画廊记录写入与图片裁剪失败只告警，不掩盖已成功落盘的生成。
+///
+/// # 参数
+/// - `data_dir`：应用数据目录（`.imgtmp` 与 `gallery.json` 都在其下）；
+/// - `cfg`：生效配置（服务商/模型/能力集与两道淘汰闸门上限取自此处）；
+/// - `key`：API Key，仅存活于会话内存、不落盘（本地 ComfyUI 免鉴权，传空串）；
+/// - `req`：生成请求；本函数会回填其内部字段 base_url、caps，并门控 call_mode；
+/// - `progress`：阶段回调（提交/轮询/下载），由适配器在执行链上按序上报，本层只透传。
 pub async fn generate(
     data_dir: &Path,
     cfg: &Config,
@@ -1495,6 +1595,7 @@ pub fn load_gallery_items(data_dir: &Path) -> Vec<GalleryItem> {
         })
         .collect()
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1567,7 +1668,9 @@ mod tests {
     #[test]
     fn caps_none_falls_back_to_legacy_serde_defaults() {
         // 快照缺省时 caps() 的兜底必须与改前 GenRequest 各能力字段的 serde 缺省**逐条等价**。
-        let r = gen_req(); // 直接构造：caps = None
+        // 访问器只认 Option，与 caps 如何变成 None 无关——故同用例覆盖两条路径：
+        // 单测直接构造，与旧快照回放（JSON 无 caps 字段反序列化）。
+        let r = gen_req(); // 路径一：直接构造，caps = None
         assert!(r.caps.is_none());
         let c = r.caps();
         assert!(!c.supports_response_format); // 旧字段缺省 false
@@ -1583,11 +1686,8 @@ mod tests {
         assert!(!c.watermark_default);
         // 对照：Capabilities::default() 的 supports_n 为 false，故兜底不能省。
         assert!(!Capabilities::default().supports_n);
-    }
 
-    #[test]
-    fn caps_none_from_legacy_snapshot_uses_fallback() {
-        // 旧快照（JSON 无 caps 字段）反序列化后 caps==None，访问器同样给旧语义。
+        // 路径二：旧快照（JSON 无 caps 字段）反序列化后同样落 None、给同一兜底。
         let v: GenRequest = serde_json::from_str(
             r#"{"providerId":"dashscope","model":"z-image-turbo","prompt":"x","size":"1024x1024"}"#,
         )
@@ -1595,69 +1695,6 @@ mod tests {
         assert!(v.caps.is_none());
         assert!(v.caps().supports_n && v.caps().enable_thinking_default);
         assert_eq!(v.caps().prompt_extend_mode_default, "direct");
-    }
-
-    #[test]
-    fn ensure_creates_files_and_is_idempotent() {
-        let root = tempfile::tempdir().unwrap();
-        Config::ensure_user_files(root.path()).unwrap();
-        assert!(providers_path(root.path()).is_file());
-        assert!(templates_path(root.path()).is_file());
-        let before = fs::read_to_string(providers_path(root.path())).unwrap();
-        Config::ensure_user_files(root.path()).unwrap();
-        assert_eq!(
-            before,
-            fs::read_to_string(providers_path(root.path())).unwrap()
-        );
-    }
-
-    #[test]
-    fn ensure_injects_siliconflow_and_modelscope_into_existing_file() {
-        // 升级路径：老用户文件里没有 siliconflow / modelscope —— 启动时 ensure_user_files
-        // 必须把两个服务商整块补入并落盘，否则界面上看不到它们（「正常加载」的可证证据）。
-        let root = tempfile::tempdir().unwrap();
-        let existing = serde_json::json!({
-            "providers": [{
-                "id": "openai",
-                "kind": "openai",
-                "name": "OpenAI",
-                "baseUrl": "https://api.openai.com/v1",
-                "defaultModel": "gpt-image-1",
-                "models": [{ "model": "gpt-image-1", "capabilities": {} }]
-            }],
-            "settings": {
-                "defaultProviderId": "openai",
-                "historyLimit": 20,
-                "concurrency": 2,
-                "namingPattern": "{uid}_{index}"
-            }
-        });
-        fs::write(providers_path(root.path()), existing.to_string()).unwrap();
-
-        Config::ensure_user_files(root.path()).unwrap();
-
-        let cfg = Config::load(root.path()).unwrap();
-        let sf = cfg.provider("siliconflow").expect("硅基流动必须被补入");
-        assert_eq!(sf.kind, ProviderKind::Siliconflow);
-        assert_eq!(sf.base_url, "https://api.siliconflow.cn/v1");
-        assert_eq!(sf.default_model, "Qwen/Qwen-Image");
-        assert_eq!(sf.models.len(), 2);
-        let ms = cfg.provider("modelscope").expect("魔搭必须被补入");
-        assert_eq!(ms.kind, ProviderKind::Modelscope);
-        assert_eq!(ms.base_url, "https://api-inference.modelscope.cn/v1");
-        assert_eq!(ms.default_model, "Qwen/Qwen-Image-2.1");
-        assert_eq!(ms.models.len(), 3);
-        // 用户原有的 openai 条不被覆盖。
-        assert_eq!(cfg.provider("openai").unwrap().default_model, "gpt-image-1");
-    }
-
-    #[test]
-    fn prepare_session_wipes_tmp_dir() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp_dir(root.path())).unwrap();
-        fs::write(tmp_dir(root.path()).join("x.png"), b"x").unwrap();
-        Config::prepare_session(root.path()).unwrap();
-        assert!(!tmp_dir(root.path()).join("x.png").exists());
     }
 
     #[test]
@@ -1699,14 +1736,6 @@ mod tests {
         assert_eq!(r.missing, vec!["hairLength", "name"]);
         let r = render("只有 { 一个括号", &vars(&[]));
         assert_eq!(r.text, "只有 { 一个括号");
-    }
-
-    #[test]
-    fn builtin_openai_disables_response_format() {
-        // 出厂 gpt-image-1 必须关掉该能力。
-        let cfg = Config::builtin();
-        let openai = cfg.model("openai", "gpt-image-1").unwrap();
-        assert!(!openai.capabilities.supports_response_format);
     }
 
     #[test]
@@ -1873,6 +1902,9 @@ mod tests {
         assert_eq!(comfy.kind, ProviderKind::LocalComfyUI);
         assert!(!comfy.kind.needs_key());
         assert_eq!(comfy.base_url, "http://127.0.0.1:8188");
+        // 出厂 gpt-image-1 必须关掉 response_format（官方不支持该参数，传了会 400）。
+        let openai = cfg.model("openai", "gpt-image-1").unwrap();
+        assert!(!openai.capabilities.supports_response_format);
         // 火山能力抽查：新模型 ID、单张、无 seed/n、有水印与 output_format。
         let flash = cfg
             .model("volcano", "doubao-seedream-5-0-flash-260915")
@@ -1908,6 +1940,11 @@ mod tests {
         assert!(!z.capabilities.prompt_extend_default);
         // 旧模型（wanx2.1）已下线：目录中查不到。
         assert!(cfg.model("dashscope", "wanx2.1-t2i-turbo").is_none());
+        // 目录规模与默认模型（assets/image_ai.json 不含百炼块，由 reconcile 代码注入）：
+        // 新增/下线模型时此快照会强制失败，提醒同步审查默认模型与模型总数。
+        let ds = cfg.provider("dashscope").unwrap();
+        assert_eq!(ds.default_model, "z-image-turbo");
+        assert_eq!(ds.models.len(), 6);
 
         // 硅基流动：Qwen-Image 无 batch_size、字段名走 image_size；Kolors 有 batch_size + guidance。
         let sf_qwen = cfg.model("siliconflow", "Qwen/Qwen-Image").unwrap();
@@ -1924,15 +1961,6 @@ mod tests {
         assert_eq!(ms.capabilities.max_n, 1);
         assert!(!ms.capabilities.supports_n);
         assert!(ms.capabilities.supports_steps && ms.capabilities.supports_guidance);
-    }
-
-    #[test]
-    fn dashscope_catalog_is_injected_even_when_json_has_no_entry() {
-        // assets/image_ai.json 已不含 dashscope 块：builtin 仍须注入代码内置目录。
-        let cfg = Config::builtin();
-        let p = cfg.provider("dashscope").expect("内置百炼服务商必须存在");
-        assert_eq!(p.default_model, "z-image-turbo");
-        assert_eq!(p.models.len(), 6);
     }
 
     #[test]
@@ -2033,32 +2061,34 @@ mod tests {
     }
 
     #[test]
-    fn volcano_catalog_is_injected_even_when_json_has_no_entry() {
-        // assets/image_ai.json 已不含 volcano 块：builtin 仍须注入代码内置的五模型目录。
-        let cfg = Config::builtin();
-        let p = cfg.provider("volcano").expect("内置火山服务商必须存在");
-        assert_eq!(p.kind, ProviderKind::Volcano);
-        assert_eq!(p.default_model, "doubao-seedream-5-0-flash-260915");
-        assert_eq!(p.models.len(), 5);
-    }
-
-    #[test]
-    fn ensure_keeps_existing_dashscope_entry_untouched() {
-        // 既有 dashscope 条的模型行归用户所有：ensure 不得用内置目录覆盖它，
-        // 否则用户在弹窗里增删改的模型会被启动流程抹掉。
+    fn ensure_upgrade_injects_missing_builtins_and_keeps_user_entries() {
+        // 升级路径全场景：老用户文件里只有 openai 与一个用户定制的 dashscope 条——
+        // ensure 必须把缺失的内置服务商整块补入并落盘（否则界面上看不到它们），
+        // 同时**逐字段保留**用户已有条目（模型行/默认模型/名称/地址归用户所有，
+        // 不得用内置目录覆盖，否则弹窗里增删改的模型会被启动流程抹掉）。
         let root = tempfile::tempdir().unwrap();
         let existing = serde_json::json!({
-            "providers": [{
-                "id": "dashscope",
-                "kind": "dashscope",
-                "name": "百炼通义万相",
-                "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
-                "defaultModel": "my-own-model",
-                "models": [{
-                    "model": "my-own-model",
-                    "capabilities": {}
-                }]
-            }],
+            "providers": [
+                {
+                    "id": "openai",
+                    "kind": "openai",
+                    "name": "OpenAI",
+                    "baseUrl": "https://api.openai.com/v1",
+                    "defaultModel": "gpt-image-1",
+                    "models": [{ "model": "gpt-image-1", "capabilities": {} }]
+                },
+                {
+                    "id": "dashscope",
+                    "kind": "dashscope",
+                    "name": "百炼通义万相",
+                    "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
+                    "defaultModel": "my-own-model",
+                    "models": [{
+                        "model": "my-own-model",
+                        "capabilities": {}
+                    }]
+                }
+            ],
             "settings": {
                 "defaultProviderId": "dashscope",
                 "historyLimit": 20,
@@ -2071,14 +2101,25 @@ mod tests {
         Config::ensure_user_files(root.path()).unwrap();
 
         let cfg = Config::load(root.path()).unwrap();
+        // 用户原有条目不被覆盖：openai 原样、dashscope 逐字段保留。
+        assert_eq!(cfg.provider("openai").unwrap().default_model, "gpt-image-1");
         let ds = cfg.provider("dashscope").unwrap();
         assert_eq!(ds.name, "百炼通义万相");
         assert_eq!(ds.models.len(), 1, "不整表补入内置目录");
         assert_eq!(ds.models[0].model, "my-own-model");
         assert_eq!(ds.default_model, "my-own-model", "默认模型不被校正");
-        // 缺失的内置服务商仍会补齐（openai / volcano），dashscope 不在其中。
-        assert!(cfg.provider("openai").is_some());
+        // 缺失的内置服务商整块补入，目录细节可证（「正常加载」的证据）。
         assert!(cfg.provider("volcano").is_some());
+        let sf = cfg.provider("siliconflow").expect("硅基流动必须被补入");
+        assert_eq!(sf.kind, ProviderKind::Siliconflow);
+        assert_eq!(sf.base_url, "https://api.siliconflow.cn/v1");
+        assert_eq!(sf.default_model, "Qwen/Qwen-Image");
+        assert_eq!(sf.models.len(), 2);
+        let ms = cfg.provider("modelscope").expect("魔搭必须被补入");
+        assert_eq!(ms.kind, ProviderKind::Modelscope);
+        assert_eq!(ms.base_url, "https://api-inference.modelscope.cn/v1");
+        assert_eq!(ms.default_model, "Qwen/Qwen-Image-2.1");
+        assert_eq!(ms.models.len(), 3);
         // 再次 ensure 幂等：不再产生写盘变更。
         let before = fs::read_to_string(providers_path(root.path())).unwrap();
         Config::ensure_user_files(root.path()).unwrap();
@@ -2176,17 +2217,30 @@ mod tests {
     }
 
     #[test]
-    fn enforce_image_limit_zero_means_no_trim() {
-        // limit==0 视为「不裁剪」：三张图全留（图片闸门早返回）
+    fn zero_limit_disables_both_gates() {
+        // 两道闸门同一口径：limit==0 一律视为「不裁剪」。同一目录内同时验证，
+        // 顺带锁定两闸互不越界（图片闸不碰记录、记录闸不碰图）。
         let dir = tempfile::tempdir().unwrap();
         let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
         for id in &ids {
             fake_image(dir.path(), id);
         }
+        let recs: Vec<GalleryRecord> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| gallery_rec(id, i as u32))
+            .collect();
+        json_store::save(&gallery_path(dir.path()), &recs).unwrap();
+
         enforce_image_limit(dir.path(), 0).unwrap();
+        enforce_gallery_limit(dir.path(), 0).unwrap();
+
+        // 三张图全留（图片闸门早返回）
         for id in &ids {
             assert!(tmp_dir(dir.path()).join(format!("{}.png", id)).exists());
         }
+        // 三行全留（记录闸门早返回）
+        assert_eq!(load_gallery(dir.path()).len(), 3);
     }
 
     #[test]
@@ -2215,34 +2269,22 @@ mod tests {
     }
 
     #[test]
-    fn enforce_gallery_limit_zero_means_no_trim() {
-        // limit==0 视为「不裁剪」：三行全留（记录闸门早返回，与图片闸门同口径、互不换算）
+    fn prepare_session_wipes_tmp_dir_and_keeps_gallery() {
+        // 会话清理只针对 .imgtmp：旧临时图片被清、目录被重建；持久画廊记录逐字节原样保留。
         let dir = tempfile::tempdir().unwrap();
-        let recs = vec![
-            gallery_rec("a", 0),
-            gallery_rec("b", 1),
-            gallery_rec("c", 2),
-        ];
-        json_store::save(&gallery_path(dir.path()), &recs).unwrap();
-        enforce_gallery_limit(dir.path(), 0).unwrap();
-        assert_eq!(load_gallery(dir.path()).len(), 3);
-    }
-
-    #[test]
-    fn prepare_session_keeps_gallery() {
-        let dir = tempfile::tempdir().unwrap();
+        let stale = fake_image(dir.path(), "stale");
         let recs = vec![gallery_rec("a", 0), gallery_rec("b", 1)];
         json_store::save(&gallery_path(dir.path()), &recs).unwrap();
         let before = fs::read_to_string(gallery_path(dir.path())).unwrap();
 
         Config::prepare_session(dir.path()).unwrap();
 
-        // 记录文件原样保留、且临时目录被重建：会话清理只针对 .imgtmp
+        assert!(!stale.exists());
+        assert!(tmp_dir(dir.path()).is_dir());
         assert_eq!(
             before,
             fs::read_to_string(gallery_path(dir.path())).unwrap()
         );
-        assert!(tmp_dir(dir.path()).is_dir());
     }
 
     #[test]
@@ -2410,7 +2452,10 @@ mod tests {
         assert_eq!(vars["secNat"], "SWE");
         assert_eq!(vars["nationality"], "中国"); // 三字码反查中文名
         assert_eq!(vars["ethnicity"], "北欧/白人"); // "0" 经模板映射转译
-        assert!(!vars.contains_key("hairLength"), "发长译名不产出——词库分档已承载长度语义");
+        assert!(
+            !vars.contains_key("hairLength"),
+            "发长译名不产出——词库分档已承载长度语义"
+        );
         assert_eq!(vars["hairColor"], "金色"); // "3" 经模板映射转译
         assert_eq!(vars["skinCode"], "红棕褐色（#b47454）"); // "12" → 色卡号文本
         assert_eq!(vars["gender"], "男");
@@ -2424,7 +2469,9 @@ mod tests {
 
     #[test]
     fn build_vars_basic_roster_randomizes_extended_fields() {
-        // 基础名单 detailed=None：拓展字段本就不在 RTF 里，按约定随机补足而非空着。
+        // 基础名单 detailed=None：拓展字段本就不在 RTF 里，按约定随机补足而非空着；
+        // RTF 同样不提供的七项随机细节（发型/胡须/表情/动作/打光/背景/球衣细节）
+        // 也必须恒存在（缺了会在模板里报未填充）。
         let tpl = Config::builtin()
             .templates
             .into_iter()
@@ -2434,6 +2481,17 @@ mod tests {
         for key in ["skinCode", "gender", "age", "height"] {
             assert!(vars.contains_key(key), "基础名单应随机补足 {key}");
             assert!(!vars[key].is_empty(), "{key} 不得为空串");
+        }
+        for key in [
+            "hairStyle",
+            "beard",
+            "expression",
+            "pose",
+            "lighting",
+            "bgTone",
+            "kitDetail",
+        ] {
+            assert!(vars.contains_key(key), "{key} 必须存在");
         }
         // 俱乐部不编造真实队名：缺省会退成国家队/通用球衣描述。
         assert!(!vars.contains_key("club"));
@@ -2528,23 +2586,6 @@ mod tests {
     }
 
     #[test]
-    fn build_vars_always_carries_random_details() {
-        // 七项随机细节：RTF 不提供，任何记录都必须带上（缺了会在模板里报未填充）。
-        let tpl = Config::builtin()
-            .templates
-            .into_iter()
-            .find(|t| t.id == "default")
-            .unwrap();
-        let vars = build_vars(&sample_record(None), &tpl);
-        for key in [
-            "hairStyle", "beard", "expression", "pose", "lighting", "bgTone", "kitDetail",
-        ] {
-            assert!(vars.contains_key(key), "{key} 必须存在");
-        }
-        assert!(vars.contains_key("jersey"));
-    }
-
-    #[test]
     fn build_vars_random_skin_stays_within_ethnicity_band() {
         // 基础名单随机补足的肤色必须落在该族裔的合理色带内（含 1 档容差），
         // 否则会出现「北欧人配最深肤色」这类组合。东亚数据分位 5–8 → 容差后 4–9。
@@ -2585,12 +2626,19 @@ mod tests {
 
         Config::ensure_user_files(d).unwrap();
         let cfg = Config::load(d).unwrap();
-        assert_eq!(cfg.templates[0].codes.hair_color.len(), 19, "空的码值映射应整块补入");
+        assert_eq!(
+            cfg.templates[0].codes.hair_color.len(),
+            19,
+            "空的码值映射应整块补入"
+        );
         assert_eq!(cfg.templates[0].codes.skin_code.len(), 20);
 
         // 非空（用户改过）的映射不回冲：只改一个键值，重启后原样保留。
         let mut edited = cfg.templates[0].clone();
-        edited.codes.hair_color.insert("1".into(), "用户自定".into());
+        edited
+            .codes
+            .hair_color
+            .insert("1".into(), "用户自定".into());
         json_store::save(&templates_path(d), &[edited]).unwrap();
         Config::ensure_user_files(d).unwrap();
         let cfg = Config::load(d).unwrap();
@@ -2601,16 +2649,19 @@ mod tests {
     }
 
     #[test]
-    fn ensure_user_files_creates_prompts_dir_and_exports_builtin_on_fresh_install() {
-        // 全新安装：data/ 下连 prompts 目录都没有 → 建目录并按出厂内容导出模板与码值表。
-        // 这条路径保证「删掉整个 data/ 也能恢复出厂」，与「已存在只补不删」互为兜底。
+    fn ensure_fresh_install_exports_builtin_and_is_idempotent() {
+        // 全新安装：data/ 下连 prompts 目录都没有 → 建目录并按出厂内容导出服务商与模板。
+        // 这条路径保证「删掉整个 data/ 也能恢复出厂」；再次运行必须零写盘（幂等）。
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         assert!(!d.join("prompts").exists());
 
         Config::ensure_user_files(d).unwrap();
         assert!(d.join("prompts").is_dir(), "prompts 目录应被自动创建");
+        assert!(providers_path(d).is_file());
+        assert!(templates_path(d).is_file());
 
+        // 模板逐字复用出厂默认（含码值映射）
         let cfg = Config::load(d).unwrap();
         let builtin = Config::builtin();
         assert_eq!(cfg.templates.len(), builtin.templates.len());
@@ -2618,20 +2669,35 @@ mod tests {
             cfg.templates[0].body, builtin.templates[0].body,
             "模板应逐字复用出厂默认（含新字段拼接）"
         );
-        assert_eq!(cfg.templates[0].codes.hair_color.len(), 19, "模板应携带码值映射");
+        assert_eq!(
+            cfg.templates[0].codes.hair_color.len(),
+            19,
+            "模板应携带码值映射"
+        );
         assert_eq!(cfg.templates[0].codes.skin_code.len(), 20);
+
+        // 幂等：再次运行两份文件均逐字节原样（不产生任何写盘变更）。
+        let pp_before = fs::read_to_string(providers_path(d)).unwrap();
+        let tp_before = fs::read_to_string(templates_path(d)).unwrap();
+        Config::ensure_user_files(d).unwrap();
+        assert_eq!(pp_before, fs::read_to_string(providers_path(d)).unwrap());
+        assert_eq!(tp_before, fs::read_to_string(templates_path(d)).unwrap());
     }
 
     #[test]
-    fn build_vars_draws_random_details_from_template_pools() {
-        // 词库随模板走：模板写了自己的池子就必须从池子里取，不能回落到出厂默认。
+    fn build_vars_prefers_template_pools_and_codes_over_builtin() {
+        // 内容随模板走：模板写了自己的词库/码值映射就必须用它，不能回落到出厂默认。
+        // 词库与码值映射两个维度在同一用例内一并锚定（样本沿用 sample_record 的
+        // 发长码 "2"/发色码 "3"/族裔码 "0"，词库自定义第 "2" 档使两维度可同例验证）。
         let mut tpl = Config::builtin()
             .templates
             .into_iter()
             .find(|t| t.id == "default")
             .unwrap();
         tpl.pools = DetailPools {
-            hair_style_by_length: [("0".to_string(), vec!["自定光头".into()])].into_iter().collect(),
+            hair_style_by_length: [("2".to_string(), vec!["自定发型".into()])]
+                .into_iter()
+                .collect(),
             beard: vec!["自定胡须".into()],
             expression: vec!["自定表情".into()],
             pose: vec!["自定动作".into()],
@@ -2639,32 +2705,15 @@ mod tests {
             bg_tone: vec!["自定背景".into()],
             kit_detail: vec!["自定球衣".into()],
         };
-        let mut rec = sample_record(None);
-        rec.hair_length = "0".into(); // 光头 → 取第 0 档
-        let vars = build_vars(&rec, &tpl);
-        assert_eq!(vars["hairStyle"], "自定光头");
-        assert_eq!(vars["beard"], "自定胡须");
-        assert_eq!(vars["expression"], "自定表情");
-        assert_eq!(vars["pose"], "自定动作");
-        assert_eq!(vars["lighting"], "自定打光");
-        assert_eq!(vars["bgTone"], "自定背景");
-        assert_eq!(vars["kitDetail"], "自定球衣");
-    }
-
-    #[test]
-    fn build_vars_translates_codes_from_template_codes() {
-        // 码值映射随模板走：模板写了自己的映射就必须用它，不能回落到出厂默认。
-        let mut tpl = Config::builtin()
-            .templates
-            .into_iter()
-            .find(|t| t.id == "default")
-            .unwrap();
         tpl.codes.ethnicity.clear();
-        tpl.codes.ethnicity.insert("0".into(), "自定义族裔描述".into());
+        tpl.codes
+            .ethnicity
+            .insert("0".into(), "自定义族裔描述".into());
         tpl.codes.hair_color.clear();
         tpl.codes.hair_color.insert("3".into(), "自定义金色".into());
         tpl.codes.skin_code.clear();
         tpl.codes.skin_code.insert("12".into(), "自定义肤色".into());
+
         let vars = build_vars(
             &sample_record(Some(DetailedInfo {
                 skin_code: "12".into(),
@@ -2672,43 +2721,54 @@ mod tests {
             })),
             &tpl,
         );
+        // 词库七项全部取自模板池子
+        assert_eq!(vars["hairStyle"], "自定发型");
+        assert_eq!(vars["beard"], "自定胡须");
+        assert_eq!(vars["expression"], "自定表情");
+        assert_eq!(vars["pose"], "自定动作");
+        assert_eq!(vars["lighting"], "自定打光");
+        assert_eq!(vars["bgTone"], "自定背景");
+        assert_eq!(vars["kitDetail"], "自定球衣");
+        // 码值映射全部取自模板映射
         assert_eq!(vars["ethnicity"], "自定义族裔描述");
         assert_eq!(vars["hairColor"], "自定义金色");
         assert_eq!(vars["skinCode"], "自定义肤色");
     }
 
     #[test]
-    fn build_vars_falls_back_to_builtin_codes_when_template_has_none() {
-        // 模板没写码值映射（全空）→ 逐组回落出厂默认，码值维度不得静默消失。
-        let builtin = &BUILTIN_CODES;
-        assert!(!builtin.ethnicity.is_empty(), "内置默认模板必须自带码值映射");
-        let vars = build_vars(&sample_record(None), &blank_tpl());
-        assert_eq!(vars["ethnicity"], builtin.ethnicity["0"]);
-        assert!(
-            builtin.skin_code.values().any(|v| *v == vars["skinCode"]),
-            "随机补足的肤色「{}」应在出厂映射内",
-            vars["skinCode"]
-        );
-    }
-
-    #[test]
-    fn build_vars_falls_back_to_builtin_pools_when_template_has_none() {
-        // 模板没写词库（全空）→ 逐组回落出厂默认，随机维度不得静默消失。
-        let builtin = Config::builtin()
+    fn build_vars_falls_back_to_builtin_codes_and_pools_when_template_has_none() {
+        // 模板没写词库/码值映射（全空，blank_tpl）→ 逐组回落出厂默认，
+        // 码值与随机两个维度都不得静默消失。
+        let builtin_tpl = Config::builtin()
             .templates
             .into_iter()
             .find(|t| t.id == "default")
-            .expect("内置默认模板")
-            .pools;
-        assert!(!builtin.is_empty(), "内置默认模板必须自带词库");
+            .expect("内置默认模板");
+        assert!(
+            !BUILTIN_CODES.ethnicity.is_empty(),
+            "内置默认模板必须自带码值映射"
+        );
+        assert!(!builtin_tpl.pools.is_empty(), "内置默认模板必须自带词库");
+
         let vars = build_vars(&sample_record(None), &blank_tpl());
+        // 码值维度：族裔直接对照出厂映射；随机补足的肤色应落在出厂映射内
+        assert_eq!(vars["ethnicity"], BUILTIN_CODES.ethnicity["0"]);
+        assert!(
+            BUILTIN_CODES
+                .skin_code
+                .values()
+                .any(|v| *v == vars["skinCode"]),
+            "随机补足的肤色「{}」应在出厂映射内",
+            vars["skinCode"]
+        );
+        // 随机维度：六项细节都应取自出厂词库
         for (key, pool) in [
-            ("beard", &builtin.beard),
-            ("expression", &builtin.expression),
-            ("pose", &builtin.pose),
-            ("lighting", &builtin.lighting),
-            ("bgTone", &builtin.bg_tone),
-            ("kitDetail", &builtin.kit_detail),
+            ("beard", &builtin_tpl.pools.beard),
+            ("expression", &builtin_tpl.pools.expression),
+            ("pose", &builtin_tpl.pools.pose),
+            ("lighting", &builtin_tpl.pools.lighting),
+            ("bgTone", &builtin_tpl.pools.bg_tone),
+            ("kitDetail", &builtin_tpl.pools.kit_detail),
         ] {
             assert!(pool.contains(&vars[key]), "「{}」不在出厂词库里", vars[key]);
         }

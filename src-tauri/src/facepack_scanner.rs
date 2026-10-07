@@ -23,10 +23,10 @@ pub const FACEPACK_DIRS: [&str; 14] = [
 /// 【泛化】Standard 携带标准号而非固定枚举二/三——新增标准四/五/六时判定层零改动。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackLayout {
-    Flat,                                   // 标准一：无子目录 + 根目录有图片
-    Empty,                                  // 无子目录且无图片（空包）
+    Flat,                                      // 标准一：无子目录 + 根目录有图片
+    Empty,                                     // 无子目录且无图片（空包）
     Standard { standard: u8, complete: bool }, // 归属标准号；complete = FolderList 目录全部存在（可有 extra）
-    Unknown,                                // 与任何标准的 FolderList 都不构成包含关系
+    Unknown,                                   // 与任何标准的 FolderList 都不构成包含关系
 }
 
 impl PackLayout {
@@ -67,7 +67,7 @@ pub fn classify(
             return PackLayout::Standard { standard: *n, complete: true };
         }
     }
-    // 第二轮：子集判定（观察到的目录全部落在某标准清单内 → 就近归属，可补全缺失目录）。
+    // 第二轮：子集判定（观察到的目录全部落在某标准清单内 → 仍归属该标准、标 fixable，可补全缺失目录）。
     for (n, folders) in folder_lists {
         let f: BTreeSet<&str> = folders.iter().map(String::as_str).collect();
         if names.is_subset(&f) {
@@ -113,7 +113,7 @@ impl PackScan {
 /// 头像包目录的轻量签名：用来判断缓存的扫描索引是否还能代表磁盘现状。
 ///
 /// 【为什么需要】索引按 `img_dir` 字符串命中就复用（见 `commands::FaceIndex`），而用户完全可能在
-/// 两次替换之间动过包里的文件。索一旦过期，抽图就会写出**指向不存在图片**的映射
+/// 两次替换之间动过包里的文件。索引一旦过期，抽图就会写出**指向不存在图片**的映射
 /// （FM 里那名球员显示空白头像），而且**静默**——不校验的话没有任何人会发现。
 ///
 /// 【只统计「会影响抽图池」的条目】每个非垃圾一级子目录记 (名字, mtime, 直接子条目数)，
@@ -223,7 +223,7 @@ fn walk_recursive(dir: &Path, rel: String, pools: &mut BTreeMap<String, BTreeSet
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().to_string();
-            // 目录判定走 entry_is_dir：普通条目零额外系统调用（不再每条目 e.path() + is_dir()）。
+            // 目录判定走 entry_is_dir：普通条目零额外系统调用。
             if entry_is_dir(&e) {
                 if is_junk_dir(&fname) { continue; } // 垃圾目录整棵不入池
                 let child = if rel.is_empty() { fname } else { format!("{rel}/{fname}") };
@@ -400,11 +400,11 @@ pub fn scan_pack_progress(
     if cancel.load(Ordering::Relaxed) {
         return Err("头像包扫描已取消".into());
     }
-    // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不再单独 read_dir：
-    // 主池（标准二/三按 FolderList 过滤 faces_map）与兜底池（recursive_pools）是同一批图的两份索引，
-    // 同源取值才保证两者逐字同键——否则词干规则一有分歧（历史上 "a.1.png" 在主池是 "a"、在兜底池是
-    // "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、这张图会被发出两次。
-    // 顺带省掉每个一级目录的第二遍 read_dir。
+    // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不单独 read_dir：
+    // 标准二主池按 FolderList 过滤 faces_map、标准三也拿它判目录名，而标准三 / Unknown 的池取
+    // recursive_pools——两份索引同源取值才保证逐字同键同值，词干规则一旦分歧（历史上 "a.1.png"
+    // 在两边一个成 "a" 一个成 "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、
+    // 这张图会被发出两次。顺带省掉每个一级目录的第二遍 read_dir。
     for (fname, _path) in subdirs.iter() {
         let imgs = recursive_pools.get(fname).cloned().unwrap_or_default();
         faces_map.insert(fname.clone(), imgs);
@@ -758,7 +758,13 @@ mod tests {
         // 与顺序遍历逐字对比——覆盖垃圾子树跳过、dot 文件排除、孙目录独立成键三个易错点。
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        for (d, n) in [("African", 3), ("Asian", 2), ("Caucasian", 4), ("EECA", 1), ("Italmed", 2)] {
+        for (d, n) in [
+            ("African", 3),
+            ("Asian", 2),
+            ("Caucasian", 4),
+            ("EECA", 1),
+            ("Italmed", 2),
+        ] {
             std::fs::create_dir_all(p.join(d)).unwrap();
             for i in 0..n {
                 std::fs::write(p.join(d).join(format!("f{i}.png")), b"png").unwrap();
@@ -876,7 +882,7 @@ mod tests {
         assert_eq!((r.standard, r.found), (2, 1), "完整性检查也必须把软链目录算作目录");
     }
 
-    // ---------------- 完整性检查 / 扫描总数（原 commands.rs，随 check_integrity/scan_and_total 下沉） ----------------
+    // ---------------- 完整性检查 / 扫描总数 ----------------
 
     /// 在临时目录下按 names 建子目录。
     fn mk_dirs(root: &Path, names: &[&str]) {
@@ -1008,7 +1014,7 @@ mod tests {
     #[test]
     fn unknown_when_mixing_two_sets() {
         let tmp = tempfile::tempdir().unwrap();
-        // African 属 14 组、China 属 65 组，跨两套混用 → 无法识别。
+        // African 属标准二（14 目录清单）、China 属标准三（62 目录清单），跨两套混用 → 无法识别。
         mk_dirs(tmp.path(), &["African", "China"]);
         let r = integrity(tmp.path());
         assert_eq!((r.standard, r.status.as_str()), (0, "unknown"));

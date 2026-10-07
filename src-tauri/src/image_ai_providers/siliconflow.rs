@@ -220,8 +220,10 @@ impl ImageProvider for SiliconflowProvider {
             progress(GenStage::Downloading);
             let mut images = Vec::with_capacity(urls.len());
             for u in urls {
-                images
-                    .push(super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u)).await?);
+                images.push(
+                    super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u))
+                        .await?,
+                );
             }
             Ok(ProviderOutcome { images })
         })
@@ -251,22 +253,9 @@ mod tests {
             base_url: DEFAULT_BASE.into(),
             model: model.into(),
             prompt: "一张东亚球员的脸".into(),
-            negative_prompt: String::new(),
             size: m.capabilities.sizes[0].clone(),
-            n: 1,
-            quality: None,
-            seed: None,
-            steps: None,
-            guidance: None,
-            uid: None,
-            name: None,
-            template_id: None,
-            call_mode: None,
-            prompt_extend: None,
-            watermark: None,
-            prompt_extend_mode: None,
-            enable_thinking: None,
             caps: Some(m.capabilities.clone()),
+            ..crate::image_ai::test_req_base()
         }
     }
 
@@ -380,14 +369,6 @@ mod tests {
     // ===================== 校验 =====================
 
     #[test]
-    fn validate_requires_base_url() {
-        let mut r = req_for("Qwen/Qwen-Image");
-        r.base_url = String::new();
-        let err = for_kind_and_validate(&r).unwrap_err();
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::NotConfigured);
-    }
-
-    #[test]
     fn validate_rejects_steps_and_guidance_over_max() {
         let kolors = caps_of("Kwai-Kolors/Kolors");
         let mut r = req_for("Kwai-Kolors/Kolors");
@@ -399,11 +380,5 @@ mod tests {
         assert!(validate_model_caps(&r, &kolors).is_err(), "引导系数超上限");
         r.guidance = Some(20.0);
         assert!(validate_model_caps(&r, &kolors).is_ok());
-    }
-
-    /// 便捷封装：走生产分发路径执行 validate。
-    fn for_kind_and_validate(req: &GenRequest) -> Result<(), ImageGenError> {
-        let caps = req.caps();
-        super::super::for_kind(ProviderKind::Siliconflow).validate(req, &caps)
     }
 }

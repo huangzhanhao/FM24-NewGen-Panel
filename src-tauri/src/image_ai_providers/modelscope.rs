@@ -179,7 +179,11 @@ pub(crate) enum TaskState {
 /// 官方进行态（PENDING/RUNNING）继续轮询；**未知状态一律失败**（与 dashscope 的显式
 /// 枚举同口径：畸形响应/新增终态白等 120s 毫无收益，预算只兜「任务真在跑」的情形）。
 pub(crate) fn parse_task(resp: &Value) -> TaskState {
-    match resp.get("task_status").and_then(|s| s.as_str()).unwrap_or("") {
+    match resp
+        .get("task_status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+    {
         "SUCCEED" => {
             let urls: Vec<String> = resp
                 .get("output_images")
@@ -366,22 +370,9 @@ mod tests {
             base_url: DEFAULT_BASE.into(),
             model: model.into(),
             prompt: "一张东亚球员的脸".into(),
-            negative_prompt: String::new(),
             size: m.capabilities.sizes[0].clone(),
-            n: 1,
-            quality: None,
-            seed: None,
-            steps: None,
-            guidance: None,
-            uid: None,
-            name: None,
-            template_id: None,
-            call_mode: None,
-            prompt_extend: None,
-            watermark: None,
-            prompt_extend_mode: None,
-            enable_thinking: None,
             caps: Some(m.capabilities.clone()),
+            ..crate::image_ai::test_req_base()
         }
     }
 
@@ -407,7 +398,11 @@ mod tests {
         let ids: Vec<&str> = p.models.iter().map(|m| m.model.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["Qwen/Qwen-Image-2.1", "Qwen/Qwen-Image", "MAILAND/majicflus_v1"]
+            vec![
+                "Qwen/Qwen-Image-2.1",
+                "Qwen/Qwen-Image",
+                "MAILAND/majicflus_v1"
+            ]
         );
         assert!(ids.contains(&p.default_model.as_str()));
     }
@@ -466,9 +461,10 @@ mod tests {
 
     #[test]
     fn parse_task_success_failure_and_pending() {
-        let v: Value =
-            serde_json::from_str(r#"{"task_status":"SUCCEED","output_images":["https://x/a.png"]}"#)
-                .unwrap();
+        let v: Value = serde_json::from_str(
+            r#"{"task_status":"SUCCEED","output_images":["https://x/a.png"]}"#,
+        )
+        .unwrap();
         match parse_task(&v) {
             TaskState::Done(urls) => assert_eq!(urls, vec!["https://x/a.png"]),
             _ => panic!("应判成功"),
@@ -482,15 +478,19 @@ mod tests {
 
     #[test]
     fn parse_task_success_without_images_is_failure() {
-        let v: Value = serde_json::from_str(r#"{"task_status":"SUCCEED","output_images":[]}"#)
-            .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"task_status":"SUCCEED","output_images":[]}"#).unwrap();
         assert!(matches!(parse_task(&v), TaskState::Failed(_)));
     }
 
     #[test]
     fn parse_task_unknown_and_missing_status_are_failure() {
         // 只有官方进行态（PENDING/RUNNING）才继续轮询；畸形响应/未知终态径直失败。
-        for s in [r#"{"task_status":"UNKNOWN"}"#, r#"{"task_status":""}"#, r#"{}"#] {
+        for s in [
+            r#"{"task_status":"UNKNOWN"}"#,
+            r#"{"task_status":""}"#,
+            r#"{}"#,
+        ] {
             let v: Value = serde_json::from_str(s).unwrap();
             assert!(matches!(parse_task(&v), TaskState::Failed(_)), "{s}");
         }
@@ -507,17 +507,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_requires_base_url_and_checks_bounds() {
+    fn validate_checks_bounds() {
+        // 空基址的 NotConfigured 闸在 mod.rs 的 validate_requires_base_url_for_url_gated_kinds 覆盖。
         let caps = caps_of("Qwen/Qwen-Image-2.1");
-        let mut r = req_for("Qwen/Qwen-Image-2.1");
-        r.base_url = String::new();
-        assert_eq!(
-            super::super::for_kind(ProviderKind::Modelscope)
-                .validate(&r, &caps)
-                .unwrap_err()
-                .kind,
-            crate::image_ai::GenErrorKind::NotConfigured
-        );
         let mut r = req_for("Qwen/Qwen-Image-2.1");
         r.steps = Some(101);
         assert!(validate_model_caps(&r, &caps).is_err(), "步数 101 超上限");

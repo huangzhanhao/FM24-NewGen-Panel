@@ -314,22 +314,9 @@ mod tests {
             base_url: DEFAULT_BASE.into(),
             model: model.into(),
             prompt: "一张东亚球员的脸".into(),
-            negative_prompt: String::new(),
             size: m.capabilities.sizes[0].clone(),
-            n: 1,
-            quality: None,
-            seed: None,
-            steps: None,
-            guidance: None,
-            uid: None,
-            name: None,
-            template_id: None,
-            call_mode: None,
-            prompt_extend: None,
-            watermark: None,
-            prompt_extend_mode: None,
-            enable_thinking: None,
             caps: Some(m.capabilities.clone()),
+            ..crate::image_ai::test_req_base()
         }
     }
 

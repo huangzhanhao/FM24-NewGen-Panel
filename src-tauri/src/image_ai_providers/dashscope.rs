@@ -677,25 +677,14 @@ mod tests {
     fn gen_req(model: &str) -> GenRequest {
         GenRequest {
             provider_id: PROVIDER_ID.into(),
-            base_url: String::new(),
             model: model.into(),
             prompt: "一张脸".into(),
             negative_prompt: "模糊".into(),
             size: "1024x1024".into(),
             n: 2,
-            quality: None,
             seed: Some(7),
-            steps: None,
-            guidance: None,
-            uid: None,
-            name: None,
-            template_id: None,
-            call_mode: None,
-            prompt_extend: None,
-            watermark: None,
-            prompt_extend_mode: None,
-            enable_thinking: None,
             caps: Some(fixture_caps()),
+            ..crate::image_ai::test_req_base()
         }
     }
 

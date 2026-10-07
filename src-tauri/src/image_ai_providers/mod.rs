@@ -288,24 +288,9 @@ mod tests {
             provider_id: "dashscope".into(),
             model: "z-image-turbo".into(),
             prompt: "一张脸".into(),
-            negative_prompt: String::new(),
             size: "1024x1024".into(),
-            n: 1,
-            quality: None,
-            seed: None,
-            steps: None,
-            guidance: None,
-            uid: None,
-            name: None,
-            template_id: None,
-            call_mode: None,
-            prompt_extend: None,
-            watermark: None,
-            prompt_extend_mode: None,
-            enable_thinking: None,
-            base_url: String::new(),
             // 校验用例显式传 caps 参数，请求侧快照留空即可。
-            caps: None,
+            ..crate::image_ai::test_req_base()
         }
     }
 
@@ -413,13 +398,25 @@ mod tests {
     }
 
     #[test]
-    fn openai_validate_requires_base_url() {
-        // OpenAI 协议的端点由 base_url 拼出，空基址属协议特有门控（dashscope 有固定端点，无此检查）。
-        let r = gen_req();
-        let err = for_kind(ProviderKind::OpenAI)
-            .validate(&r, &caps(0, 0, None))
-            .unwrap_err();
-        assert_eq!(err.kind, GenErrorKind::NotConfigured);
+    fn validate_requires_base_url_for_url_gated_kinds() {
+        // OpenAI/Volcano/Siliconflow/Modelscope 四家共用同一道基址闸（文案逐字相同），
+        // LocalComfyUI 是同闸不同文案；Dashscope 走百炼固定端点、没有这道闸，不入表。
+        // 循环而非各模块各复制一份：新厂商接入时往表里加一行即可。
+        for (kind, keyword) in [
+            (ProviderKind::OpenAI, "Base URL"),
+            (ProviderKind::Volcano, "Base URL"),
+            (ProviderKind::Siliconflow, "Base URL"),
+            (ProviderKind::Modelscope, "Base URL"),
+            (ProviderKind::LocalComfyUI, "ComfyUI 服务地址"),
+        ] {
+            let err = for_kind(kind)
+                .validate(&gen_req(), &caps(0, 0, None))
+                .unwrap_err();
+            let msg = err.message.clone();
+            assert_eq!(err.kind, GenErrorKind::NotConfigured, "{kind:?}");
+            assert!(msg.contains(keyword), "{kind:?}: {msg}");
+        }
+        // 非空基址时这道闸放行（以 OpenAI 为代表验证通过路径）。
         let mut ok = gen_req();
         ok.base_url = "https://api.openai.com/v1".into();
         assert!(for_kind(ProviderKind::OpenAI)

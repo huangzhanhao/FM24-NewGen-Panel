@@ -633,6 +633,35 @@ impl GenRequest {
     }
 }
 
+/// 【仅测试】GenRequest 夹具基底：非关键字段全取「空/无」，各测试模块用结构体更新语法
+/// 覆盖差异字段（如 `GenRequest { n: 2, ..test_req_base() }`），让夹具只呈现该用例真正
+/// 关心的字段。集中一份：GenRequest 增删字段时只有这里要改，各处夹具不再逐个同步。
+#[cfg(test)]
+pub(crate) fn test_req_base() -> GenRequest {
+    GenRequest {
+        provider_id: String::new(),
+        base_url: String::new(),
+        model: String::new(),
+        prompt: String::new(),
+        negative_prompt: String::new(),
+        size: String::new(),
+        n: 1,
+        quality: None,
+        seed: None,
+        steps: None,
+        guidance: None,
+        uid: None,
+        name: None,
+        template_id: None,
+        call_mode: None,
+        prompt_extend: None,
+        watermark: None,
+        prompt_extend_mode: None,
+        enable_thinking: None,
+        caps: None,
+    }
+}
+
 /// 能力快照缺省时的兜底：**逐条等价**于改前 `GenRequest` 各能力字段的 serde 缺省。
 /// 【为什么不能直接用 `Capabilities::default()`】其 `Default` 派生把 `supports_n` 置 false，
 /// 而旧 `GenRequest.supports_n` 缺省为 true（`#[serde(default = "yes")]`）——语义不同。
@@ -1613,24 +1642,11 @@ mod tests {
             provider_id: "openai".into(),
             model: "gpt-image-1".into(),
             prompt: "一张脸".into(),
-            negative_prompt: String::new(),
             size: "1024x1024".into(),
             n: 2,
             quality: Some("high".into()),
-            seed: None,
-            steps: None,
-            guidance: None,
-            uid: None,
-            name: None,
-            template_id: None,
-            call_mode: None,
-            prompt_extend: None,
-            watermark: None,
-            prompt_extend_mode: None,
-            enable_thinking: None,
-            base_url: String::new(),
             // 单测直接构造：能力快照留空，由 caps() 兜底或由 validate_for_generate 回填。
-            caps: None,
+            ..test_req_base()
         }
     }
 

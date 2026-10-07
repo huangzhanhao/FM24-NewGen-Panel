@@ -417,33 +417,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_then_parse_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let pack = dir.path().join("pack");
-        std::fs::create_dir_all(&pack).unwrap();
-        let data = vec![
-            MappingEntry {
-                uid: "r-2000472008".into(),
-                ethnicity: "SpanMed".into(),
-                image: "img1".into(),
-            },
-            MappingEntry {
-                uid: "2001234568".into(),
-                ethnicity: "African".into(),
-                image: "img2".into(),
-            },
-        ];
-        write_xml(&data, &pack, false).unwrap();
-        let parsed = parse_xml(&pack.join("config.xml")).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed["r-2000472008"].image, "img1");
-        // 产物含 FM 需要的头尾结构
-        let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
-        assert!(text.contains(r#"<list id="maps">"#));
-        assert!(text.contains(r#"from="SpanMed/img1""#));
-    }
-
-    #[test]
     fn written_mapping_reparses_identically_in_order() {
         // 【P0-3 的等价性依据】write_xml 按**传入顺序**逐行写出，parse_xml_entries 又按**文件顺序**
         // 返回，所以「拿本次 mapping 直填快照缓存」与「回读刚写出的文件」结果逐条相同（顺序也相同）。
@@ -477,6 +450,10 @@ mod tests {
         let map = parse_xml(&pack.join("config.xml")).unwrap();
         assert_eq!(map.len(), 3);
         assert_eq!(map["2000000003"].image, "deep");
+        // 产物的 FM 结构骨架也必须对：`<list id="maps">` 容器 + from 走「种族/词干」全路径。
+        let text = std::fs::read_to_string(pack.join("config.xml")).unwrap();
+        assert!(text.contains(r#"<list id="maps">"#));
+        assert!(text.contains(r#"from="SpanMed/s.1""#));
     }
 
     #[test]

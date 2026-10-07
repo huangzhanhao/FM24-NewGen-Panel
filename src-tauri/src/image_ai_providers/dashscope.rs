@@ -312,10 +312,10 @@ fn vendor_size(size: &str) -> String {
 /// 本层只补协议专有的 `size`——`x` 转官方口径的 `*`，万相 2.7 的档位串原样透传。
 fn build_params(req: &GenRequest) -> Value {
     let mut params = Value::Object(super::capability_params(req));
-    params.as_object_mut().unwrap().insert(
-        "size".into(),
-        serde_json::json!(vendor_size(&req.size)),
-    );
+    params
+        .as_object_mut()
+        .unwrap()
+        .insert("size".into(), serde_json::json!(vendor_size(&req.size)));
     params
 }
 
@@ -481,7 +481,8 @@ async fn download_all(
 ) -> Result<Vec<FetchedImage>, ImageGenError> {
     let mut images = Vec::with_capacity(urls.len());
     for u in urls {
-        images.push(super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u)).await?);
+        images
+            .push(super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u)).await?);
     }
     Ok(images)
 }
@@ -582,7 +583,10 @@ async fn run_async(
         return Err(classify_provider_error(
             status.as_u16(),
             code,
-            format!("HTTP {status}：{}", error_detail(&json, "异步生图任务创建失败")),
+            format!(
+                "HTTP {status}：{}",
+                error_detail(&json, "异步生图任务创建失败")
+            ),
         )
         .with_retry_after(retry_after));
     };
@@ -1065,10 +1069,9 @@ mod tests {
 
     #[test]
     fn parse_submit_reads_task_id_and_classifies_top_level_code() {
-        let v: Value = serde_json::from_str(
-            r#"{"output":{"task_id":"t-1","task_status":"PENDING"}}"#,
-        )
-        .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"output":{"task_id":"t-1","task_status":"PENDING"}}"#)
+                .unwrap();
         assert_eq!(parse_submit(&v).unwrap(), "t-1");
         // 顶层业务码失败：DataInspection → ContentRejected。
         let v: Value =
@@ -1160,12 +1163,11 @@ mod tests {
         assert_eq!(poll_delay(2), Duration::from_millis(6750));
         assert_eq!(poll_delay(3), Duration::from_millis(10125));
         assert_eq!(poll_delay(4), Duration::from_millis(15000)); // 15187.5 → 触顶
-        // 单调不减。
+                                                                 // 单调不减。
         for n in 0..12u32 {
             assert!(poll_delay(n + 1) >= poll_delay(n), "attempt {n} 应单调递增");
         }
-        // 单次上限 15s。
-        assert_eq!(poll_delay(10), Duration::from_millis(15000));
+        // 单次上限 15s：拐点之后（无论多靠后）都保持封顶。
         assert_eq!(poll_delay(100), Duration::from_millis(15000));
     }
 

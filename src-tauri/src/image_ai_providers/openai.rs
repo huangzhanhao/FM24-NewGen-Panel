@@ -330,12 +330,7 @@ mod tests {
             ..Default::default()
         });
         assert!(build_body_for(&r).get("response_format").is_none());
-    }
-
-    #[test]
-    fn missing_caps_omits_response_format() {
-        // caps == None：走访问器兜底，等价旧 serde 缺省 false ⇒ 不发 response_format。
-        let mut r = gen_req();
+        // caps == None：走访问器兜底，等价旧 serde 缺省 false ⇒ 同样不发。
         r.caps = None;
         assert!(build_body_for(&r).get("response_format").is_none());
     }

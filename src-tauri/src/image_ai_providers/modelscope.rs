@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_task_success_failure_and_pending() {
+    fn parse_task_maps_states_and_flags_empty_success_as_failure() {
         let v: Value = serde_json::from_str(
             r#"{"task_status":"SUCCEED","output_images":["https://x/a.png"]}"#,
         )
@@ -469,18 +469,15 @@ mod tests {
             TaskState::Done(urls) => assert_eq!(urls, vec!["https://x/a.png"]),
             _ => panic!("应判成功"),
         }
+        // SUCCEED 但图片为空：终态却没有产物，属失败而非成功。
+        let v: Value =
+            serde_json::from_str(r#"{"task_status":"SUCCEED","output_images":[]}"#).unwrap();
+        assert!(matches!(parse_task(&v), TaskState::Failed(_)));
         let v: Value =
             serde_json::from_str(r#"{"task_status":"FAILED","message":"boom"}"#).unwrap();
         assert!(matches!(parse_task(&v), TaskState::Failed(_)));
         let v: Value = serde_json::from_str(r#"{"task_status":"RUNNING"}"#).unwrap();
         assert!(matches!(parse_task(&v), TaskState::Pending));
-    }
-
-    #[test]
-    fn parse_task_success_without_images_is_failure() {
-        let v: Value =
-            serde_json::from_str(r#"{"task_status":"SUCCEED","output_images":[]}"#).unwrap();
-        assert!(matches!(parse_task(&v), TaskState::Failed(_)));
     }
 
     #[test]

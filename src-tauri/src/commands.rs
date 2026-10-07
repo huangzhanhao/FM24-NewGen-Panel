@@ -1447,16 +1447,15 @@ pub fn query_snapshot(
             entries: xml_parser::parse_xml_entries(&path)?,
         });
     }
-    Ok(xml_parser::snapshot_entries(&cache.as_ref().unwrap().entries))
+    Ok(xml_parser::snapshot_entries(
+        &cache.as_ref().unwrap().entries,
+    ))
 }
 
 /// 按前端当前页批量解析快照头像的实际图片路径（与入参顺序一一对应；找不到为 null）。
 /// 纯路径探测不碰缓存：resolve_avatar_path 覆盖 绝对路径/带扩展名/裸词干补扩展名 三种形态。
 #[tauri::command]
-pub fn query_snapshot_images(
-    img_dir: String,
-    rel_paths: Vec<String>,
-) -> Vec<Option<String>> {
+pub fn query_snapshot_images(img_dir: String, rel_paths: Vec<String>) -> Vec<Option<String>> {
     let root = Path::new(&img_dir);
     rel_paths
         .iter()
@@ -1667,32 +1666,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_group_snapshot_copies_config_and_fills_cache() {
-        // 替换收尾的自动同步：把阶段4写下的 config.xml 备份到该档快照位置，并立即刷新快照缓存。
-        let tmp = tempfile::tempdir().unwrap();
-        let img = tmp.path().join("pack");
-        std::fs::create_dir_all(&img).unwrap();
-        let entries = vec![MappingEntry {
-            uid: "r-1001".into(),
-            ethnicity: "SpanMed".into(),
-            image: "img1".into(),
-        }];
-        xml_parser::write_xml(&entries, &img, false).unwrap(); // 替换阶段4写下的那份
-        let snap_path = tmp.path().join("档1").join("graphics_pack_snapshot.xml");
-        let cache = Mutex::new(None);
-        let (logger, _rx) = ChannelLogger::channel();
-        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &entries, &cache, &logger);
-
-        assert!(snap_path.is_file()); // 快照文件已生成（父目录一并补建）
-        let got = cache.lock().unwrap();
-        let c = got.as_ref().expect("快照缓存应被填充");
-        assert_eq!(c.xml_path, snap_path.to_str().unwrap()); // 路径即快照预览查询的比对键
-        assert_eq!(c.entries.len(), 1);
-        assert_eq!(c.entries[0].uid, "r-1001");
-    }
-
-    #[test]
     fn sync_group_snapshot_fills_cache_from_mapping_not_by_reparsing() {
+        // 自动同步：把阶段4写下的 config.xml 备份到该档快照位置，并立即刷新快照缓存。
         // 缓存内容必须来自**传入的映射**，而不是回读刚写出的文件。
         // 这里故意让盘上的 config.xml 与传入映射不一致：若实现退回「重解析」，缓存里会是盘上那份。
         let tmp = tempfile::tempdir().unwrap();
@@ -1721,7 +1696,14 @@ mod tests {
         let got = cache.lock().unwrap();
         let c = got.as_ref().expect("快照缓存应被填充");
         assert_eq!(c.entries, mapping, "缓存必须直填传入映射，而不是回读文件");
-        // 快照文件本身仍是「盘上 config.xml 的副本」（拷贝语义不变，与缓存内容无关）。
+        assert_eq!(
+            c.xml_path,
+            snap_path.to_str().unwrap(),
+            "缓存路径即快照预览查询的比对键"
+        );
+        // 快照文件本身仍是「盘上 config.xml 的副本」（拷贝语义不变，与缓存内容无关），
+        // 且写入会自动补建缺失的父目录。
+        assert!(snap_path.is_file(), "快照文件应已生成（父目录一并补建）");
         let copied = xml_parser::parse_xml_entries(&snap_path).unwrap();
         assert_eq!(copied[0].uid, "r-9999", "快照文件是 config.xml 的拷贝");
     }
@@ -1977,7 +1959,9 @@ pub async fn generate_image(
             .get(&req.provider_id)
             .cloned()
             .ok_or_else(|| {
-                image_ai::ImageGenError::not_configured("请先输入 API Key（仅本会话记忆，不会保存）")
+                image_ai::ImageGenError::not_configured(
+                    "请先输入 API Key（仅本会话记忆，不会保存）",
+                )
             })?
     } else {
         String::new()

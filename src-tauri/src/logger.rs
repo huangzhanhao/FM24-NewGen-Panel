@@ -265,6 +265,57 @@ mod tests {
         assert_eq!(page.total, RING_MAX, "应只保留最新 1 万条");
         assert_eq!(page.items[0].message, "5", "最旧的 5 条应被从头部丢弃");
     }
+
+    /// `query` 的两种过滤模式与分页（前端日志面板选级别、翻页都走它）：
+    /// only=true 只取该级别（与阈值模式相反，选 WARNING 不应带出 ERROR）；
+    /// offset/limit 只切窗口，total 恒为过滤后的总条数（前端据此算页数）。
+    #[test]
+    fn query_filters_by_level_and_pages() {
+        let (memory, _rx) = LogMemory::channel();
+        for (level, msg) in [
+            ("INFO", "i0"),
+            ("WARNING", "w0"),
+            ("INFO", "i1"),
+            ("ERROR", "e0"),
+            ("INFO", "i2"),
+        ] {
+            memory.push(LogLine {
+                ts: String::new(),
+                level: level.into(),
+                module: "test".into(),
+                message: msg.into(),
+            });
+        }
+        // only=true：精确级别，WARNING 不带出 ERROR。
+        let page = memory.query("WARNING", true, 0, 10);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].message, "w0");
+        // only=false：阈值模式，WARNING 及以上含 ERROR。
+        assert_eq!(memory.query("WARNING", false, 0, 10).total, 2);
+        // 分页窗口：total 仍是过滤后的 3 条，items 只给窗口内那 1 条。
+        let page = memory.query("INFO", true, 1, 1);
+        assert_eq!((page.total, page.items.len()), (3, 1));
+        assert_eq!(page.items[0].message, "i1");
+        // 未知级别按 INFO 兜底（前端传了脏值时不至于查空）。
+        assert_eq!(memory.query("NOPE", true, 0, 10).total, 3);
+    }
+
+    #[test]
+    fn level_filter_is_monotonic_across_all_levels() {
+        // 阈值语义是「该级别及以上」：TRACE 全收，ERROR 只收 ERROR 本身。
+        let (memory, _rx) = LogMemory::channel();
+        for level in LEVELS {
+            memory.push(LogLine {
+                ts: String::new(),
+                level: level.into(),
+                module: "test".into(),
+                message: level.into(),
+            });
+        }
+        assert_eq!(memory.query("TRACE", false, 0, 99).total, LEVELS.len());
+        assert_eq!(memory.query("ERROR", false, 0, 99).total, 1);
+        assert_eq!(memory.query("WARNING", false, 0, 99).total, 2);
+    }
 }
 
 /// 每 100ms 批量把日志推给前端（避免逐条事件冲击 IPC）。

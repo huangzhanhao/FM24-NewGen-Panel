@@ -519,6 +519,59 @@ mod tests {
     }
 
     #[test]
+    fn overwrite_redraws_roster_and_keeps_entries_outside_it() {
+        // Overwrite 的正面场景（串档回归那条只覆盖了「名单外保留 0 条」）：快照里比名单多出的旧映射
+        // 必须原样带回（process_overwrite 的 rest.into_values() 回填）——这条路径此前没有正向断言，
+        // 真回归会让退役/转会走的球员静默变回原脸。
+        let dir = tempfile::tempdir().unwrap();
+        let img = facepack(&dir);
+        let snap_dir = dir.path().join("snap");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        let snap = snap_dir.join("group.xml");
+        // 本档快照：r-7001（名单内 → 会被重抽）与 r-7002（名单外 → 必须原样保留）。
+        std::fs::write(
+            &snap,
+            config_xml_text(&[("r-7001", "SpanMed/e0"), ("r-7002", "African/e1")]),
+        )
+        .unwrap();
+        let scan = crate::facepack_scanner::scan_pack(&img).unwrap();
+        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
+        let roster = vec![player("r-7001", "ESP", "1")]; // 名单只有一人
+        let cancel = AtomicBool::new(false);
+        let (logger, log_rx) = ChannelLogger::channel();
+        let mapping = mapper
+            .generate_mapping(
+                &roster,
+                Mode::Overwrite,
+                true,
+                &cancel,
+                &mut |_, _, _| {},
+                &logger,
+            )
+            .unwrap();
+        assert_eq!(mapping.len(), 2, "重抽 1 名 + 保留 1 条：{mapping:?}");
+        let kept = mapping
+            .iter()
+            .find(|m| m.uid == "r-7002")
+            .expect("名单外旧映射应被带回");
+        assert_eq!(
+            (kept.ethnicity.as_str(), kept.image.as_str()),
+            ("African", "e1"),
+            "名单外那条必须逐字保留"
+        );
+        let redrawn = mapping.iter().find(|m| m.uid == "r-7001").unwrap();
+        assert_eq!(redrawn.ethnicity, "SpanMed", "名单内那条按 ESP 重抽");
+        // 日志如实报出「重抽 1 / 保留 1」——上层只看到总数，这两个数只有本模块知道。
+        let logs: Vec<LogLine> = log_rx.try_iter().collect();
+        assert!(
+            logs.iter().any(|l| l
+                .message
+                .contains("名单 1 名中已重抽 1 名，名单外保留 1 条旧映射")),
+            "覆写应如实报出重抽与保留条数：{logs:?}"
+        );
+    }
+
+    #[test]
     fn preserve_with_no_duplicates_excludes_images_occupied_by_xml() {
         // Preserve + 未勾选「允许复用」：config.xml 已占用的图先按 from 全路径从池中剔除。
         // facepack() 每个种族目录 3 张图，SpanMed 被旧映射占掉 e0/e1 → 新球员只能拿到 e2（确定性断言）。

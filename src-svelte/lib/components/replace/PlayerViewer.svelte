@@ -14,7 +14,7 @@
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
   import { appStore, basedValue, filterPlayers } from "../../stores/app.svelte";
-  import { ui } from "../../stores/ui.svelte"; // 「用此球员生成」要切到 AI 生成头像工作台
+  import { ui } from "../../stores/ui.svelte";
   import { imageaiStore, setSourcePlayer } from "../../stores/imageai.svelte"; // 生图数据源
   import Icon from "../../ui/Icon.svelte";
   import type { PlayerPreview, PlayerRecord } from "../../types";
@@ -120,7 +120,23 @@
       await message(hit ? t.viewer.replacedOk(previewedUid) : t.viewer.mappingNotFound(previewedUid), {
         title: hit ? t.dialog.info : t.dialog.warning,
       });
+      imgPathInput = "";
       await loadPreview(previewedUid); // 重拉一次，让卡片与刚写入的映射对齐
+    } catch (e) {
+      await showError(e);
+    }
+  }
+
+  /** 重掷替换：按标准规则给当前预览的球员重新抽一张图（后端固定重抽语义，见 reset_single_face），
+   *  用于撤销手动指定、回到规则抽图结果。与 imgPathInput 无关：不读也不清 */
+  async function resetReplace() {
+    if (!previewedUid) return;
+    try {
+      const hit = await api.resetSingleFace(previewedUid, appStore.saveBackup);
+      await message(hit ? t.viewer.resetOk(previewedUid) : t.viewer.mappingNotFound(previewedUid), {
+        title: hit ? t.dialog.info : t.dialog.warning,
+      });
+      await loadPreview(previewedUid);
     } catch (e) {
       await showError(e);
     }
@@ -129,7 +145,7 @@
   // 球员记录简写（未预览时为 null，模板用 ?? '—' 兜底）
   const rec = $derived(preview?.record ?? null);
 
-  // ---------------- 「用此球员生成」：把预览球员设为生图数据源 ----------------
+  // ---------------- 「送生图」：把预览球员设为生图数据源 ----------------
   // 当前预览的球员是否已是生图数据源（按钮文字/描边随之变化作为反馈）
   const isSource = $derived(!!previewedUid && imageaiStore.sourcePlayer?.uid === previewedUid);
   /** 把当前预览的球员设为生图数据源，并切到「AI 生成头像」工作台
@@ -251,11 +267,8 @@
             >{t.viewer.prevMatch}</button
           >
           {#if matches.length > 1}<span class="muted small">{matchIdx + 1}/{matches.length}</span>{/if}
-          <button
-            type="button"
-            class="btn sm"
-            onclick={() => stepMatch(1)}
-            disabled={matchIdx >= matches.length - 1}>{t.viewer.nextMatch}</button
+          <button type="button" class="btn sm" onclick={() => stepMatch(1)} disabled={matchIdx >= matches.length - 1}
+            >{t.viewer.nextMatch}</button
           >
         </div>
       </div>
@@ -280,7 +293,7 @@
         </div>
       {/if}
 
-      <!-- 替换行沉底：图片路径输入框（文件夹图标）+ 浏览 + 替换；无组禁用浏览，输入不全禁用替换 -->
+      <!-- 替换区沉底，两行：上行 = 图片路径输入框 + 浏览；下行 = 三个动作按钮等分占满一行 -->
       <div class="replace-row">
         <div class="input-wrap">
           <Icon name="folder" />
@@ -291,21 +304,24 @@
             aria-label={t.viewer.imgPathAria}
           />
         </div>
-        <!-- 批量替换进行中禁用这两个按钮：本卡与批量替换同栏常驻，替换跑着时用户可就地操作；
-             后端有同样的拒绝（replace_single_face 的 running 守卫），这里先挡一层免得撞错误框 -->
+        <!-- 批量替换进行中禁用这些按钮：本卡与批量替换同栏常驻，替换跑着时用户可就地操作；
+             后端有同样的拒绝（replace_single_face/reset_single_face 的 running 守卫），这里先挡一层免得撞错误框 -->
         <button class="btn" onclick={browseImage} disabled={!snap?.currentGroup || busy}>{t.viewer.browseBtn}</button>
+      </div>
+      <div class="replace-actions">
         <!-- 替换目标 = 当前预览的球员（previewedUid），未选中球员时禁用 -->
         <button class="btn primary" onclick={replaceIt} disabled={!previewedUid || !imgPathInput.trim() || busy}
           >{t.viewer.replaceBtn}</button
         >
-        <!-- 用此球员生成：把当前预览的球员设为生图数据源并切到 AI 生图工作台；
-             已是该数据源时按钮文字/描边变化作为反馈 -->
+        <button class="btn" onclick={resetReplace} disabled={!previewedUid || busy}>{t.viewer.resetBtn}</button>
+        <!-- 送生图：把当前预览的球员设为生图数据源并切到 AI 生图工作台（与名单行尾入口同名同语义）；
+             已是该数据源时按钮文字/描边变化作为反馈；悬停提示用全称说明（按钮名受窄栏宽度限制取短名） -->
         <button
           class="btn gen-src-btn"
           class:on={isSource}
           onclick={useForGenerate}
           disabled={!previewedUid || busy}
-          title={isSource ? t.gen.source.selected : t.gen.source.useForGen}
+          title={isSource ? t.gen.source.selected : t.gen.source.sendTitle(rec?.name?.trim() || previewedUid)}
           >{isSource ? t.gen.source.selected : t.gen.source.useForGen}</button
         >
       </div>

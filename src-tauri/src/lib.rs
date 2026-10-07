@@ -341,27 +341,28 @@ pub fn run() {
             commands::preview_player,  // 预览单个球员的映射与头像
             commands::query_avatars,   // 名单预览头像列：按 UID 批量查快照/映射缓存里的头像路径
             commands::replace_single_face, // 单人换脸
+            commands::reset_single_face, // 单人重掷：按标准规则给该球员重新抽图（「重掷替换」按钮）
             commands::read_image,      // 读取图片字节（前端转 blob 显示）
             commands::resolve_avatar,  // 解析名单「头像」列原文为包内图片路径
             commands::query_logs,      // 分页查询日志
-            commands::get_image_ai_state,
-            commands::render_prompt,
-            commands::preview_prompt, // 按球员数据源渲染模板（uid → build_vars → render）
-            commands::save_provider,
-            commands::delete_provider,
-            commands::set_provider_key,
-            commands::save_prompt_template,
-            commands::delete_prompt_template,
-            commands::generate_image,
-            commands::get_gallery, // 画廊记录：读持久清单 + 现算图片存在性
-            commands::save_generated_image,
+            commands::get_image_ai_state, // 读取 AI 配置快照（服务商/模板/设置，前端初始化）
+            commands::render_prompt,   // 渲染模板文本（{{变量|默认值}} 占位，缺省取默认值）
+            commands::preview_prompt,  // 按球员数据源渲染模板（uid → build_vars → render）
+            commands::save_provider,   // 新增/更新服务商配置（连同设置落盘 image_ai.json）
+            commands::delete_provider, // 删除服务商配置（落盘 image_ai.json）
+            commands::set_provider_key, // 记住/清除 API Key（仅本会话内存，不落盘）
+            commands::save_prompt_template, // 新增/更新提示词模板（落盘 prompts/templates.json）
+            commands::delete_prompt_template, // 删除提示词模板（落盘 prompts/templates.json）
+            commands::generate_image,  // 单张生成：调服务商出图（不跨 await 持锁）
+            commands::get_gallery,     // 画廊记录：读持久清单 + 现算图片存在性
+            commands::save_generated_image, // 生成图另存：从会话临时目录原子复制到目标路径
             commands::save_and_replace, // 保存并替换：生成图落盘 _generated 后复用单人换脸链
-            commands::add_to_queue,      // 批量生成：追加条目（返回快照）
+            commands::add_to_queue,    // 批量生成：追加条目（返回快照）
             commands::remove_from_queue, // 批量生成：按 id 移除条目
-            commands::clear_queue,       // 批量生成：清空队列
-            commands::start_queue,       // 批量生成：启动队列（后台异步跑 run_queue）
-            commands::cancel_queue,      // 批量生成：请求取消（未启动条目判「已取消」）
-            commands::query_queue        // 批量生成：查询队列全量快照
+            commands::clear_queue,     // 批量生成：清空队列
+            commands::start_queue,     // 批量生成：启动队列（后台异步跑 run_queue）
+            commands::cancel_queue,    // 批量生成：请求取消（未启动条目判「已取消」）
+            commands::query_queue      // 批量生成：查询队列全量快照
         ])
         // .run(...) 启动事件循环，阻塞直到窗口关闭；启动失败直接 panic。
         .run(tauri::generate_context!())

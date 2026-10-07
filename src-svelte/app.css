@@ -1006,8 +1006,12 @@ table.grid tbody tr:hover { background: var(--bg-raised); }
 /* 等宽标签：当前映射等路径类值，长路径可自然换行 */
 .meta.mono b { font-family: var(--mono); font-weight: var(--fw-medium); white-space: normal; word-break: break-all; }
 .replace-row { display: flex; gap: var(--sp-3); margin-top: auto; flex-wrap: wrap; align-items: center; }
-.replace-row .input-wrap { flex: 1; min-width: 240px; }
-/* 「用此球员生成」（P3 数据源入口）：已是数据源时主题色描边高亮 + 文字变「已选为数据源」 */
+.replace-row .input-wrap { flex: 1; min-width: 160px; }
+/* 动作行：「指定替换 | 重掷替换 | 送生图 」三枚按钮等分占满一行，禁折行（折行即违背同一行诉求）；
+   内边距收一档（--sp-6 → --sp-4）：288 宽下三枚等分各约 90px，默认内边距会把 4 字文字挤溢出 */
+.replace-actions { display: flex; gap: var(--sp-3); margin-top: var(--sp-3); }
+.replace-actions > .btn { flex: 1; min-width: 0; padding-inline: var(--sp-4); white-space: nowrap; }
+/* 「送生图」：已是数据源时主题色描边高亮 */
 .gen-src-btn.on { border-color: var(--accent); color: var(--accent); }
 
 /* ============================================================

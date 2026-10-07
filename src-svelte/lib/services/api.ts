@@ -66,6 +66,9 @@ export const api = {
     invoke<Record<string, string | null>>('query_avatars', { uids }),
   replaceSingleFace: (uid: string, imagePath: string, saveBackup: boolean) =>
     invoke<boolean>('replace_single_face', { uid, imagePath, saveBackup }),
+  // resetSingleFace：单人重掷——按标准规则给该球员重新抽图（固定重抽语义，后端单点注释）。
+  resetSingleFace: (uid: string, saveBackup: boolean) =>
+    invoke<boolean>('reset_single_face', { uid, saveBackup }),
   // readImage 返回 ArrayBuffer（二进制图片字节），前端再转成 blob URL 显示。
   readImage: (path: string) => invoke<ArrayBuffer>('read_image', { path }),
   // resolveAvatar：把名单「头像」列原文解析成当前头像包内的图片绝对路径（找不到为 null）。

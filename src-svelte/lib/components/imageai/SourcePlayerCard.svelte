@@ -1,5 +1,5 @@
 <!-- SourcePlayerCard · 数据源单人档案卡（左栏）：当前数据源球员的头像/资料胶囊 + 台内 UID 查询 + 「生成」
-     三个来源都写 imageaiStore.sourcePlayer：名单行「送生图」、单人替换「用此球员生成」、本卡 UID 查询
+     三个来源都写 imageaiStore.sourcePlayer：名单行「送生图」、单人替换「送生图」、本卡 UID 查询
      「生成」经 ongenerate 转发父级主 CTA 链路（单张接口）；批量入队只走名单工具行与常驻队列卡
      头像装载、资料 effect 与 UID 查询态都住在本地 -->
 <script lang="ts">

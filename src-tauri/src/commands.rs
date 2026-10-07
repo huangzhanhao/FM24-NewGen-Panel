@@ -4,7 +4,7 @@
 //! 每次状态变更后回传 AppSnapshot 让前端整体刷新。命令可能在不同线程被调用、后台替换
 //! 也跑在单独线程，因此 AppState 的共享字段用 Mutex 保护、跨线程引用用 Arc、
 //! 运行/取消标志用 AtomicBool。返回 Result<T, String> 时，Err 的中文描述由前端直接弹窗展示。
-use crate::face_mapper::Mode;
+use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack_scanner::{self, IntegrityResult, PackScan, PackSig};
 use crate::image_ai::{self, Config};
 use crate::image_ai_queue; // 批量生成队列（条目/状态机/执行器；6 个命令在本文件尾部）
@@ -1144,6 +1144,142 @@ fn sync_live_to_snapshot(
             .logger
             .warn("viewer", format!("单人换脸同步存档快照失败：{e}")),
     }
+}
+
+/// 单人重掷（「重掷替换」按钮）：把批量替换流水线的抽图阶段单独跑在这 1 名球员上，
+/// 按标准规则重新抽一张图覆盖 config.xml 里他现有的映射行；其余球员的行一律不动。
+/// 【语义固定为「重抽」，不跟随「替换执行」面板的模式/选项】面板默认「保留」，对已有映射的
+/// 球员重跑等于空操作，「重掷」就失去了撤销手动指定的意义——故无视现有映射、不做「仅随机人」
+/// 过滤（对准这名球员的显式动作，过滤会把按钮变成静默空操作）。
+#[tauri::command]
+pub fn reset_single_face(
+    state: State<'_, AppState>,
+    uid: String,
+    save_backup: bool,
+) -> Result<bool, String> {
+    let uid = uid.trim().to_string();
+    // 【与批量替换互斥】同 replace_single_face：两边写的是同一个 live config.xml，并发必有一方被吞。
+    if state.running.load(Ordering::SeqCst) {
+        state
+            .logger
+            .warn("viewer", "单人重掷被拒绝：批量替换正在进行");
+        return Err("批量替换正在进行，请等它完成或先取消，再做单人微调".into());
+    }
+    let img_dir = {
+        let pm = state.pm.lock().unwrap();
+        pm.cur_group.clone().ok_or("当前没有选中组")?
+    };
+    // 【先归位再抽图】判据与归位同 replace_single_face：live 恢复成本档快照后再动；
+    // 快照不存在＝本档在此目录没有历史，无从对齐，让用户先跑一次替换。
+    let snap = {
+        let pm = state.pm.lock().unwrap();
+        crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, &img_dir)
+    };
+    if !snap.is_file() {
+        state
+            .logger
+            .warn("viewer", "单人重掷已跳过：当前档在此头像包目录下还没有存档快照");
+        return Err("当前存档在此头像包目录下还没有存档快照，无法确定本档的现有映射。请先执行一次替换后再微调。".into());
+    }
+    if let Err(e) = crate::json_store::copy_atomic(&snap, &Path::new(&img_dir).join("config.xml")) {
+        state.logger.warn(
+            "viewer",
+            format!("单人重掷前恢复本档现有映射失败，将按头像包当前内容继续：{e}"),
+        );
+    }
+    // 抽图对象是名单记录（国籍/种族码驱动规则检索），从名单缓存取；两种 UID 形态都试。
+    let record = {
+        let variants = xml_parser::with_newgan_prefix_variants(&uid);
+        let cache = state.rtf_cache.lock().unwrap();
+        cache.iter().find(|p| variants.contains(&p.uid)).cloned()
+    };
+    let Some(record) = record else {
+        return Err(
+            "名单缓存中找不到该球员，请先扫描RTF名单（或重新执行一次替换）后再重掷".into(),
+        );
+    };
+    let rule_config = RuleConfig::load(&state.data_dir)?;
+    // 包索引：「扫描头像」缓存按目录 + 签名命中即复用；未命中现场扫盘并回填（与替换流水线同口径）。
+    // 【同步命令的代价】冷缓存的大包要当场扫盘（实测 28 万图约 0.13 s），跑在主线程可接受；
+    // 回填之后同一包目录的后续点击只付签名比对的成本。
+    let want_sig = facepack_scanner::pack_sig(&img_dir);
+    let scan = {
+        let hit = state
+            .faces_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|c| c.img_dir == img_dir)
+            .filter(|c| c.sig.is_some() && c.sig == want_sig)
+            .map(|c| c.scan.clone());
+        match hit {
+            Some(scan) => scan,
+            None => {
+                let scan = Arc::new(facepack_scanner::scan_pack_progress(
+                    &img_dir,
+                    &mut |_, _| {},
+                    &AtomicBool::new(false),
+                )?);
+                *state.faces_cache.lock().unwrap() = Some(FaceIndex {
+                    img_dir: img_dir.clone(),
+                    scan: scan.clone(),
+                    sig: want_sig,
+                });
+                scan
+            }
+        }
+    };
+    let mut mapper = FaceMapper::from_scan(&scan, &rule_config, Some(snap.clone()))?;
+    // 标准规则清单外（未实现抽图规则）与批量替换同口径拦截。
+    if let facepack_scanner::PackLayout::Standard { standard, .. } = mapper.layout {
+        if !templates::IMPLEMENTED_STANDARDS.contains(&standard) {
+            return Err(format!("标准{standard}的抽图规则暂未实现，无法重掷该球员"));
+        }
+    }
+    let mapping = mapper
+        .generate_mapping(
+            std::slice::from_ref(&record),
+            Mode::Generate, // 固定重抽：无视该球员的现有映射，从零抽一张
+            true,           // 单人视角没有同轮球员占用图片，复用恒放开
+            &AtomicBool::new(false), // 单人重抽没有取消入口，恒不取消
+            &mut |_, _, _| {},
+            &*state.logger,
+        )
+        .ok_or("单人重掷被取消")?; // cancel 恒为 false，实际走不到
+    let Some(entry) = mapping.first() else {
+        // 1 人名单映射为空＝没抽到图（多为包内无可用图片），facemap 已留痕。
+        return Err("未能为该球员重新抽到图（详见日志）".into());
+    };
+    // 写入复用单人换脸的逐行改写（只动该 UID 那一行）；未命中（live 里没有他的行）原样返回 false。
+    let hit = xml_parser::single_replacement(
+        &entry.uid,
+        &entry.ethnicity,
+        &entry.image,
+        Path::new(&img_dir),
+        save_backup,
+    )?;
+    if hit {
+        // 与 replace_single_face 同一套收尾：内存映射缓存就地改 + 写回本档快照。
+        let mut cache = state.mapping_cache.lock().unwrap();
+        for m in cache.iter_mut() {
+            if m.uid == entry.uid {
+                m.ethnicity = entry.ethnicity.clone();
+                m.image = entry.image.clone();
+                break;
+            }
+        }
+        drop(cache);
+        sync_live_to_snapshot(&state, &snap, &img_dir, &entry.uid, &entry.ethnicity, &entry.image);
+        state.logger.info(
+            "viewer",
+            format!(
+                "单人重掷 {} → {}",
+                entry.uid,
+                xml_parser::record_from(&entry.ethnicity, &entry.image)
+            ),
+        );
+    }
+    Ok(hit)
 }
 
 /// 查询/预览（对等旧版 PlayerService 查询链）。按优先级从多个数据源拼出单人预览：

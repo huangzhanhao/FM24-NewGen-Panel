@@ -286,15 +286,14 @@ export const t = {
       sendBtn: "去抽图",
       sendTitle: (name: string) => `以 ${name} 为数据源生成头像`,
       sent: "已选",
-      /** 单人替换页：把当前预览的球员设为数据源（已选时按钮文字/描边同步变化作为反馈） */
-      useForGen: "用此球员生成",
-      selected: "已选为数据源",
+      useForGen: "送生图",
+      selected: "已是数据源",
     },
     // P3 结果卡「保存并替换」：生成图写入 <头像包>/_generated/ 并走单人换脸链路
     saveReplace: {
       btn: "保存并替换",
       needPlayer:
-        "需先选择球员：在「名单预览」行尾点「去抽图」或单人替换页点「用此球员生成」",
+        "需先选择球员：在「名单预览」行尾点「去抽图」或单人替换页点「送生图」",
       confirm: (name: string) =>
         `把这张生成图设为 ${name} 的头像？将写入头像包并替换其映射。`,
       ok: (name: string) => `已保存并替换 ${name} 的头像`,
@@ -639,7 +638,10 @@ export const t = {
     imgPlaceholder: "输入新图片路径…",
     imgPathAria: "替换图片路径",
     browseBtn: "浏览",
-    replaceBtn: "替换",
+    replaceBtn: "指定替换",
+    /** 重掷替换：按标准规则给该球员重新抽图（后端固定重抽语义） */
+    resetBtn: "重掷替换",
+    resetOk: (uid: string) => `已重掷 UID ${uid} 的头像（按规则重新抽图）`,
     imageDialogTitle: "选择图片文件",
     imageFilterName: "图片",
     missingInput: "请先搜索并选中一名球员，再选择有效图片路径",

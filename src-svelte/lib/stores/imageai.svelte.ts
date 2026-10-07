@@ -369,7 +369,7 @@ export async function applyTemplate(id: string) {
   }
 }
 
-/** 设定生图数据源球员（名单行「送生图」与单人预览「用此球员生成」共用入口）：
+/** 设定生图数据源球员（名单行「送生图」与单人预览「送生图」共用入口）：
  *  随即用后端按该球员记录组装一版提示词回填输入框（含本轮随机细节），供用户查看与修改。 */
 export function setSourcePlayer(uid: string, name: string) {
   imageaiStore.sourcePlayer = { uid, name };

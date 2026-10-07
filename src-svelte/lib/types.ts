@@ -183,12 +183,36 @@ export interface GenSettings {
   concurrency: number; namingPattern: string;
 }
 
-export interface PromptTemplate { id: string; name: string; body: string; negative: string; }
+/** 模板自带的随机细节词库（对应 Rust DetailPools）：{{hairStyle}} 等占位符的候选池。 */
+export interface DetailPools {
+  hairStyleByLength: Record<string, string[]>; // 键 = 发长码 0–5
+  beard: string[];
+  expression: string[];
+  pose: string[];
+  lighting: string[];
+  bgTone: string[];
+  kitDetail: string[];
+}
+
+/** 模板自带的码值转译映射（对应 Rust CodeMaps）：RTF 扫出的码 → 提示词文本。 */
+export interface CodeMaps {
+  ethnicity: Record<string, string>;
+  hairColor: Record<string, string>;
+  skinCode: Record<string, string>;
+}
+
+/** 提示词模板，body 支持 {{变量|默认值}}。 */
+export interface PromptTemplate {
+  id: string; name: string; body: string; negative: string;
+  /** 码值转译映射；缺省时后端逐组回落内置默认模板的同名映射。 */
+  codes?: CodeMaps;
+  /** 随机细节词库；缺省时后端逐组回落内置默认模板的同名词库。 */
+  pools?: DetailPools;
+}
 
 export interface ImageConfig {
   providers: ProviderConfig[]; settings: GenSettings;
   templates: PromptTemplate[];
-  dictionary: Record<string, Record<string, string>>;
 }
 
 export interface GenRequest {

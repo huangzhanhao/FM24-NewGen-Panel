@@ -14,16 +14,19 @@ import type {
   QueueEntry,
   QueueFinished,
   QueueProgress,
-  RenderOutcome,
   SizeRules,
 } from '../types';
 
-/** 模板变量说明 */
+/** 模板变量说明（与后端 build_vars 的实际产出键一一对应）。
+ *  发长码不产出变量：发型词库按发长码分档，选出的风格词自带长度语义。 */
 export const VARIABLE_HINTS: ReadonlyArray<readonly [string, string]> = [
-  ['name', '姓名'], ['ethnicity', '种族'], ['hairLength', '发长'], ['hairColor', '发色'],
-  ['skinCode', '肤色'],
-  ['gender', '性别'], ['age', '年龄'], ['primaryNat', '国籍'], ['secNat', '第二国籍'],
-  ['height', '身高'], ['club', '俱乐部'], ['ca', 'CA'], ['pa', 'PA'], ['uid', 'UID'],
+  ['name', '姓名'], ['ethnicity', '种族'], ['hairColor', '发色'],
+  ['skinCode', '肤色'], ['hairStyle', '发型样式'], ['beard', '胡须'],
+  ['gender', '性别'], ['age', '年龄'], ['height', '身高'],
+  ['primaryNat', '国籍码'], ['secNat', '第二国籍码'], ['nationality', '国籍'],
+  ['club', '俱乐部'], ['jersey', '球衣'], ['kitDetail', '球衣细节'], ['based', '联赛地区'],
+  ['expression', '表情'], ['pose', '动作'], ['lighting', '打光方向'], ['bgTone', '背景色调'],
+  ['ca', 'CA'], ['pa', 'PA'], ['uid', 'UID'],
 ];
 
 /** 解析 `宽*高`/`宽x高` 尺寸。 */
@@ -96,6 +99,9 @@ export const imageaiStore = $state({
   model: '',
   templateId: 'default',
   prompt: '',
+  /** 输入框是否被手工改过。未改 → 每次生成都重掷随机细节（组装新提示词再发出）；
+   *  改过 → 原样发送框内文本，不用后端组装结果覆盖用户的修改。 */
+  promptDirty: false,
   negative: '',
   size: '350x350', // 不在任何模型预设里时 UI 自动落「自定义…」
   n: 1,
@@ -342,14 +348,20 @@ export function selectModel(model: string) {
   imageaiStore.callMode = 'sync';
 }
 
-/** 选模板：回填负向文案，并把正文经后端渲染一次（与生成前渲染同一实现）；失败向上抛给调用方弹窗。 */
+/** 选模板：回填负向文案，并把正文经后端组装一次写进输入框（与生成前同一实现）。
+ *  有数据源时按该球员记录组装（含本轮随机细节），否则只把占位符展开成默认值。
+ *  失败向上抛给调用方弹窗。 */
 export async function applyTemplate(id: string) {
   const tpl = imageaiStore.config?.templates.find((x) => x.id === id);
   if (!tpl) return;
   imageaiStore.templateId = id;
   imageaiStore.negative = tpl.negative;
+  const sp = imageaiStore.sourcePlayer;
   try {
-    imageaiStore.prompt = (await api.renderPrompt(tpl.body)).text;
+    imageaiStore.prompt = sp
+      ? (await api.previewPrompt(sp.uid, id)).text
+      : (await api.renderPrompt(tpl.body)).text;
+    imageaiStore.promptDirty = false;
   } catch (e) {
     // 失败时正文退回模板原文，不留上一个模板的残文；错误仍向上抛。
     imageaiStore.prompt = tpl.body;
@@ -357,9 +369,26 @@ export async function applyTemplate(id: string) {
   }
 }
 
-/** 设定/清除生图数据源球员（名单行「送生图」与单人预览「用此球员生成」共用入口）。 */
+/** 设定生图数据源球员（名单行「送生图」与单人预览「用此球员生成」共用入口）：
+ *  随即用后端按该球员记录组装一版提示词回填输入框（含本轮随机细节），供用户查看与修改。 */
 export function setSourcePlayer(uid: string, name: string) {
   imageaiStore.sourcePlayer = { uid, name };
+  void assembleForSource(uid);
+}
+
+/** 按球员记录组装提示词并回填输入框。失败静默：名单未扫到该球员时框内保留原文，
+ *  真正缺什么会在生成时抛可读错误。两处 uid 校验用于丢弃换人期间返回的过期结果。 */
+async function assembleForSource(uid: string) {
+  try {
+    if (!imageaiStore.config) await loadImageState();
+    if (imageaiStore.sourcePlayer?.uid !== uid) return;
+    const rendered = await api.previewPrompt(uid, imageaiStore.templateId);
+    if (imageaiStore.sourcePlayer?.uid !== uid) return;
+    imageaiStore.prompt = rendered.text;
+    imageaiStore.promptDirty = false;
+  } catch {
+    // 组装失败不打断选人流程
+  }
 }
 
 export function clearSourcePlayer() {
@@ -371,13 +400,16 @@ export async function generate(meta?: { size?: string; seed?: string }) {
   if (!imageaiStore.model) throw new Error(t.gen.needModel);
   imageaiStore.generating = true;
   try {
-    // 有数据源走 preview_prompt（按球员记录渲染模板正文，手填 prompt 不参与，换球员即复用同一模板）；
-    // 无数据源用当前文本渲染——用户可能手工改写过，模板原文不得覆盖编辑结果。
-    const rendered = imageaiStore.sourcePlayer
-      ? await api.previewPrompt(imageaiStore.sourcePlayer.uid, imageaiStore.templateId)
+    // 组装口径：有数据源且框内未被手工改过 → 后端重新组装（重掷随机细节）后回填；
+    // 其余情况一律以框内文本为准——用户的修改不被模板原文覆盖，这就是「所见即所发」。
+    const sp = imageaiStore.sourcePlayer;
+    const reroll = !!sp && !imageaiStore.promptDirty;
+    const rendered = reroll
+      ? await api.previewPrompt(sp.uid, imageaiStore.templateId)
       : await api.renderPrompt(imageaiStore.prompt);
     if (rendered.missing.length > 0) throw new Error(t.gen.missingPlaceholders(rendered.missing));
-    if (!imageaiStore.sourcePlayer) imageaiStore.prompt = rendered.text; // 回写：所见即所发
+    imageaiStore.prompt = rendered.text; // 回填：框内文本与实发一致
+    imageaiStore.promptDirty = false;
     const caps = imageaiStore.modelInfo?.capabilities;
     // 同参重生：meta 提供原图尺寸/Seed（'' = 随机）；不传则用工作台当前值。
     const size = meta?.size || imageaiStore.size;
@@ -453,18 +485,15 @@ export async function saveAndReplace(imageId: string) {
 export interface PlayerRow { uid: string; name: string; }
 
 /** 组装队列条目：其余参数取工作台当前值；id 留空由后端补发，status 复位为 queued。
- *  渲染：有数据源逐行 preview_prompt（每球员各自变量）；无数据源循环外 renderPrompt 一次复用
- *  （每行同参调用是 N 次等价 IPC）。 */
+ *  提示词**逐球员**按模板组装（各带一份自己的随机细节）——批量不读输入框，
+ *  框内编辑只对单张生效，否则一行文本无法体现每名球员各自的变量。 */
 export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise<QueueEntry[]> {
   if (!imageaiStore.model) throw new Error(t.gen.needModel);
   const entries: QueueEntry[] = [];
-  let shared: RenderOutcome | null = null;
   const caps = imageaiStore.modelInfo?.capabilities;
   for (const r of rows) {
     // 渲染失败/缺占位符即整批失败：与单张 generate 口径一致（missing 不得原文送进 API）。
-    const rendered = imageaiStore.sourcePlayer
-      ? await api.previewPrompt(r.uid, imageaiStore.templateId)
-      : (shared ??= await api.renderPrompt(imageaiStore.prompt));
+    const rendered = await api.previewPrompt(r.uid, imageaiStore.templateId);
     if (rendered.missing.length > 0) throw new Error(t.gen.missingPlaceholders(rendered.missing));
     entries.push({
       id: '',

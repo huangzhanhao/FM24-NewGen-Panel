@@ -12,7 +12,6 @@
      状态除 sizeCustomMode/sizeW/sizeH 等纯 UI 态外全部住在 imageaiStore；
      尺寸违规单点读 store.sizeError（CTA 禁用共用）；外部触点：管理模板 onopentemplates、Ctrl+Enter ongenerate。 -->
 <script lang="ts">
-  import { api } from "../../services/api";
   import Icon from "../../ui/Icon.svelte";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text";
@@ -32,29 +31,6 @@
   let showNeg = $state(true);
 
   const caps = $derived(imageaiStore.modelInfo?.capabilities);
-
-  // ---- 数据源只读预览：有数据源时正文由 preview_prompt 渲染，文本框只读展示 ----
-  let sourcePreview = $state("");
-
-  $effect(() => {
-    const sp = imageaiStore.sourcePlayer;
-    if (!sp) {
-      sourcePreview = "";
-      return;
-    }
-    let cancelled = false;
-    void api
-      .previewPrompt(sp.uid, imageaiStore.templateId)
-      .then((r) => {
-        if (!cancelled) sourcePreview = r.text;
-      })
-      .catch(() => {
-        if (!cancelled) sourcePreview = "";
-      });
-    return () => {
-      cancelled = true;
-    };
-  });
 
   // 字数计数：超限判定 promptOver 由 store 单点派生（跨组件共用），这里只渲染计数
   const promptLen = $derived(imageaiStore.prompt.length);
@@ -285,11 +261,11 @@
     </button>
   </div>
 
-  <!-- 正文标题行：label 左；右侧 = 字数计数（仅手填态+模型有上限）+ 快捷键提示 -->
+  <!-- 正文标题行：label 左；右侧 = 字数计数（模型有上限时）+ 快捷键提示 -->
   <div class="prompt-head">
-    <label for="ig-prompt" class="field-label">{imageaiStore.sourcePlayer ? t.gen.promptPreview : t.gen.prompt}</label>
+    <label for="ig-prompt" class="field-label">{t.gen.prompt}</label>
     <span class="head-right">
-      {#if !imageaiStore.sourcePlayer && promptLimit > 0}
+      {#if promptLimit > 0}
         <span class="counter" class:near={promptNear} class:over={imageaiStore.promptOver}
           >{promptLen} / {promptLimit}</span
         >
@@ -298,28 +274,20 @@
     </span>
   </div>
 
+  <!-- 单框可编辑：内容即实发文本。有数据源时由后端组装后回填此处，用户改动优先。 -->
+  <textarea
+    id="ig-prompt"
+    rows="3"
+    bind:value={imageaiStore.prompt}
+    class:invalid={imageaiStore.promptOver}
+    oninput={() => (imageaiStore.promptDirty = true)}
+    onkeydown={onGenerateKey}
+  ></textarea>
   {#if imageaiStore.sourcePlayer}
-    <!-- 数据源模式：正文按该球员记录渲染，只读 -->
-    <textarea
-      id="ig-prompt"
-      rows="3"
-      readonly
-      value={sourcePreview}
-      placeholder={t.gen.promptPreviewing}
-      onkeydown={onGenerateKey}
-    ></textarea>
-    <p class="hint src-note">{t.gen.sourceReadonlyNote}</p>
-  {:else}
-    <textarea
-      id="ig-prompt"
-      rows="3"
-      bind:value={imageaiStore.prompt}
-      class:invalid={imageaiStore.promptOver}
-      onkeydown={onGenerateKey}
-    ></textarea>
-    {#if imageaiStore.promptOver}
-      <p class="field-error">{t.gen.promptTooLong(promptLimit)}</p>
-    {/if}
+    <p class="hint src-note">{t.gen.sourceEditableNote}</p>
+  {/if}
+  {#if imageaiStore.promptOver}
+    <p class="field-error">{t.gen.promptTooLong(promptLimit)}</p>
   {/if}
 
   <!-- 负向提示词：模型不声明该能力位时整块不渲染（值仍留在 store 里但不发送）；

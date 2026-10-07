@@ -15,10 +15,8 @@ pub const STANDARD2_RAW: &str = include_str!("../assets/standard2.json");
 pub const STANDARD3_RAW: &str = include_str!("../assets/standard3.json");
 /// AI 文生图出厂服务商与设置（image_ai::Config::builtin 解析；首次启动导出 data/image_ai.json）。
 pub const IMAGE_AI_RAW: &str = include_str!("../assets/image_ai.json");
-/// AI 文生图出厂提示词模板（导出 data/prompts/templates.json）。
+/// AI 文生图出厂提示词模板（含码值映射 codes 与随机词库 pools，导出 data/prompts/templates.json）。
 pub const IMAGE_AI_TEMPLATES_RAW: &str = include_str!("../assets/image_ai_templates.json");
-/// AI 文生图出厂码值转译表（导出 data/prompts/code_translation.json）。
-pub const IMAGE_AI_DICT_RAW: &str = include_str!("../assets/image_ai_code_translation.json");
 
 // ---------------- 国籍对照表（基础数据，非标准规则） ----------------
 /// 语言 → {国籍显示文本: 三字码}。rtf_scanner 解析名单时按数据语言查它，把各语言的国籍显示文本
@@ -41,6 +39,27 @@ pub static NAT_CODES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let parsed: Codes = serde_json::from_str(include_str!("../assets/nat_codes.json"))
         .expect("nat_codes.json 格式错误");
     parsed.codes
+});
+
+/// 国籍三字码 → 简体中文规范名（由 [`NAT_TRANSLATION`] 的「简体中文」节点反查而来）。
+/// 同一码有多个译名（如「阿尔巴」/「阿尔巴尼亚」同为 ALB）：取**最长**者为规范名，
+/// 长度相同再按字典序取小，保证反查结果与 HashMap 迭代顺序无关（可复现）。
+/// 供 AI 文生图把 `primaryNat`（如 "COL"）转成可写进提示词的中文国名。
+pub static NAT_CN_BY_CODE: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    let mut m: HashMap<String, String> = HashMap::new();
+    let Some(table) = NAT_TRANSLATION.get("简体中文") else {
+        return m;
+    };
+    for (name, code) in table {
+        let better = match m.get(code) {
+            None => true,
+            Some(cur) => (name.chars().count(), name) > (cur.chars().count(), cur),
+        };
+        if better {
+            m.insert(code.clone(), name.clone());
+        }
+    }
+    m
 });
 
 /// config.xml 固定头尾模板，[players] 为占位符：xml_parser 生成文件时把映射行填进该位置，

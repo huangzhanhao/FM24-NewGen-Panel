@@ -1901,7 +1901,7 @@ pub fn preview_prompt(
         .iter()
         .find(|t| t.id == template_id)
         .ok_or_else(|| format!("找不到提示词模板（{template_id}）"))?;
-    let vars = image_ai::build_vars(&rec, &cfg.dictionary);
+    let vars = image_ai::build_vars(&rec, tpl);
     Ok(image_ai::render(&tpl.body, &vars))
 }
 

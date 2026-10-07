@@ -16,6 +16,7 @@ node_modules/
 /data/
 *.log
 newgan.log
+样本
 
 # ===============================
 # Virtual Environments（v1 Python 分支切换用，保留忽略）

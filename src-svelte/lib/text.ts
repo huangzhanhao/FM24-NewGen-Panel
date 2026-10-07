@@ -175,8 +175,6 @@ export const t = {
     manageTemplate: "管理模板",
     /** 模板管理弹窗：变量胶囊（点击在正文光标处插入占位符） */
     templateVariables: "可用变量（点击插入光标处）",
-    promptPreview: "提示词预览（按数据源渲染）",
-    promptPreviewing: "正在按数据源渲染提示词…",
     prompt: "提示词（可手动编辑）",
     /** 负向词折叠条（默认收起；展开/收起同一行，随折叠图标切换） */
     negativeCollapsed: "负向提示词（可选）",
@@ -256,8 +254,8 @@ export const t = {
     closeAlert: "关闭错误提示",
     closePreview: "关闭预览",
     viewLarge: "查看大图",
-    sourceReadonlyNote:
-      "已选择数据源：提示词由该球员数据渲染，仅供预览；如需手改请先清除数据源",
+    sourceEditableNote:
+      "已选择数据源：提示词已按该球员数据组装，可直接在此修改；未修改时每次生成都会重新随机细节，批量生成按各球员分别组装（不使用此处文本）",
     metaSeed: (s: string) => `Seed ${s}`,
     skeletonHint: "正在生成，通常 10–30 秒，智能改写开启时可能更久",
     empty:

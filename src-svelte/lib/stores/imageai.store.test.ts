@@ -26,7 +26,6 @@ vi.mock('../services/api', () => ({
       providers: [],
       settings: { defaultProviderId: 'openai', historyLimit: 20, galleryRecordLimit: 100, concurrency: 2, namingPattern: '{uid}_{index}' },
       templates: [],
-      dictionary: {},
     })),
   },
 }));
@@ -89,7 +88,6 @@ const cfg: ImageConfig = {
   ],
   settings: { defaultProviderId: 'p1', historyLimit: 20, galleryRecordLimit: 100, concurrency: 2, namingPattern: '{uid}_{index}' },
   templates: [],
-  dictionary: {},
 };
 
 describe('image store', () => {
@@ -132,6 +130,7 @@ describe('image store', () => {
 describe('queue store', () => {
   beforeEach(() => {
     vi.mocked(api.renderPrompt).mockClear();
+    vi.mocked(api.previewPrompt).mockClear();
     vi.mocked(api.addToQueue).mockClear();
     clearSelection();
     imageaiStore.queue = [];
@@ -153,7 +152,7 @@ describe('queue store', () => {
     expect(imageaiStore.selectedCount).toBe(0);
   });
 
-  it('buildQueueEntries renders prompt defaults and maps workbench params', async () => {
+  it('buildQueueEntries renders each player from the template and maps workbench params', async () => {
     imageaiStore.config = cfg;
     selectProvider('p1'); // model=m2, size=768x768, n=1, quality=auto, seed=''
     imageaiStore.prompt = '一张{{gender|男性}}脸';
@@ -165,10 +164,11 @@ describe('queue store', () => {
       { uid: 'u2', name: '乙' },
     ]);
     expect(entries).toHaveLength(2);
-    // prompt 走 render_prompt 展开「默认值版本」，占位符原文不得进请求
-    expect(api.renderPrompt).toHaveBeenCalledWith('一张{{gender|男性}}脸');
-    expect(entries[0].req.prompt).toBe('一张男性脸');
-    expect(entries[1].req.prompt).toBe('一张男性脸');
+    // 提示词逐球员按模板组装：各行变量不同，框内编辑不参与（占位符原文不得进请求）
+    expect(api.previewPrompt).toHaveBeenCalledTimes(2);
+    expect(api.renderPrompt).not.toHaveBeenCalled();
+    expect(entries[0].req.prompt).toBe('u1 的渲染结果');
+    expect(entries[1].req.prompt).toBe('u2 的渲染结果');
     // 字段映射：id 留空由后端补发；quality=auto → null；seed 数字化；uid 透传
     expect(entries[0]).toMatchObject({
       id: '', uid: 'u1', name: '甲', status: 'queued', images: [], error: '',
@@ -227,26 +227,47 @@ describe('P3 数据源与保存并替换', () => {
     imageaiStore.prompt = '一张{{gender|男性}}脸';
   });
 
-  it('setSourcePlayer / clearSourcePlayer', () => {
-    setSourcePlayer('u1', '甲');
+  /** 选人会让 store 异步组装并回填一次输入框；用例统一经此选人，并清掉这第一跳的调用计数，
+   *  后续断言只统计用例自己触发的调用。 */
+  async function pickSource(uid: string, name: string) {
+    setSourcePlayer(uid, name);
+    await new Promise((r) => setTimeout(r, 0));
+    vi.mocked(api.previewPrompt).mockClear();
+  }
+
+  it('setSourcePlayer assembles into the box / clearSourcePlayer resets it', async () => {
+    await pickSource('u1', '甲');
     expect(imageaiStore.sourcePlayer).toEqual({ uid: 'u1', name: '甲' });
+    expect(imageaiStore.prompt).toBe('u1 的渲染结果'); // 选人即组装回填
+    expect(imageaiStore.promptDirty).toBe(false);
     clearSourcePlayer();
     expect(imageaiStore.sourcePlayer).toBeNull();
   });
 
-  it('generate with a source player renders via previewPrompt and keeps the manual prompt', async () => {
-    setSourcePlayer('u1', '甲');
+  it('generate with a source player rerolls via previewPrompt and writes the result back', async () => {
+    await pickSource('u1', '甲');
     vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: '甲的专属提示词', missing: [] });
     await generate();
     expect(api.previewPrompt).toHaveBeenCalledWith('u1', 'tpl1');
     expect(api.renderPrompt).not.toHaveBeenCalled(); // 数据源模式不走手填渲染链
-    // 请求携带渲染结果；工作台手填 prompt 不被回写（渲染基座是模板，回写会污染下一次渲染）
     expect(vi.mocked(api.generateImage).mock.calls[0][0].prompt).toBe('甲的专属提示词');
-    expect(imageaiStore.prompt).toBe('一张{{gender|男性}}脸');
+    // 组装结果回填输入框：所见即所发
+    expect(imageaiStore.prompt).toBe('甲的专属提示词');
+  });
+
+  it('generate sends the hand-edited box text verbatim instead of rerolling', async () => {
+    await pickSource('u1', '甲');
+    imageaiStore.prompt = '我手改过的提示词';
+    imageaiStore.promptDirty = true;
+    await generate();
+    // 改过就不重掷：以框内文本为准，不再向后端要一套新随机细节
+    expect(api.previewPrompt).not.toHaveBeenCalled();
+    expect(vi.mocked(api.generateImage).mock.calls[0][0].prompt).toBe('我手改过的提示词');
+    expect(imageaiStore.promptDirty).toBe(false);
   });
 
   it('generate with a source player rejects when placeholders are missing', async () => {
-    setSourcePlayer('u1', '甲');
+    await pickSource('u1', '甲');
     vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: '', missing: ['skinCode'] });
     await expect(generate()).rejects.toThrow('占位符未填充：skinCode');
     expect(api.generateImage).not.toHaveBeenCalled(); // missing 不得原文送进 API
@@ -258,8 +279,8 @@ describe('P3 数据源与保存并替换', () => {
     expect(api.previewPrompt).not.toHaveBeenCalled();
   });
 
-  it('buildQueueEntries renders per player via previewPrompt with a source player', async () => {
-    setSourcePlayer('u0', '源');
+  it('buildQueueEntries renders per player via previewPrompt', async () => {
+    await pickSource('u0', '源');
     const entries = await buildQueueEntries([
       { uid: 'u1', name: '甲' },
       { uid: 'u2', name: '乙' },
@@ -272,7 +293,7 @@ describe('P3 数据源与保存并替换', () => {
   });
 
   it('buildQueueEntries rejects when a per-row preview reports missing placeholders', async () => {
-    setSourcePlayer('u0', '源');
+    await pickSource('u0', '源');
     vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: 'x', missing: ['skinCode'] });
     await expect(buildQueueEntries([{ uid: 'u1', name: '甲' }])).rejects.toThrow(
       '占位符未填充：skinCode',

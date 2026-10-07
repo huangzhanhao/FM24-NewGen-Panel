@@ -2,7 +2,7 @@
 //!
 //! 【与既有模块的复用关系，不另起一套】
 //! - 命令统一写在 commands.rs，本模块只提供被命令调用的类型与函数；
-//! - 出厂默认是 assets/ 三份 JSON（assets.rs include_str! 内嵌），用户可编辑副本在 data/；
+//! - 出厂默认是 assets/ 两份 JSON（assets.rs include_str! 内嵌），用户可编辑副本在 data/；
 //!   Config::builtin/load/ensure_user_files 仿 templates::RuleConfig；
 //! - 原子写复用 json_store。
 //! P2 起多家协议适配成「族」拆在 image_ai_providers/（openai 迁入 + volcano + dashscope），
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
 
 // ===================== 数据契约（与前端 types.ts 一一对应，camelCase）=====================
@@ -398,7 +398,47 @@ pub struct ImageAiFile {
     pub settings: GenSettings,
 }
 
-/// 提示词模板，body 支持 `{{变量|默认值}}`。
+/// 模板自带的随机细节词库：`{{hairStyle}}` 等占位符的候选池。
+/// 之所以挂在模板结构上而不是写成代码常量——这些全是**内容**（中文措辞），
+/// 要能即改即生效，和 body/negative 同等待遇。各池为空时回落内置默认模板的同名词库
+/// （见 build_vars），所以手建的模板不写词库也能跑。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailPools {
+    /// 发型样式候选，**键 = 发长码**（0=光头 … 5=极长发）：随机只换剪法，不改长度。
+    /// 用 BTreeMap 而非 HashMap：码都是单字符数字，字典序即数值序，落盘键序天然稳定。
+    #[serde(default)]
+    pub hair_style_by_length: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub beard: Vec<String>,
+    #[serde(default)]
+    pub expression: Vec<String>,
+    #[serde(default)]
+    pub pose: Vec<String>,
+    #[serde(default)]
+    pub lighting: Vec<String>,
+    #[serde(default)]
+    pub bg_tone: Vec<String>,
+    #[serde(default)]
+    pub kit_detail: Vec<String>,
+}
+
+impl DetailPools {
+    /// 所有分组皆空 = 这个模板没写词库（手建模板，或老配置尚未补齐）。
+    pub fn is_empty(&self) -> bool {
+        self.hair_style_by_length.is_empty()
+            && self.beard.is_empty()
+            && self.expression.is_empty()
+            && self.pose.is_empty()
+            && self.lighting.is_empty()
+            && self.bg_tone.is_empty()
+            && self.kit_detail.is_empty()
+    }
+}
+
+/// 提示词模板，body 支持 `{{变量|默认值}}`；`codes` 携带该模板的码值转译映射，
+/// `pools` 携带随机细节词库——两者与 body/negative 同等待遇：内容随模板落盘、可编辑，
+/// 空时逐组回落出厂默认模板（id = "default"）的同名结构，手建模板不写也能跑。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptTemplate {
@@ -407,19 +447,74 @@ pub struct PromptTemplate {
     pub body: String,
     #[serde(default)]
     pub negative: String,
+    #[serde(default)]
+    pub codes: CodeMaps,
+    #[serde(default)]
+    pub pools: DetailPools,
 }
 
-/// 码值转译表。注：肤色 0–19 的色卡来自 FM 内置**肤色**代码图鉴（仅作色卡参照）。
-/// hairColor 不设字典——FM 发色码语义无权威来源，按「查不到的码退回数字原值」处理。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// 模板自带的码值转译映射：RTF 扫出的码（种族/发色/肤色）→ 提示词文本。
+/// 发长码不经此表——发型词库 `hairStyleByLength` 按发长码分档，选出的风格词
+/// 自带长度语义，再叠一个长度译名是同义重复。肤色 0–19 色卡来自 FM 内置肤色
+/// 代码图鉴（仅作色卡参照）；发色 1–19 色名取自 FM 编辑器发色下拉框实测
+/// （`1` = 未知，表示随机取一色，见 build_vars）。
+///
+/// 【为什么手写 Serialize】分组是 `HashMap`，serde 按哈希迭代顺序落盘，而
+/// 哈希种子是**进程级随机**的——同一个文件每次启动写出来键序都不同，用户看到的现象
+/// 就是「字段顺序全变了」。手写序列化改按键的数值序输出，落盘文件才稳定、可 diff、可手改。
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeDictionary {
+pub struct CodeMaps {
     #[serde(default)]
     pub ethnicity: HashMap<String, String>,
     #[serde(default)]
-    pub hair_length: HashMap<String, String>,
+    pub hair_color: HashMap<String, String>,
     #[serde(default)]
     pub skin_code: HashMap<String, String>,
+}
+
+impl CodeMaps {
+    /// 三个分组皆空 = 这个模板没写码值映射（手建模板，或老配置尚未补齐）。
+    pub fn is_empty(&self) -> bool {
+        self.ethnicity.is_empty() && self.hair_color.is_empty() && self.skin_code.is_empty()
+    }
+}
+
+/// 键序：纯数字码按**数值**升序（按字典序会让 "10" 排在 "2" 前面），非数字键排在其后按字典序。
+fn sorted_keys(map: &HashMap<String, String>) -> Vec<&String> {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort_by(|a, b| match (a.parse::<u32>(), b.parse::<u32>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => a.cmp(b),
+    });
+    keys
+}
+
+/// 单个分组的稳定序列化包装。
+struct SortedCodes<'a>(&'a HashMap<String, String>);
+
+impl Serialize for SortedCodes<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(self.0.len()))?;
+        for k in sorted_keys(self.0) {
+            m.serialize_entry(k, &self.0[k])?;
+        }
+        m.end()
+    }
+}
+
+impl Serialize for CodeMaps {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(3))?;
+        m.serialize_entry("ethnicity", &SortedCodes(&self.ethnicity))?;
+        m.serialize_entry("hairColor", &SortedCodes(&self.hair_color))?;
+        m.serialize_entry("skinCode", &SortedCodes(&self.skin_code))?;
+        m.end()
+    }
 }
 
 /// 一次生成请求。
@@ -562,9 +657,6 @@ pub fn providers_path(d: &Path) -> PathBuf {
 pub fn templates_path(d: &Path) -> PathBuf {
     d.join("prompts").join("templates.json")
 }
-pub fn dictionary_path(d: &Path) -> PathBuf {
-    d.join("prompts").join("code_translation.json")
-}
 pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
 }
@@ -583,7 +675,6 @@ pub struct Config {
     pub providers: Vec<ProviderConfig>,
     pub settings: GenSettings,
     pub templates: Vec<PromptTemplate>,
-    pub dictionary: CodeDictionary,
 }
 
 impl Config {
@@ -598,8 +689,6 @@ impl Config {
             settings: f.settings,
             templates: serde_json::from_str(crate::assets::IMAGE_AI_TEMPLATES_RAW)
                 .expect("内置 image_ai_templates.json 格式错误"),
-            dictionary: serde_json::from_str(crate::assets::IMAGE_AI_DICT_RAW)
-                .expect("内置 image_ai_code_translation.json 格式错误"),
         }
     }
 
@@ -627,16 +716,6 @@ impl Config {
                 return Err(format!(
                     "模板无法解析：{}（{e}）",
                     templates_path(d).display()
-                ))
-            }
-        }
-        match json_store::load::<CodeDictionary>(&dictionary_path(d)) {
-            Ok(v) => cfg.dictionary = v,
-            Err(LoadError::Missing) => {}
-            Err(LoadError::Corrupt(e)) => {
-                return Err(format!(
-                    "码值表无法解析：{}（{e}）",
-                    dictionary_path(d).display()
                 ))
             }
         }
@@ -692,7 +771,8 @@ impl Config {
             json_store::save(&pp, &file)?;
         }
 
-        // templates.json：缺失导出；存在补入缺失的内置模板。
+        // templates.json：缺失导出；存在则补入缺失的内置模板，并给「有模板但没写词库/码值映射」的
+        // 老配置补上这两块（正文/负向归用户所有，不覆盖）。
         let tp = templates_path(d);
         let mut tpls = match json_store::load::<Vec<PromptTemplate>>(&tp) {
             Ok(v) => v,
@@ -704,24 +784,27 @@ impl Config {
         };
         let mut tchanged = false;
         for t in &builtin.templates {
-            if !tpls.iter().any(|x| x.id == t.id) {
-                tpls.push(t.clone());
-                tchanged = true;
+            match tpls.iter_mut().find(|x| x.id == t.id) {
+                // 已存在：只补**空的**词库与码值映射——否则新增的结构永远到不了老配置，
+                // 随机维度会静默退化成模板默认值、码值退成模板默认值。用户改过的不动。
+                Some(slot) => {
+                    if slot.pools.is_empty() && !t.pools.is_empty() {
+                        slot.pools = t.pools.clone();
+                        tchanged = true;
+                    }
+                    if slot.codes.is_empty() && !t.codes.is_empty() {
+                        slot.codes = t.codes.clone();
+                        tchanged = true;
+                    }
+                }
+                None => {
+                    tpls.push(t.clone());
+                    tchanged = true;
+                }
             }
         }
         if tchanged {
             json_store::save(&tp, &tpls)?;
-        }
-
-        // 码值表：用户全权拥有，**仅缺失时**导出；已存在（含损坏）一律不覆盖、不合并。
-        // 注意必须显式区分 Missing 与 Corrupt：用 `is_err()` 会把损坏的用户文件静默覆盖成出厂表。
-        let dp = dictionary_path(d);
-        match json_store::load::<CodeDictionary>(&dp) {
-            Ok(_) => {}
-            Err(LoadError::Missing) => json_store::save(&dp, &builtin.dictionary)?,
-            Err(LoadError::Corrupt(e)) => {
-                log::warn!(target: "image_ai", "码值表损坏，保留原文件不覆盖: {}（{e}）", dp.display());
-            }
         }
         Ok(())
     }
@@ -901,26 +984,6 @@ pub(crate) fn validate_for_generate(cfg: &Config, req: &GenRequest) -> Result<()
     probe.caps = Some(model.capabilities.clone());
     crate::image_ai_providers::for_kind(provider.kind).validate(&probe, &model.capabilities)
 }
-// ===================== 码值转译 =====================
-
-#[derive(Debug, Clone, Copy)]
-pub enum CodeKind {
-    Ethnicity,
-    HairLength,
-    SkinCode,
-}
-
-impl CodeDictionary {
-    pub fn translate(&self, kind: CodeKind, code: &str) -> String {
-        let map = match kind {
-            CodeKind::Ethnicity => &self.ethnicity,
-            CodeKind::HairLength => &self.hair_length,
-            CodeKind::SkinCode => &self.skin_code,
-        };
-        map.get(code).cloned().unwrap_or_else(|| code.to_string())
-    }
-}
-
 // ===================== 模板渲染：{{key}} / {{key|默认值}} =====================
 
 /// 渲染结果（跨 IPC 返回给前端，故需 Serialize + camelCase）。
@@ -966,51 +1029,150 @@ pub fn render(body: &str, vars: &HashMap<String, String>) -> RenderOutcome {
     RenderOutcome { text: out, missing }
 }
 
+// ===================== 随机细节词库与码值映射（内容在模板里，代码只留「出厂默认」的读取口） =====================
+
+/// 出厂默认词库 = 内置默认模板（id = "default"）自带的那一份。
+/// 某个模板没写词库时整体套用它，避免随机维度静默退化成模板默认值。
+/// 内置 JSON 是编译期内嵌常量，缓存一次即可（用户改的是 data/ 下的副本，动不到它）。
+static BUILTIN_POOLS: LazyLock<DetailPools> = LazyLock::new(|| {
+    Config::builtin()
+        .templates
+        .into_iter()
+        .find(|t| t.id == "default")
+        .map(|t| t.pools)
+        .unwrap_or_default()
+});
+
+/// 出厂默认码值映射 = 内置默认模板（id = "default"）自带的那一份。
+/// 某个模板没写码值映射时逐组套用它，避免码值维度退化成模板默认值。
+static BUILTIN_CODES: LazyLock<CodeMaps> = LazyLock::new(|| {
+    Config::builtin()
+        .templates
+        .into_iter()
+        .find(|t| t.id == "default")
+        .map(|t| t.codes)
+        .unwrap_or_default()
+});
+
+/// 肤色随机区间（族裔 0–10 各一项，取自真实导出名单的 5%~95% 分位）。
+/// 肤色码 0 = 最浅、19 = 最深；区间是统计值，编辑器对个别球员的赋值可能偏离，
+/// 取用时上下各放 1 档余量（见 build_vars），宁可略宽也不制造人为聚集。
+/// 只在**基础名单**缺 `skinCode` 时使用：纯全域随机会出现「北欧人配最深肤色」这类组合。
+const SKIN_RANGE_BY_ETHNICITY: [(u32, u32); 11] = [
+    (0, 6),   // 0 北欧/白人
+    (2, 10),  // 1 地中海/西语裔
+    (3, 13),  // 2 中东/北非
+    (11, 18), // 3 非洲/加勒比
+    (8, 16),  // 4 南亚
+    (7, 14),  // 5 东南亚
+    (7, 15),  // 6 太平洋岛民
+    (2, 11),  // 7 美洲原住民
+    (8, 17),  // 8 澳洲原住民
+    (6, 16),  // 9 黑白混血
+    (5, 8),   // 10 东亚
+];
+
+/// 从候选池随机取一项。调用方须保证池非空（空池在 build_vars 处直接跳过该变量，
+/// 让模板自己的 `{{key|默认值}}` 接管）。
+fn pick<T: AsRef<str>>(pool: &[T]) -> &str {
+    pool[rand::rng().random_range(0..pool.len())].as_ref()
+}
+
+/// 某一组候选池：模板里写了就用模板的，没写回落出厂默认。
+fn pool_or_builtin<'a>(pool: &'a [String], fallback: &'a [String]) -> &'a [String] {
+    if pool.is_empty() {
+        fallback
+    } else {
+        pool
+    }
+}
+
+/// 某一组码值映射：模板里写了就用模板的，没写回落出厂默认。
+fn codes_or_builtin<'a>(
+    map: &'a HashMap<String, String>,
+    fallback: &'a HashMap<String, String>,
+) -> &'a HashMap<String, String> {
+    if map.is_empty() {
+        fallback
+    } else {
+        map
+    }
+}
+
+/// 从发色映射里随机取一个**真实颜色**（排除「未知」这一档本身）。排序后再取，
+/// 使结果不依赖 HashMap 迭代顺序。
+fn random_hair_color(hair_colors: &HashMap<String, String>) -> String {
+    let mut pool: Vec<&String> = hair_colors
+        .iter()
+        .filter(|(code, name)| code.as_str() != "1" && name.as_str() != "未知")
+        .map(|(_, name)| name)
+        .collect();
+    pool.sort_unstable();
+    if pool.is_empty() {
+        return "黑色".into();
+    }
+    pick(&pool).to_string()
+}
+
 // ===================== 球员数据源 → 模板变量（P3：与 render 同层的纯函数） =====================
 
-/// 从球员记录构建模板变量。**缺失字段一律不入 map**：render 对查不到的键会展开
-/// `{{key|默认值}}` 的默认值兜底，模板作者得以按变量是否可用分别写默认文案；
-/// 若用空串占位反而会「渲染成功但内容为空」，绕过了默认值机制。
-/// 码值转译口径（对齐计划表）：ethnicity/hairLength/skinCode 经码值字典转译
-/// （如 "0" → "北欧/白人"、"12" → 色卡号文本）；hairColor 不过字典——FM 发色码
-/// 语义无权威来源，色卡即原文（见 CodeDictionary 上的说明）；其余字段一律原文。
-/// 基础名单 `detailed` 为 None：gender/skinCode 等拓展字段全部缺席但绝不 panic。
+/// 从球员记录构建模板变量，并补足 RTF 未声明的维度。
+///
+/// 【缺字段不入 map vs 随机补足】码值类字段（`ethnicity`/`hairColor`/`skinCode`）为空
+/// 或映射里查不到该码时一律不入 map，留给模板 `{{key|默认值}}` 兜底——裸数字（如 `15`）
+/// 进提示词对 AI 无意义，空串占位还会绕过默认值机制；而 `gender`/`age`/`height`/`skinCode`
+/// 在**基础名单**（`detailed` 为 None）里属结构性缺席，按约定从合理区间随机补足。
+///
+/// 【随机是常态而非脏数据】发型样式/胡须/表情/动作/打光/背景色调/球衣细节七项
+/// RTF 本就不提供，每次构建都重掷（同一球员每次生成换一套）；发色码 `1`（未知）
+/// 同样在此随机取一个真实色名。码值映射与七项候选词库都由调用方从**模板**传入
+/// （[`PromptTemplate::codes`] / [`PromptTemplate::pools`]），未写则逐组回落出厂默认。
 pub fn build_vars(
     rec: &crate::rtf_scanner::PlayerRecord,
-    dict: &CodeDictionary,
+    tpl: &PromptTemplate,
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
     vars.insert("uid".into(), rec.uid.clone());
     vars.insert("name".into(), rec.name.clone());
     vars.insert("primaryNat".into(), rec.primary_nat.clone());
     vars.insert("secNat".into(), rec.sec_nat.clone());
-    if !rec.ethnicity_code.is_empty() {
-        vars.insert(
-            "ethnicity".into(),
-            dict.translate(CodeKind::Ethnicity, &rec.ethnicity_code),
-        );
+    // 国籍中文名（三字码反查）；查不到码则不入 map，由模板默认值兜底。
+    if let Some(cn) = crate::assets::NAT_CN_BY_CODE.get(&rec.primary_nat) {
+        vars.insert("nationality".into(), cn.clone());
     }
-    if !rec.hair_length.is_empty() {
-        vars.insert(
-            "hairLength".into(),
-            dict.translate(CodeKind::HairLength, &rec.hair_length),
-        );
+    let codes = &tpl.codes;
+    if let Some(v) = codes_or_builtin(&codes.ethnicity, &BUILTIN_CODES.ethnicity)
+        .get(&rec.ethnicity_code)
+    {
+        vars.insert("ethnicity".into(), v.clone());
     }
-    if !rec.hair_color.is_empty() {
-        vars.insert("hairColor".into(), rec.hair_color.clone());
+    // 发色：映射值「未知」→ 随机取一个真实色名；码查不到则不入 map（模板默认值兜底）。
+    // 光头（发长码 0）不发色——「黑色光头」自相矛盾，交给模板默认值（空）接管。
+    if !rec.hair_color.is_empty() && rec.hair_length != "0" {
+        let hair_colors = codes_or_builtin(&codes.hair_color, &BUILTIN_CODES.hair_color);
+        if let Some(name) = hair_colors.get(&rec.hair_color) {
+            let resolved = if name == "未知" {
+                random_hair_color(hair_colors)
+            } else {
+                name.clone()
+            };
+            vars.insert("hairColor".into(), resolved);
+        }
     }
+
+    let mut club = String::new();
     if let Some(d) = &rec.detailed {
         if !d.skin_code.is_empty() {
-            vars.insert(
-                "skinCode".into(),
-                dict.translate(CodeKind::SkinCode, &d.skin_code),
-            );
+            if let Some(v) = codes_or_builtin(&codes.skin_code, &BUILTIN_CODES.skin_code)
+                .get(&d.skin_code)
+            {
+                vars.insert("skinCode".into(), v.clone());
+            }
         }
         for (key, val) in [
             ("gender", &d.gender),
             ("age", &d.age),
             ("height", &d.height),
-            ("club", &d.club),
             ("ca", &d.ca),
             ("pa", &d.pa),
         ] {
@@ -1018,7 +1180,87 @@ pub fn build_vars(
                 vars.insert(key.into(), val.clone());
             }
         }
+        if !d.club.is_empty() {
+            club = d.club.clone();
+        }
+        if !d.based.is_empty() {
+            vars.insert("based".into(), d.based.clone());
+        }
     }
+    // 基础名单缺拓展字段：肤色按族裔合理区间随机，性别/年龄/身高取合理区间。
+    if !vars.contains_key("skinCode") {
+        let (lo, hi) = rec
+            .ethnicity_code
+            .parse::<usize>()
+            .ok()
+            .and_then(|e| SKIN_RANGE_BY_ETHNICITY.get(e).copied())
+            .unwrap_or((0, 19));
+        let code = rand::rng()
+            .random_range(lo.saturating_sub(1)..=(hi + 1).min(19))
+            .to_string();
+        if let Some(v) = codes_or_builtin(&codes.skin_code, &BUILTIN_CODES.skin_code).get(&code) {
+            vars.insert("skinCode".into(), v.clone());
+        }
+    }
+    if !vars.contains_key("gender") {
+        vars.insert(
+            "gender".into(),
+            if rand::rng().random_bool(0.85) { "男" } else { "女" }.into(),
+        );
+    }
+    if !vars.contains_key("age") {
+        vars.insert("age".into(), rand::rng().random_range(16..=35).to_string());
+    }
+    if !vars.contains_key("height") {
+        vars.insert(
+            "height".into(),
+            format!("{} cm", rand::rng().random_range(168..=194)),
+        );
+    }
+    if !club.is_empty() {
+        vars.insert("club".into(), club.clone());
+    }
+
+    // 球衣归属：俱乐部优先，缺俱乐部退回国籍，两者都缺才用通用描述。
+    let jersey = if !club.is_empty() {
+        format!("{club}的比赛球衣")
+    } else if let Some(cn) = vars.get("nationality").cloned() {
+        format!("{cn}国家队球衣")
+    } else {
+        "深色比赛球衣，带队长袖标与徽章".into()
+    };
+    vars.insert("jersey".into(), jersey);
+
+    // 七项随机细节：候选词库来自**模板**（未写则逐组回落出厂默认），每次构建重掷。
+    // 组内为空说明连出厂默认也没有 → 不插入该变量，让模板自己的 `{{key|默认值}}` 接管。
+    let pools = &tpl.pools;
+    let tiers = if pools.hair_style_by_length.is_empty() {
+        &BUILTIN_POOLS.hair_style_by_length
+    } else {
+        &pools.hair_style_by_length
+    };
+    // 发长码查不到（脏数据）时依次回落到码 2 的档、再落到第一个档，不 panic。
+    let style_pool = tiers
+        .get(&rec.hair_length)
+        .or_else(|| tiers.get("2"))
+        .or_else(|| tiers.values().next());
+    if let Some(p) = style_pool.filter(|p| !p.is_empty()) {
+        vars.insert("hairStyle".into(), pick(p).to_string());
+    }
+    for (key, pool, fallback) in [
+        ("beard", &pools.beard, &BUILTIN_POOLS.beard),
+        ("expression", &pools.expression, &BUILTIN_POOLS.expression),
+        ("pose", &pools.pose, &BUILTIN_POOLS.pose),
+        ("lighting", &pools.lighting, &BUILTIN_POOLS.lighting),
+        ("bgTone", &pools.bg_tone, &BUILTIN_POOLS.bg_tone),
+        ("kitDetail", &pools.kit_detail, &BUILTIN_POOLS.kit_detail),
+    ] {
+        let cand = pool_or_builtin(pool, fallback);
+        if !cand.is_empty() {
+            vars.insert(key.into(), pick(cand).to_string());
+        }
+    }
+
     vars
 }
 
@@ -1361,7 +1603,6 @@ mod tests {
         Config::ensure_user_files(root.path()).unwrap();
         assert!(providers_path(root.path()).is_file());
         assert!(templates_path(root.path()).is_file());
-        assert!(dictionary_path(root.path()).is_file());
         let before = fs::read_to_string(providers_path(root.path())).unwrap();
         Config::ensure_user_files(root.path()).unwrap();
         assert_eq!(
@@ -1434,25 +1675,15 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_dictionary_is_not_overwritten() {
-        // ensure_user_files 必须显式区分 Missing/Corrupt：损坏的用户码值表不得被静默覆盖。
-        let root = tempfile::tempdir().unwrap();
-        Config::ensure_user_files(root.path()).unwrap();
-        let dp = dictionary_path(root.path());
-        fs::write(&dp, b"{ not json").unwrap();
-        Config::ensure_user_files(root.path()).unwrap();
-        assert_eq!(fs::read_to_string(&dp).unwrap(), "{ not json");
-    }
-
-    #[test]
-    fn translates_known_and_unknown_code() {
-        let d = Config::builtin().dictionary;
-        assert_eq!(d.translate(CodeKind::Ethnicity, "10"), "东亚");
-        // skinCode 0-19 覆盖肤色色卡：抽查最浅与最深。
-        assert_eq!(d.translate(CodeKind::SkinCode, "0"), "极浅暖棕（#fcecdc）");
-        assert_eq!(d.translate(CodeKind::SkinCode, "19"), "近黑褐色（#5c2c1c）");
-        // 超出 0-19 的码回退数字原值。
-        assert_eq!(d.translate(CodeKind::SkinCode, "20"), "20");
+    fn builtin_codes_translate_known_codes() {
+        // 内置默认模板的码值映射抽查：种族 0–10、肤色 0–19 覆盖全码段（含两端）。
+        let codes = &Config::builtin().templates[0].codes;
+        assert_eq!(codes.ethnicity["10"], "东亚");
+        assert_eq!(codes.skin_code["0"], "极浅暖棕（#fcecdc）");
+        assert_eq!(codes.skin_code["19"], "近黑褐色（#5c2c1c）");
+        assert_eq!(codes.hair_color.len(), 19);
+        assert_eq!(codes.hair_color["1"], "未知");
+        assert_eq!(codes.skin_code.len(), 20);
     }
 
     #[test]
@@ -2134,16 +2365,32 @@ mod tests {
             sec_nat: "SWE".into(),
             name: "测试球员".into(),
             hair_length: "2".into(),
-            hair_color: "FF88CC".into(), // 发色无字典：任意原文都应原样保留
+            hair_color: "3".into(),
             ethnicity_code: "0".into(),
             detailed,
         }
     }
 
+    /// 空模板（不写码值映射与词库）：构造「回落出厂默认」路径的测试样本。
+    fn blank_tpl() -> PromptTemplate {
+        PromptTemplate {
+            id: "t".into(),
+            name: String::new(),
+            body: String::new(),
+            negative: String::new(),
+            codes: CodeMaps::default(),
+            pools: DetailPools::default(),
+        }
+    }
+
     #[test]
     fn build_vars_expanded_roster_translates_codes() {
-        // 拓展名单全字段：码值经字典转译，其余原文；hairColor 原文不过字典。
-        let cfg = Config::builtin();
+        // 拓展名单全字段：码值经模板映射转译，其余原文。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
         let vars = build_vars(
             &sample_record(Some(DetailedInfo {
                 skin_code: "12".into(),
@@ -2155,65 +2402,335 @@ mod tests {
                 pa: "150".into(),
                 ..Default::default()
             })),
-            &cfg.dictionary,
+            &tpl,
         );
         assert_eq!(vars["uid"], "2000123456");
         assert_eq!(vars["name"], "测试球员");
         assert_eq!(vars["primaryNat"], "CHN");
         assert_eq!(vars["secNat"], "SWE");
-        assert_eq!(vars["ethnicity"], "北欧/白人"); // "0" 经字典转译
-        assert_eq!(vars["hairLength"], "短发"); // "2" 经字典转译
-        assert_eq!(vars["hairColor"], "FF88CC"); // 字典里没有发色表：原样保留
+        assert_eq!(vars["nationality"], "中国"); // 三字码反查中文名
+        assert_eq!(vars["ethnicity"], "北欧/白人"); // "0" 经模板映射转译
+        assert!(!vars.contains_key("hairLength"), "发长译名不产出——词库分档已承载长度语义");
+        assert_eq!(vars["hairColor"], "金色"); // "3" 经模板映射转译
         assert_eq!(vars["skinCode"], "红棕褐色（#b47454）"); // "12" → 色卡号文本
         assert_eq!(vars["gender"], "男");
         assert_eq!(vars["age"], "24");
         assert_eq!(vars["height"], "182");
         assert_eq!(vars["club"], "Test FC");
+        assert_eq!(vars["jersey"], "Test FC的比赛球衣"); // 球衣：俱乐部优先
         assert_eq!(vars["ca"], "120");
         assert_eq!(vars["pa"], "150");
     }
 
     #[test]
-    fn build_vars_basic_roster_omits_missing() {
-        // 基础名单 detailed=None：拓展字段缺席（模板 {{key|默认值}} 兜底），且绝不 panic。
-        let cfg = Config::builtin();
-        let vars = build_vars(&sample_record(None), &cfg.dictionary);
-        for key in ["skinCode", "gender", "age", "height", "club", "ca", "pa"] {
-            assert!(!vars.contains_key(key), "{key} 不应出现在基础名单变量中");
+    fn build_vars_basic_roster_randomizes_extended_fields() {
+        // 基础名单 detailed=None：拓展字段本就不在 RTF 里，按约定随机补足而非空着。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        let vars = build_vars(&sample_record(None), &tpl);
+        for key in ["skinCode", "gender", "age", "height"] {
+            assert!(vars.contains_key(key), "基础名单应随机补足 {key}");
+            assert!(!vars[key].is_empty(), "{key} 不得为空串");
         }
-        assert_eq!(vars["uid"], "2000123456");
-        assert_eq!(vars["name"], "测试球员");
-        assert_eq!(vars["primaryNat"], "CHN");
+        // 俱乐部不编造真实队名：缺省会退成国家队/通用球衣描述。
+        assert!(!vars.contains_key("club"));
+        assert!(!vars.contains_key("ca"));
+        assert!(!vars.contains_key("pa"));
+        assert_eq!(vars["jersey"], "中国国家队球衣");
         assert_eq!(vars["ethnicity"], "北欧/白人");
     }
 
     #[test]
-    fn build_vars_skips_empty_fields() {
-        // 空字段一律不入 map（包括 detailed 为 Some 但字段空串）：
-        // 若空串占位，render 会「命中变量」而不再展开默认值。
-        let cfg = Config::builtin();
-        let vars = build_vars(
-            &PlayerRecord {
-                uid: "u1".into(),
-                primary_nat: "SWE".into(),
-                sec_nat: String::new(),
-                name: "n".into(),
-                hair_length: String::new(),
-                hair_color: String::new(),
-                ethnicity_code: String::new(),
-                detailed: Some(DetailedInfo {
-                    skin_code: String::new(),
-                    ..Default::default()
-                }),
-            },
-            &cfg.dictionary,
-        );
-        for key in ["ethnicity", "hairLength", "hairColor", "skinCode"] {
-            assert!(!vars.contains_key(key), "空字段 {key} 不应入 map");
+    fn build_vars_skips_empty_code_fields() {
+        // 码值字段为空或映射查不到该码时一律不入 map（空串占位会让 render「命中变量」
+        // 而不再展开默认值，裸数字对 AI 无意义）；skinCode/gender/age/height 属结构性
+        // 缺席，会被随机补足——两条口径互不冲突。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        let mut rec = PlayerRecord {
+            uid: "u1".into(),
+            primary_nat: "SWE".into(),
+            sec_nat: String::new(),
+            name: "n".into(),
+            hair_length: String::new(),
+            hair_color: String::new(),
+            ethnicity_code: "99".into(), // 映射外的脏码：不入 map，由模板默认值兜底
+            detailed: Some(DetailedInfo {
+                skin_code: "99".into(),
+                ..Default::default()
+            }),
+        };
+        let vars = build_vars(&rec, &tpl);
+        for key in ["ethnicity", "hairColor"] {
+            assert!(!vars.contains_key(key), "空字段/映射外码 {key} 不应入 map");
         }
-        // secNat 与 uid/name 同为「原文」字段：无条件入 map（空串也是其原文）。
-        assert!(vars.contains_key("secNat"));
+        assert!(
+            !vars.contains_key("skinCode") || vars["skinCode"] != "99",
+            "映射外的肤色码不得以裸数字入 map"
+        );
+        for key in ["gender", "age", "height"] {
+            assert!(vars.contains_key(key), "{key} 应随机补足");
+        }
         assert_eq!(vars["uid"], "u1");
         assert_eq!(vars["primaryNat"], "SWE");
+        assert_eq!(vars["nationality"], "瑞典");
+        // secNat 与 uid/name 同为「原文」字段：无条件入 map（空串也是其原文）。
+        assert!(vars.contains_key("secNat"));
+        // 空字段路径（码为空串）单独验证：同样不入 map。
+        rec.ethnicity_code = String::new();
+        rec.detailed = None;
+        let vars = build_vars(&rec, &tpl);
+        assert!(!vars.contains_key("ethnicity"));
+        assert!(!vars.contains_key("hairColor"));
+    }
+
+    #[test]
+    fn build_vars_unknown_hair_color_randomizes_to_real_color() {
+        // 发色码 1 = 未知：「未知」不得进提示词，改取映射内的真实色名。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        let mut rec = sample_record(None);
+        rec.hair_color = "1".into();
+        for _ in 0..50 {
+            let vars = build_vars(&rec, &tpl);
+            let got = &vars["hairColor"];
+            assert_ne!(got, "未知");
+            assert!(
+                tpl.codes.hair_color.values().any(|v| v == got),
+                "应是映射内的真实色名，实际 {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_vars_bald_omits_hair_color() {
+        // 光头（发长码 0）不发色：避免「黑色光头」这类矛盾描述；
+        // 长度语义由发型词库第 0 档承载。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        let mut rec = sample_record(None);
+        rec.hair_length = "0".into();
+        let vars = build_vars(&rec, &tpl);
+        assert!(!vars.contains_key("hairColor"));
+        assert_eq!(vars["hairStyle"], "光滑头顶");
+    }
+
+    #[test]
+    fn build_vars_always_carries_random_details() {
+        // 七项随机细节：RTF 不提供，任何记录都必须带上（缺了会在模板里报未填充）。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        let vars = build_vars(&sample_record(None), &tpl);
+        for key in [
+            "hairStyle", "beard", "expression", "pose", "lighting", "bgTone", "kitDetail",
+        ] {
+            assert!(vars.contains_key(key), "{key} 必须存在");
+        }
+        assert!(vars.contains_key("jersey"));
+    }
+
+    #[test]
+    fn build_vars_random_skin_stays_within_ethnicity_band() {
+        // 基础名单随机补足的肤色必须落在该族裔的合理色带内（含 1 档容差），
+        // 否则会出现「北欧人配最深肤色」这类组合。东亚数据分位 5–8 → 容差后 4–9。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        let mut rec = sample_record(None);
+        rec.ethnicity_code = "10".into();
+        let allowed: Vec<String> = (4..=9)
+            .filter_map(|c| tpl.codes.skin_code.get(&c.to_string()).cloned())
+            .collect();
+        assert!(!allowed.is_empty());
+        for _ in 0..50 {
+            let vars = build_vars(&rec, &tpl);
+            assert!(
+                allowed.contains(&vars["skinCode"]),
+                "肤色「{}」越出东亚色带",
+                vars["skinCode"]
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_user_files_backfills_empty_codes_into_existing_template() {
+        // 老配置的模板没有 codes（字段是后来才加的）：启动时整块补入，
+        // 否则码值维度会静默退化。用户改过的码值映射不动——判据是「空才补」。
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        fs::create_dir_all(d.join("prompts")).unwrap(); // json_store::save 不建父目录
+        let mut stale = Config::builtin().templates[0].clone();
+        assert!(!stale.codes.is_empty());
+        stale.codes.ethnicity.clear();
+        stale.codes.hair_color.clear();
+        stale.codes.skin_code.clear();
+        json_store::save(&templates_path(d), &[stale]).unwrap();
+
+        Config::ensure_user_files(d).unwrap();
+        let cfg = Config::load(d).unwrap();
+        assert_eq!(cfg.templates[0].codes.hair_color.len(), 19, "空的码值映射应整块补入");
+        assert_eq!(cfg.templates[0].codes.skin_code.len(), 20);
+
+        // 非空（用户改过）的映射不回冲：只改一个键值，重启后原样保留。
+        let mut edited = cfg.templates[0].clone();
+        edited.codes.hair_color.insert("1".into(), "用户自定".into());
+        json_store::save(&templates_path(d), &[edited]).unwrap();
+        Config::ensure_user_files(d).unwrap();
+        let cfg = Config::load(d).unwrap();
+        assert_eq!(
+            cfg.templates[0].codes.hair_color["1"], "用户自定",
+            "用户改过的映射不得被内置值回冲"
+        );
+    }
+
+    #[test]
+    fn ensure_user_files_creates_prompts_dir_and_exports_builtin_on_fresh_install() {
+        // 全新安装：data/ 下连 prompts 目录都没有 → 建目录并按出厂内容导出模板与码值表。
+        // 这条路径保证「删掉整个 data/ 也能恢复出厂」，与「已存在只补不删」互为兜底。
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        assert!(!d.join("prompts").exists());
+
+        Config::ensure_user_files(d).unwrap();
+        assert!(d.join("prompts").is_dir(), "prompts 目录应被自动创建");
+
+        let cfg = Config::load(d).unwrap();
+        let builtin = Config::builtin();
+        assert_eq!(cfg.templates.len(), builtin.templates.len());
+        assert_eq!(
+            cfg.templates[0].body, builtin.templates[0].body,
+            "模板应逐字复用出厂默认（含新字段拼接）"
+        );
+        assert_eq!(cfg.templates[0].codes.hair_color.len(), 19, "模板应携带码值映射");
+        assert_eq!(cfg.templates[0].codes.skin_code.len(), 20);
+    }
+
+    #[test]
+    fn build_vars_draws_random_details_from_template_pools() {
+        // 词库随模板走：模板写了自己的池子就必须从池子里取，不能回落到出厂默认。
+        let mut tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        tpl.pools = DetailPools {
+            hair_style_by_length: [("0".to_string(), vec!["自定光头".into()])].into_iter().collect(),
+            beard: vec!["自定胡须".into()],
+            expression: vec!["自定表情".into()],
+            pose: vec!["自定动作".into()],
+            lighting: vec!["自定打光".into()],
+            bg_tone: vec!["自定背景".into()],
+            kit_detail: vec!["自定球衣".into()],
+        };
+        let mut rec = sample_record(None);
+        rec.hair_length = "0".into(); // 光头 → 取第 0 档
+        let vars = build_vars(&rec, &tpl);
+        assert_eq!(vars["hairStyle"], "自定光头");
+        assert_eq!(vars["beard"], "自定胡须");
+        assert_eq!(vars["expression"], "自定表情");
+        assert_eq!(vars["pose"], "自定动作");
+        assert_eq!(vars["lighting"], "自定打光");
+        assert_eq!(vars["bgTone"], "自定背景");
+        assert_eq!(vars["kitDetail"], "自定球衣");
+    }
+
+    #[test]
+    fn build_vars_translates_codes_from_template_codes() {
+        // 码值映射随模板走：模板写了自己的映射就必须用它，不能回落到出厂默认。
+        let mut tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        tpl.codes.ethnicity.clear();
+        tpl.codes.ethnicity.insert("0".into(), "自定义族裔描述".into());
+        tpl.codes.hair_color.clear();
+        tpl.codes.hair_color.insert("3".into(), "自定义金色".into());
+        tpl.codes.skin_code.clear();
+        tpl.codes.skin_code.insert("12".into(), "自定义肤色".into());
+        let vars = build_vars(
+            &sample_record(Some(DetailedInfo {
+                skin_code: "12".into(),
+                ..Default::default()
+            })),
+            &tpl,
+        );
+        assert_eq!(vars["ethnicity"], "自定义族裔描述");
+        assert_eq!(vars["hairColor"], "自定义金色");
+        assert_eq!(vars["skinCode"], "自定义肤色");
+    }
+
+    #[test]
+    fn build_vars_falls_back_to_builtin_codes_when_template_has_none() {
+        // 模板没写码值映射（全空）→ 逐组回落出厂默认，码值维度不得静默消失。
+        let builtin = &BUILTIN_CODES;
+        assert!(!builtin.ethnicity.is_empty(), "内置默认模板必须自带码值映射");
+        let vars = build_vars(&sample_record(None), &blank_tpl());
+        assert_eq!(vars["ethnicity"], builtin.ethnicity["0"]);
+        assert!(
+            builtin.skin_code.values().any(|v| *v == vars["skinCode"]),
+            "随机补足的肤色「{}」应在出厂映射内",
+            vars["skinCode"]
+        );
+    }
+
+    #[test]
+    fn build_vars_falls_back_to_builtin_pools_when_template_has_none() {
+        // 模板没写词库（全空）→ 逐组回落出厂默认，随机维度不得静默消失。
+        let builtin = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .expect("内置默认模板")
+            .pools;
+        assert!(!builtin.is_empty(), "内置默认模板必须自带词库");
+        let vars = build_vars(&sample_record(None), &blank_tpl());
+        for (key, pool) in [
+            ("beard", &builtin.beard),
+            ("expression", &builtin.expression),
+            ("pose", &builtin.pose),
+            ("lighting", &builtin.lighting),
+            ("bgTone", &builtin.bg_tone),
+            ("kitDetail", &builtin.kit_detail),
+        ] {
+            assert!(pool.contains(&vars[key]), "「{}」不在出厂词库里", vars[key]);
+        }
+    }
+
+    #[test]
+    fn template_codes_serialize_keys_in_numeric_order() {
+        // codes 分组是 HashMap，落盘顺序本会随进程随机（用户看到「字段顺序全变了」）；
+        // 手写序列化后必须稳定按数值序输出，否则手改的文件 diff 会一直很脏。
+        let text = serde_json::to_string_pretty(&Config::builtin().templates).unwrap();
+        let skin_at = text.find("\"skinCode\"").expect("应输出 skinCode 分组");
+        let skin = &text[skin_at..];
+        let k0 = skin.find("\"0\"").expect("应含码 0");
+        let k2 = skin.find("\"2\"").expect("应含码 2");
+        let k10 = skin.find("\"10\"").expect("应含码 10");
+        assert!(
+            k0 < k2 && k2 < k10,
+            "键应按数值序（0 < 2 < 10），实际 0@{k0} 2@{k2} 10@{k10}"
+        );
+        // 顶层分组顺序同样稳定：ethnicity → hairColor → skinCode
+        let eth = text.find("\"ethnicity\"").unwrap();
+        let hair = text.find("\"hairColor\"").unwrap();
+        assert!(eth < hair && hair < skin_at);
     }
 }

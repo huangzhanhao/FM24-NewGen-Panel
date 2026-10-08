@@ -25,7 +25,7 @@ export const VARIABLE_HINTS: ReadonlyArray<readonly [string, string]> = [
   ['identity', '身份'], ['shot', '景别'],
   ['gender', '性别'], ['age', '年龄'], ['height', '身高'],
   ['primaryNat', '国籍码'], ['secNat', '第二国籍码'], ['nationality', '国籍'],
-  ['club', '俱乐部'], ['jersey', '球衣'], ['kitDetail', '球衣细节'], ['based', '联赛地区'],
+  ['club', '俱乐部'], ['jersey', '球衣'], ['kitDetail', '球衣细节'], ['based', '联赛地区'], ['career', '生涯归属'],
   ['expression', '表情'], ['pose', '动作'], ['lighting', '打光方向'], ['bgTone', '背景色调'],
   ['ca', 'CA'], ['pa', 'PA'], ['uid', 'UID'],
 ];

@@ -1207,6 +1207,13 @@ fn pick<T: AsRef<str>>(pool: &[T]) -> &str {
     pool[rand::rng().random_range(0..pool.len())].as_ref()
 }
 
+/// 性别原文是否表示女性。FM 的性别列是导出语言原文（男/女、Male/Female），
+/// 判据走中英双语——与第 15 列表头识别同口径；双语之外的导出不识别、胡须照常随机。
+fn is_female(gender: &str) -> bool {
+    let g = gender.trim();
+    g == "女" || g.eq_ignore_ascii_case("female")
+}
+
 /// 某一组候选池：模板里写了就用模板的，没写回落出厂默认。
 fn pool_or_builtin<'a>(pool: &'a [String], fallback: &'a [String]) -> &'a [String] {
     if pool.is_empty() {
@@ -1285,10 +1292,24 @@ pub fn build_vars(
         .as_ref()
         .is_some_and(|d| !d.preferred_job.is_empty());
     if is_staff {
-        vars.insert(
-            "identity".into(),
-            rec.detailed.as_ref().unwrap().preferred_job.clone(),
-        );
+        // 职位原文可能是英文（如「Performance Analyst」）：与中文性别/国籍直接拼接
+        // 会渲染出「中国男Performance Analyst」，中英边界补空格；纯中文职位不受影响。
+        let job = rec
+            .detailed
+            .as_ref()
+            .unwrap()
+            .preferred_job
+            .trim()
+            .to_string();
+        let mut spaced = String::new();
+        if job.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            spaced.push(' ');
+        }
+        spaced.push_str(&job);
+        if job.ends_with(|c: char| c.is_ascii_alphabetic()) {
+            spaced.push(' ');
+        }
+        vars.insert("identity".into(), spaced);
     } else {
         let identity_map = if pools.identity.is_empty() {
             &BUILTIN_POOLS.identity
@@ -1304,18 +1325,24 @@ pub fn build_vars(
     {
         vars.insert("ethnicity".into(), v.clone());
     }
-    // 发色：映射值「未知」→ 随机取一个真实色名；码查不到则不入 map（模板默认值兜底）。
-    // 光头（发长码 0）不发色——「黑色光头」自相矛盾，交给模板默认值（空）接管。
-    if !rec.hair_color.is_empty() && rec.hair_length != "0" {
-        let hair_colors = map_or_builtin(&pools.hair_color, &BUILTIN_POOLS.hair_color);
-        if let Some(name) = hair_colors.get(&rec.hair_color) {
-            let resolved = if name == "未知" {
-                random_hair_color(hair_colors)
-            } else {
-                name.clone()
-            };
-            vars.insert("hairColor".into(), resolved);
-        }
+    // 发色解析：映射值「未知」→ 随机取一个真实色名；码查不到或光头（发长码 0）→ None。
+    // 解析结果两处消费：独立变量 hairColor（码值转译出口，供模板自由引用）+
+    // 并入 hairStyle 出口（见发型段），光头自然无色——根治「一头黑色，光滑头顶」矛盾。
+    let hair_color_name: Option<String> =
+        if !rec.hair_color.is_empty() && rec.hair_length != "0" {
+            let hair_colors = map_or_builtin(&pools.hair_color, &BUILTIN_POOLS.hair_color);
+            hair_colors.get(&rec.hair_color).map(|name| {
+                if name == "未知" {
+                    random_hair_color(hair_colors)
+                } else {
+                    name.clone()
+                }
+            })
+        } else {
+            None
+        };
+    if let Some(c) = &hair_color_name {
+        vars.insert("hairColor".into(), c.clone());
     }
 
     let mut club = String::new();
@@ -1344,6 +1371,20 @@ pub fn build_vars(
         if !d.based.is_empty() {
             vars.insert("based".into(), d.based.clone());
         }
+    }
+    // 生涯归属句按身份组装整句（render 无条件分支，身份差异靠变量承载）：
+    // 职员「任职于足球俱乐部」——总监/队医不「效力于联赛」；球员拼 based，
+    // 基础名单无 based 时不入 map，由模板默认值兜底。
+    let career = if is_staff {
+        Some("任职于足球俱乐部".to_string())
+    } else {
+        rec.detailed
+            .as_ref()
+            .filter(|d| !d.based.is_empty())
+            .map(|d| format!("效力于{}", d.based))
+    };
+    if let Some(c) = career {
+        vars.insert("career".into(), c);
     }
     // 基础名单缺拓展字段：肤色按族裔合理区间随机，性别/年龄/身高取合理区间。
     if !vars.contains_key("skinCode") {
@@ -1413,7 +1454,16 @@ pub fn build_vars(
         .or_else(|| tiers.get("2"))
         .or_else(|| tiers.values().next());
     if let Some(p) = style_pool.filter(|p| !p.is_empty()) {
-        vars.insert("hairStyle".into(), pick(p).to_string());
+        let style = pick(p).to_string();
+        vars.insert(
+            "hairStyle".into(),
+            // 发色并入发型出口：正文单一变量承载发色+剪法，光头（无色）不渲染发色，
+            // 杜绝「一头黑色，光滑头顶」这类矛盾组合。
+            match &hair_color_name {
+                Some(c) => format!("一头{c}，{style}"),
+                None => style,
+            },
+        );
     }
     // 景别与动作联动随机：先随机选中一档景别，动作只从该档的池子里取——
     // 「胸像特写」配「进球后滑跪」是矛盾画面，两变量不独立掷。
@@ -1453,6 +1503,12 @@ pub fn build_vars(
         if !cand.is_empty() {
             vars.insert(key.into(), pick(cand).to_string());
         }
+    }
+    // 女性不随机胡须：移除该变量 → 模板默认值「干净无胡须」兜底，
+    // 避免「女性 + 浓密络腮胡」矛盾画面（胡须词库本身不分性别）。
+    // gender 此时恒在 map（拓展名单原文或基础名单随机补足）。
+    if vars.get("gender").is_some_and(|g| is_female(g)) {
+        vars.remove("beard");
     }
 
     vars
@@ -2550,7 +2606,7 @@ mod tests {
     fn build_vars_basic_roster_randomizes_extended_fields() {
         // 基础名单 detailed=None：拓展字段本就不在 RTF 里，按约定随机补足而非空着；
         // RTF 同样不提供的随机细节（发型/景别+动作/胡须/表情/打光/背景/球衣细节）
-        // 也必须恒存在（缺了会在模板里报未填充）。
+        // 也必须存在（缺了会在模板里报未填充）——beard 例外：女性跳过胡须随机。
         let tpl = Config::builtin()
             .templates
             .into_iter()
@@ -2562,16 +2618,14 @@ mod tests {
             assert!(!vars[key].is_empty(), "{key} 不得为空串");
         }
         for key in [
-            "hairStyle",
-            "shot",
-            "beard",
-            "expression",
-            "pose",
-            "lighting",
-            "bgTone",
-            "kitDetail",
+            "hairStyle", "shot", "expression", "pose", "lighting", "bgTone", "kitDetail",
         ] {
             assert!(vars.contains_key(key), "{key} 必须存在");
+        }
+        if vars["gender"] == "女" {
+            assert!(!vars.contains_key("beard"), "女性不得随机胡须");
+        } else {
+            assert!(vars.contains_key("beard"), "男性必须随机胡须");
         }
         // 俱乐部不编造真实队名：缺省会退成国家队/通用球衣描述。
         assert!(!vars.contains_key("club"));
@@ -2684,7 +2738,71 @@ mod tests {
             based: "英格兰".into(),
             ..Default::default()
         }));
-        assert_eq!(build_vars(&player, &tpl)["identity"], "足球运动员");
+        let player_vars = build_vars(&player, &tpl);
+        assert_eq!(player_vars["identity"], "足球运动员");
+        assert_eq!(player_vars["career"], "效力于英格兰");
+        // 英文职位原文与中文性别/国籍拼接时补中英边界空格（纯中文职位不受影响）
+        let en_staff = build_vars(
+            &sample_record(Some(DetailedInfo {
+                preferred_job: "Performance Analyst".into(),
+                ..Default::default()
+            })),
+            &tpl,
+        );
+        assert_eq!(en_staff["identity"], " Performance Analyst ");
+        // 基础名单无 based：career 不入 map，由模板默认值「效力于职业联赛」兜底
+        assert!(!build_vars(&sample_record(None), &tpl).contains_key("career"));
+    }
+
+    #[test]
+    fn build_vars_female_skips_beard() {
+        // 女性不随机胡须（变量缺席 → 模板默认值「干净无胡须」兜底），
+        // 男性照常随机；判据是中英双语原文（女/Female）。
+        let tpl = Config::builtin()
+            .templates
+            .into_iter()
+            .find(|t| t.id == "default")
+            .unwrap();
+        for gender in ["女", "Female"] {
+            let vars = build_vars(
+                &sample_record(Some(DetailedInfo {
+                    gender: gender.into(),
+                    ..Default::default()
+                })),
+                &tpl,
+            );
+            assert!(
+                !vars.contains_key("beard"),
+                "性别原文「{gender}」不得随机胡须"
+            );
+        }
+        for gender in ["男", "Male"] {
+            for _ in 0..20 {
+                let vars = build_vars(
+                    &sample_record(Some(DetailedInfo {
+                        gender: gender.into(),
+                        ..Default::default()
+                    })),
+                    &tpl,
+                );
+                assert!(
+                    vars.contains_key("beard"),
+                    "性别原文「{gender}」必须随机胡须"
+                );
+            }
+        }
+        // 发色并入发型出口后：有发色时 hairStyle 带「一头{色}，」前缀，光头不带
+        let player = sample_record(None); // 发长码 2、发色码 3 → 有色有式
+        let vars = build_vars(&player, &tpl);
+        assert!(
+            vars["hairStyle"].starts_with("一头") && vars["hairStyle"].contains("，"),
+            "有发时发型应为「一头{{色}}，{{剪法}}」，实际「{}」",
+            vars["hairStyle"]
+        );
+        let mut bald = sample_record(None);
+        bald.hair_length = "0".into();
+        assert_eq!(build_vars(&bald, &tpl)["hairStyle"], "光滑头顶");
+        assert!(!build_vars(&bald, &tpl).contains_key("hairColor"));
     }
 
     #[test]
@@ -2703,6 +2821,7 @@ mod tests {
         }));
         for _ in 0..50 {
             let vars = build_vars(&staff, &tpl);
+            assert_eq!(vars["career"], "任职于足球俱乐部");
             assert!(
                 tpl.pools.staff.jersey.contains(&vars["jersey"]),
                 "职员球衣「{}」应取自职员池",
@@ -2873,12 +2992,14 @@ mod tests {
         let vars = build_vars(
             &sample_record(Some(DetailedInfo {
                 skin_code: "12".into(),
+                gender: "男".into(), // 固定男性：女性会跳过胡须随机，beard 断言需要确定性
                 ..Default::default()
             })),
             &tpl,
         );
-        // 词库全部取自模板池子（景别与动作联动：动作必须落在选中档的池内）
-        assert_eq!(vars["hairStyle"], "自定发型");
+        // 词库全部取自模板池子（景别与动作联动：动作必须落在选中档的池内；
+        // 发色并入发型出口——「一头{色}，{剪法}」）
+        assert_eq!(vars["hairStyle"], "一头自定义金色，自定发型");
         assert_eq!(vars["shot"], "自定义景别");
         assert_eq!(vars["pose"], "自定动作");
         assert_eq!(vars["beard"], "自定胡须");
@@ -2918,15 +3039,24 @@ mod tests {
             "随机补足的肤色「{}」应在出厂映射内",
             vars["skinCode"]
         );
-        // 随机维度：五项细节都应取自出厂词库；动作应落在出厂景别档位内
+        // 随机维度：四项细节都应取自出厂词库；动作应落在出厂景别档位内。
+        // beard 单独断言：女性跳过胡须随机（变量缺席），男性应落在出厂词库。
         for (key, pool) in [
-            ("beard", &builtin_tpl.pools.beard),
             ("expression", &builtin_tpl.pools.expression),
             ("lighting", &builtin_tpl.pools.lighting),
             ("bgTone", &builtin_tpl.pools.bg_tone),
             ("kitDetail", &builtin_tpl.pools.kit_detail),
         ] {
             assert!(pool.contains(&vars[key]), "「{}」不在出厂词库里", vars[key]);
+        }
+        if vars["gender"] == "女" {
+            assert!(!vars.contains_key("beard"), "女性不得随机胡须");
+        } else {
+            assert!(
+                builtin_tpl.pools.beard.contains(&vars["beard"]),
+                "「{}」不在出厂词库里",
+                vars["beard"]
+            );
         }
         let shot = builtin_tpl
             .pools

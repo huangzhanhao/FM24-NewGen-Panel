@@ -183,30 +183,27 @@ export interface GenSettings {
   concurrency: number; namingPattern: string;
 }
 
-/** 模板自带的随机细节词库（对应 Rust DetailPools）：{{hairStyle}} 等占位符的候选池。 */
+/** 模板自带的词库（对应 Rust DetailPools）：码值转译映射 + {{hairStyle}} 等占位符的候选池。
+ *  三组码值映射与身份称谓是「码→单一描述词」；词库组为空时后端逐组回落内置默认模板的同名词库。 */
 export interface DetailPools {
   hairStyleByLength: Record<string, string[]>; // 键 = 发长码 0–5
+  ethnicity: Record<string, string>; // 族裔码 0–10 → 描述词
+  hairColor: Record<string, string>; // 发色码 1–19 → 色名（"1" = 未知，随机取一色）
+  skinCode: Record<string, string>; // 肤色码 0–19 → 色卡描述
+  identity: Record<string, string>; // 键 = "player" → 球员称谓（职员直接渲染偏好工作原文，不走此表）
+  shots: { label: string; poses: string[] }[]; // 景别档位，动作与景别联动随机
+  staff: { jersey: string[]; kitDetail: string[]; shots: { label: string; poses: string[] }[] }; // 职员专用池：服装/细节/景别动作，占位符与球员共用
   beard: string[];
   expression: string[];
-  pose: string[];
   lighting: string[];
   bgTone: string[];
   kitDetail: string[];
 }
 
-/** 模板自带的码值转译映射（对应 Rust CodeMaps）：RTF 扫出的码 → 提示词文本。 */
-export interface CodeMaps {
-  ethnicity: Record<string, string>;
-  hairColor: Record<string, string>;
-  skinCode: Record<string, string>;
-}
-
 /** 提示词模板，body 支持 {{变量|默认值}}。 */
 export interface PromptTemplate {
   id: string; name: string; body: string; negative: string;
-  /** 码值转译映射；缺省时后端逐组回落内置默认模板的同名映射。 */
-  codes?: CodeMaps;
-  /** 随机细节词库；缺省时后端逐组回落内置默认模板的同名词库。 */
+  /** 码值映射与随机细节词库；缺省时后端逐组回落内置默认模板的同名词库。 */
   pools?: DetailPools;
 }
 

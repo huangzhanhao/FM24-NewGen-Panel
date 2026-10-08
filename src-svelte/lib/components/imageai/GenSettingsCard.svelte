@@ -7,23 +7,20 @@
      负向条 / 调用方式 / 尺寸提示）缩进 --sp-4 落到 26px（= 文本域内文左缘）。画幅盒是盒不是文字，
      必须与文本域外沿齐平；画幅帧只在盒内居中缩放，不参与对齐。
      两个文本域的高度只由 rows 定（行高 = --fs-md 13px × 1.65 = 21.45px，上下 padding 与描边共 18px）：
-     正文 3 行 = 82px（够放下默认模板那句 3 行提示词，再高只是空占纵向；`resize: vertical` 可拖高）、
-     负向 2 行 = 61px。
+     正文 4 行 ≈ 104px（`resize: vertical` 可拖高）、负向 2 行 = 61px。
      状态除 sizeCustomMode/sizeW/sizeH 等纯 UI 态外全部住在 imageaiStore；
-     尺寸违规单点读 store.sizeError（CTA 禁用共用）；外部触点：管理模板 onopentemplates、Ctrl+Enter ongenerate。 -->
+     尺寸违规单点读 store.sizeError（CTA 禁用共用）；外部触点：管理模板 onopentemplates。 -->
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text";
-  import { applyTemplate, imageaiStore, parseSize, SEED_MAX } from "../../stores/imageai.svelte";
+  import { applyTemplate, imageaiStore, parseSize, rerollPrompt, SEED_MAX } from "../../stores/imageai.svelte";
   import NumberStepper from "./NumberStepper.svelte";
 
   let {
     onopentemplates,
-    ongenerate,
   }: {
     onopentemplates: () => void;
-    ongenerate: () => void;
   } = $props();
 
   // 负向词的可见性完全由能力位决定：模型声明支持才渲染整块，且**默认展开输入框**；
@@ -227,14 +224,6 @@
       dims: `${pw}×${ph}`,
     };
   });
-
-  /** Ctrl/⌘ + Enter：焦点在正文/负向/Seed 任一输入位直接生成。 */
-  function onGenerateKey(e: KeyboardEvent) {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      ongenerate();
-    }
-  }
 </script>
 
 <section class="pcard">
@@ -261,7 +250,7 @@
     </button>
   </div>
 
-  <!-- 正文标题行：label 左；右侧 = 字数计数（模型有上限时）+ 快捷键提示 -->
+  <!-- 正文标题行：label 左；右侧 = 字数计数（模型有上限时） -->
   <div class="prompt-head">
     <label for="ig-prompt" class="field-label">{t.gen.prompt}</label>
     <span class="head-right">
@@ -270,22 +259,25 @@
           >{promptLen} / {promptLimit}</span
         >
       {/if}
-      <span class="kbd-hint">{t.gen.generateShortcut}</span>
     </span>
   </div>
 
-  <!-- 单框可编辑：内容即实发文本。有数据源时由后端组装后回填此处，用户改动优先。 -->
-  <textarea
-    id="ig-prompt"
-    rows="3"
-    bind:value={imageaiStore.prompt}
-    class:invalid={imageaiStore.promptOver}
-    oninput={() => (imageaiStore.promptDirty = true)}
-    onkeydown={onGenerateKey}
-  ></textarea>
-  {#if imageaiStore.sourcePlayer}
-    <p class="hint src-note">{t.gen.sourceEditableNote}</p>
-  {/if}
+  <!-- 单框可编辑：内容即实发文本。有数据源时由后端组装后回填此处，用户改动优先。
+       重掷胶囊浮在框内右下角（仅数据源模式下出现）：textarea 内放不了元素，用 wrapper 定位 -->
+  <div class="prompt-wrap">
+    <textarea
+      id="ig-prompt"
+      rows="4"
+      bind:value={imageaiStore.prompt}
+      class:invalid={imageaiStore.promptOver}
+      oninput={() => (imageaiStore.promptDirty = true)}
+    ></textarea>
+    {#if imageaiStore.sourcePlayer}
+      <button type="button" class="reroll-btn" title={t.gen.rerollPromptTitle} onclick={rerollPrompt}>
+        {t.gen.rerollPrompt}
+      </button>
+    {/if}
+  </div>
   {#if imageaiStore.promptOver}
     <p class="field-error">{t.gen.promptTooLong(promptLimit)}</p>
   {/if}
@@ -309,7 +301,6 @@
         rows="2"
         placeholder={t.gen.negative}
         bind:value={imageaiStore.negative}
-        onkeydown={onGenerateKey}
       ></textarea>
     {/if}
   {/if}
@@ -486,7 +477,6 @@
                 class:invalid={imageaiStore.seedOutOfRange}
                 value={imageaiStore.seed}
                 oninput={(e) => (imageaiStore.seed = e.currentTarget.value)}
-                onkeydown={onGenerateKey}
               />
             </div>
           {/if}
@@ -678,11 +668,30 @@
   .counter.over {
     color: var(--danger);
   }
-  /* Ctrl+Enter 快捷键提示 */
-  .kbd-hint {
+  /* 重掷胶囊：浮在输入框内右下角（textarea 内放不了元素，由 .prompt-wrap 定位）；
+     仅数据源模式渲染。几何复用 pill 令牌，hover 走强调色 */
+  .prompt-wrap {
+    position: relative;
+  }
+  .reroll-btn {
+    position: absolute;
+    right: var(--sp-2);
+    bottom: var(--sp-2);
+    padding: var(--pill-padding-y) var(--pill-padding-x-sm);
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--hairline);
+    background: var(--bg-surface);
     font-size: var(--fs-xs);
-    color: var(--text-3);
+    color: var(--text-2);
     white-space: nowrap;
+    cursor: pointer;
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out);
+  }
+  .reroll-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent-line);
   }
   /* 负向词折叠条：纯文字行，缩进 --sp-4 与正文标题行同左缘。
      按钮自身的描边/底色清掉，只剩一行文字 */
@@ -744,9 +753,6 @@
   .call-row select {
     flex: none;
     width: 124px;
-  }
-  .src-note {
-    margin-bottom: 0;
   }
 
   /* ---------- 生成参数区（原「画幅规格」子面板） ---------- */

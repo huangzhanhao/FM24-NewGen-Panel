@@ -54,6 +54,7 @@ import {
   imageaiStore,
   isRetryableErrorKind,
   loadImageState,
+  rerollPrompt,
   saveAndReplace,
   selectProvider,
   parseSeed,
@@ -264,6 +265,25 @@ describe('P3 数据源与保存并替换', () => {
     expect(api.previewPrompt).not.toHaveBeenCalled();
     expect(vi.mocked(api.generateImage).mock.calls[0][0].prompt).toBe('我手改过的提示词');
     expect(imageaiStore.promptDirty).toBe(false);
+  });
+
+  it('rerollPrompt reassembles from the source and covers hand edits', async () => {
+    await pickSource('u1', '甲');
+    imageaiStore.prompt = '我手改过的提示词';
+    imageaiStore.promptDirty = true;
+    vi.mocked(api.previewPrompt).mockResolvedValueOnce({ text: '重掷后的新组合', missing: [] });
+    rerollPrompt();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.previewPrompt).toHaveBeenCalledWith('u1', 'tpl1');
+    expect(imageaiStore.prompt).toBe('重掷后的新组合');
+    expect(imageaiStore.promptDirty).toBe(false); // 覆盖手改后回到「未编辑」态
+  });
+
+  it('rerollPrompt is a no-op without a source player', async () => {
+    clearSourcePlayer();
+    rerollPrompt();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.previewPrompt).not.toHaveBeenCalled();
   });
 
   it('generate with a source player rejects when placeholders are missing', async () => {

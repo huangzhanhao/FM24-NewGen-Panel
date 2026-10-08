@@ -16,9 +16,9 @@
 
   function blank(): PromptTemplate {
     bodyFocused = false;
-    // 新模板继承当前模板的码值映射与词库：否则它在文件里不带这两块，用户无从下手改。
+    // 新模板继承当前模板的词库：否则它在文件里不带 pools，码值映射与随机池子无从下手改。
     const cur = imageaiStore.config?.templates.find((x) => x.id === imageaiStore.templateId);
-    return { id: "", name: "", body: "", negative: "", codes: cur?.codes, pools: cur?.pools };
+    return { id: "", name: "", body: "", negative: "", pools: cur?.pools };
   }
 
   /** 点变量胶囊：在模板正文光标处插入 {{key}}（失焦后浏览器仍保留上次选区）；

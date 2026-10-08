@@ -245,7 +245,6 @@ export const t = {
       `提示词超出该模型 ${limit} 字上限，超出部分不会生效`,
     seedPlaceholder: "留空=随机",
     seedOutOfRange: (max: number) => `Seed 超出官方取值范围 0–${max}，本次生成将按随机处理`,
-    generateShortcut: "Ctrl + Enter 直接生成",
     generate: "生成图片",
     generating: "生成中…",
     genSec: (n: number) => `生成中 · ${n}s`,
@@ -254,8 +253,8 @@ export const t = {
     closeAlert: "关闭错误提示",
     closePreview: "关闭预览",
     viewLarge: "查看大图",
-    sourceEditableNote:
-      "已选择数据源：提示词已按该球员数据组装，可直接在此修改；未修改时每次生成都会重新随机细节，批量生成按各球员分别组装（不使用此处文本）",
+    rerollPrompt: "重掷",
+    rerollPromptTitle: "按当前数据源重新随机细节，覆盖输入框内容",
     metaSeed: (s: string) => `Seed ${s}`,
     skeletonHint: "正在生成，通常 10–30 秒，智能改写开启时可能更久",
     empty:

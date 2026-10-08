@@ -22,6 +22,7 @@ import type {
 export const VARIABLE_HINTS: ReadonlyArray<readonly [string, string]> = [
   ['name', '姓名'], ['ethnicity', '种族'], ['hairColor', '发色'],
   ['skinCode', '肤色'], ['hairStyle', '发型样式'], ['beard', '胡须'],
+  ['identity', '身份'], ['shot', '景别'],
   ['gender', '性别'], ['age', '年龄'], ['height', '身高'],
   ['primaryNat', '国籍码'], ['secNat', '第二国籍码'], ['nationality', '国籍'],
   ['club', '俱乐部'], ['jersey', '球衣'], ['kitDetail', '球衣细节'], ['based', '联赛地区'],
@@ -393,6 +394,13 @@ async function assembleForSource(uid: string) {
 
 export function clearSourcePlayer() {
   imageaiStore.sourcePlayer = null;
+}
+
+/** 手动重掷：按当前数据源重新组装一版提示词回填输入框（含新一轮随机细节），覆盖框内手改。
+ *  无数据源时空操作——纯模板渲染是确定性的默认值填充，没有可重掷的随机量。 */
+export function rerollPrompt() {
+  const sp = imageaiStore.sourcePlayer;
+  if (sp) void assembleForSource(sp.uid);
 }
 
 /** meta（同参重生）：结果卡传入该图记录的 {size, seed} 按原参重出；不传（CTA/重试）用工作台当前值。 */

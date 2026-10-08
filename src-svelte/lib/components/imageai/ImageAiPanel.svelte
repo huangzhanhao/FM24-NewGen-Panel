@@ -226,7 +226,7 @@
 
     <div class="wb-right">
       <!-- 生成设置（内容 + 画幅两区）；模板管理弹窗由本父级持有开关状态；Ctrl+Enter 走同一 onGenerate -->
-      <GenSettingsCard onopentemplates={() => (templateOpen = true)} ongenerate={() => onGenerate()} />
+      <GenSettingsCard onopentemplates={() => (templateOpen = true)} />
 
       <button
         class="btn primary cta"

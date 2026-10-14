@@ -6,14 +6,14 @@
 //! 规则块的键有三类：国籍三字码（国家级块）、目录名（族群/群组块）、`_DEFAULT_`（全局块）。
 //! 每条规则有四种形态：`"default"`（归属者自己的目录）、`directly`（单一目录）、
 //! `random`（等概率多选一）、`randomWithWeight`（按权重多选一）。
-use super::{pick_from_pools_flat, sorted_unique, PickedImage, PickRule, Pools, RuleFile};
+use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools, RuleFile};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
 use rand::Rng;
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
-use serde::{Deserialize, Serialize}; // 根路径同时提供 derive 宏与 trait
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -49,7 +49,10 @@ pub enum MappingRule {
     /// 等概率随机映射到列表中的一个目录。
     Random(Vec<String>),
     /// 按权重随机映射（权重为整数百分比，但和不保证等于 100，一律按 Σ 归一）。
-    Weighted { dirs: Vec<String>, weights: Vec<serde_json::Number> },
+    Weighted {
+        dirs: Vec<String>,
+        weights: Vec<serde_json::Number>,
+    },
 }
 
 impl Serialize for MappingRule {
@@ -203,10 +206,14 @@ impl Standard3Config {
     /// 因此权重和是 99 还是 100 都不影响分布（实测配置里两种和都存在）。
     fn weighted_index(weights: &[f64], r: f64) -> usize {
         let sum: f64 = weights.iter().sum();
-        if sum <= 0.0 || weights.is_empty() { return 0; }
+        if sum <= 0.0 || weights.is_empty() {
+            return 0;
+        }
         let mut rest = (r * sum).clamp(0.0, sum);
         for (i, w) in weights.iter().enumerate() {
-            if rest < *w { return i; }
+            if rest < *w {
+                return i;
+            }
             rest -= *w;
         }
         weights.len() - 1 // 浮点累加误差兜底：落到最后一项
@@ -225,8 +232,7 @@ impl Standard3Config {
         let folders: BTreeSet<&str> = self.folder_list.iter().map(String::as_str).collect();
         if folders.len() != self.folder_list.len() {
             let mut seen = BTreeSet::new();
-            let dup = self.folder_list.iter()
-                .find(|d| !seen.insert(d.as_str())).cloned().unwrap_or_default();
+            let dup = self.folder_list.iter().find(|d| !seen.insert(d.as_str())).cloned().unwrap_or_default();
             return Err(format!("FolderList 存在重复目录：{dup:?}"));
         }
         for (nat, dir) in &self.ethnics {
@@ -245,8 +251,7 @@ impl Standard3Config {
         for (key, block) in &self.ethnicity_mapping_rules {
             // 块键合法域：国籍三字码 / FolderList 里的目录名（族群块）/ _DEFAULT_。
             if key != DEFAULT_BLOCK && !self.ethnics.contains_key(key) && !folders.contains(key.as_str()) {
-                return Err(format!(
-                    "未知规则块键 {key:?}：既不是 Ethnics 里的国籍码，也不是 FolderList 里的目录名"));
+                return Err(format!("未知规则块键 {key:?}：既不是 Ethnics 里的国籍码，也不是 FolderList 里的目录名"));
             }
             for code in 0..=10u8 {
                 if !block.contains_key(&code.to_string()) {
@@ -265,17 +270,23 @@ impl Standard3Config {
                     MappingRule::Default => {}
                     MappingRule::Directly(d) => check_folder(&folders, d, &where_)?,
                     MappingRule::Random(v) => {
-                        if v.is_empty() { return Err(format!("{where_}：random 的目录列表为空")); }
-                        for d in v { check_folder(&folders, d, &where_)?; }
+                        if v.is_empty() {
+                            return Err(format!("{where_}：random 的目录列表为空"));
+                        }
+                        for d in v {
+                            check_folder(&folders, d, &where_)?;
+                        }
                     }
                     MappingRule::Weighted { dirs, weights } => {
                         if dirs.len() != weights.len() {
-                            return Err(format!(
-                                "{where_}：ethnicities 有 {} 项、weights 有 {} 项，两者必须等长",
-                                dirs.len(), weights.len()));
+                            return Err(format!("{where_}：ethnicities 有 {} 项、weights 有 {} 项，两者必须等长",dirs.len(), weights.len()));
                         }
-                        if dirs.is_empty() { return Err(format!("{where_}：加权目录列表为空")); }
-                        for d in dirs { check_folder(&folders, d, &where_)?; }
+                        if dirs.is_empty() {
+                            return Err(format!("{where_}：加权目录列表为空"));
+                        }
+                        for d in dirs {
+                            check_folder(&folders, d, &where_)?;
+                        }
                         let nums: Vec<f64> = weights.iter().filter_map(|n| n.as_f64()).collect();
                         if nums.len() != weights.len() {
                             return Err(format!("{where_}：weights 含无法当作数值读取的项"));
@@ -293,7 +304,11 @@ impl Standard3Config {
 
 /// 校验单个目录名在 FolderList 内。
 fn check_folder(folders: &BTreeSet<&str>, dir: &str, where_: &str) -> Result<(), String> {
-    if folders.contains(dir) { Ok(()) } else { Err(format!("{where_}：目录 {dir:?} 不在 FolderList 内")) }
+    if folders.contains(dir) {
+        Ok(())
+    } else {
+        Err(format!("{where_}：目录 {dir:?} 不在 FolderList 内"))
+    }
 }
 
 /// 把一条规则解析成候选目录形态；`owner` 是归属者目录（`"default"` 用它）。
@@ -312,11 +327,17 @@ fn to_candidates(rule: &MappingRule, owner: Option<&str>) -> Option<Candidates> 
 
 /// 本标准的可编辑规则文件登记（命令层查表用）。
 pub fn rule_file() -> RuleFile {
-    RuleFile { name: "standard3", path: |data_dir: &Path| rule_path(data_dir), save: save_file }
+    RuleFile {
+        name: "standard3",
+        path: |data_dir: &Path| rule_path(data_dir),
+        save: save_file,
+    }
 }
 
 /// 用户可编辑规则文件路径：<data_dir>/rules/standard3.json。
-fn rule_path(data_dir: &Path) -> PathBuf { data_dir.join("rules").join("standard3.json") }
+fn rule_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("rules").join("standard3.json")
+}
 
 /// 解析 + 结构校验 + 原子写回：非法内容不写盘，错误信息直接回显给规则编辑对话框。
 fn save_file(path: &Path, content: &str) -> Result<(), String> {
@@ -365,7 +386,12 @@ impl Standard3Rule {
             .filter(|d| faces_map.get(*d).is_some_and(|s| !s.is_empty()))
             .cloned()
             .collect();
-        Self { pools, rule_dirs, fallback: cfg.fallback, cfg: cfg.clone() }
+        Self {
+            pools,
+            rule_dirs,
+            fallback: cfg.fallback,
+            cfg: cfg.clone(),
+        }
     }
 
     /// 目录是否「可用」：在清单内、且池里还有图。规则只允许从这样的目录取图。
@@ -380,7 +406,9 @@ impl Standard3Rule {
             Candidates::Single(d) => usable(d).then(|| d.clone()),
             Candidates::Uniform(list) => {
                 let avail: Vec<&String> = list.iter().filter(|d| usable(d)).collect();
-                if avail.is_empty() { return None; }
+                if avail.is_empty() {
+                    return None;
+                }
                 let i = rand::rng().random_range(0..avail.len());
                 Some(avail[i].clone())
             }
@@ -388,9 +416,14 @@ impl Standard3Rule {
                 let mut ds: Vec<String> = Vec::new();
                 let mut ws: Vec<f64> = Vec::new();
                 for (d, w) in dirs.iter().zip(weights.iter()) {
-                    if usable(d) { ds.push(d.clone()); ws.push(*w); }
+                    if usable(d) {
+                        ds.push(d.clone());
+                        ws.push(*w);
+                    }
                 }
-                if ds.is_empty() { return None; }
+                if ds.is_empty() {
+                    return None;
+                }
                 let r: f64 = rand::rng().random_range(0.0..1.0);
                 Some(ds.swap_remove(Standard3Config::weighted_index(&ws, r)))
             }
@@ -400,19 +433,27 @@ impl Standard3Rule {
     /// 从指定目录池随机取一张图；禁重复时把它从池中移除。目录不可用返回 None。
     fn take_from(&mut self, dir: &str, duplicates: bool) -> Option<PickedImage> {
         // 清单外目录不得被规则取图（可用性判定与 choose_dir 同一处，owner_folder 路径也走这里）。
-        if !self.usable(dir) { return None; }
+        if !self.usable(dir) {
+            return None;
+        }
         let pool = self.pools.get_mut(dir)?;
         let idx = rand::rng().random_range(0..pool.len());
-        // 下标直取 O(1)（旧写法 iter().nth(idx) 是 O(idx) 线性游走，实测占抽图成本大头）；
-        // 禁重复就地 swap_remove 摘除，同样 O(1)，且**不需要**再按值找一遍位置。
-        let stem = if duplicates { pool[idx].clone() } else { pool.swap_remove(idx) };
-        Some(PickedImage { dir: dir.to_string(), stem })
+        // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
+        let stem = if duplicates {
+            pool[idx].clone()
+        } else {
+            pool.swap_remove(idx)
+        };
+        Some(PickedImage {
+            dir: dir.to_string(),
+            stem,
+        })
     }
 }
 
 impl PickRule for Standard3Rule {
     fn exclude_used(&mut self, used: &BTreeSet<String>) {
-        // 按 from 全路径精确匹配，不跨目录误伤同名图。只有一份全池，剔一次即对规则与兜底同时生效。
+        // 按 from 全路径精确匹配，不跨目录误伤同名图。
         for (dir, pool) in self.pools.iter_mut() {
             pool.retain(|s| !used.contains(&record_from(dir, s)));
         }
@@ -424,15 +465,18 @@ impl PickRule for Standard3Rule {
         let res = self.cfg.resolve(&player.primary_nat, &player.ethnicity_code);
         if let Some(candidates) = &res.candidates {
             if let Some(dir) = self.choose_dir(candidates) {
-                if let Some(img) = self.take_from(&dir, duplicates) { return Some(img); }
+                if let Some(img) = self.take_from(&dir, duplicates) {
+                    return Some(img);
+                }
             }
         }
         if let Some(owner) = &res.owner_folder {
-            if let Some(img) = self.take_from(owner, duplicates) { return Some(img); }
+            if let Some(img) = self.take_from(owner, duplicates) {
+                return Some(img);
+            }
         }
         match self.fallback {
-            // 兜底从同一份全池里抽：规则已抽走的图不在池里，天然不会重复；
-            // 兜底抽中的图也已从这份池里摘掉，后续规则不会再抽到它 —— 一份存储，无需同步。
+            // 兜底从同一份全池抽：已摘除的图天然不会再发出，无需同步。
             Fallback::Random => pick_from_pools_flat(&mut self.pools, duplicates),
             Fallback::Skip => None,
         }
@@ -446,13 +490,20 @@ mod tests {
 
     fn player(uid: &str, nat: &str, code: &str) -> PlayerRecord {
         PlayerRecord {
-            uid: uid.into(), primary_nat: nat.into(), sec_nat: String::new(),
-            name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
-            ethnicity_code: code.into(), detailed: None,
+            uid: uid.into(),
+            primary_nat: nat.into(),
+            sec_nat: String::new(),
+            name: "T".into(),
+            hair_length: "1".into(),
+            hair_color: "1".into(),
+            ethnicity_code: code.into(),
+            detailed: None,
         }
     }
 
-    fn sset(v: &[&str]) -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() }
+    fn sset(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
 
     /// 测试辅助：由一级目录图集构造递归池（根 + 各目录）。
     fn recursive(faces_map: &BTreeMap<String, BTreeSet<String>>) -> BTreeMap<String, BTreeSet<String>> {
@@ -461,7 +512,9 @@ mod tests {
         pools
     }
 
-    fn num(v: i64) -> serde_json::Number { serde_json::Number::from(v) }
+    fn num(v: i64) -> serde_json::Number {
+        serde_json::Number::from(v)
+    }
 
     // ---------------- 解析（组 A） ----------------
 
@@ -503,8 +556,7 @@ mod tests {
         // 族群块内的 "default"：SouthConeSA 块含 default → 归属该族群国家的 Ethnics。
         let arg_nat = &cfg.ethnics["ARG"];
         assert_eq!(arg_nat, "SouthConeSA");
-        let default_code = cfg.ethnicity_mapping_rules["SouthConeSA"].iter()
-            .find(|(_, r)| **r == MappingRule::Default).map(|(c, _)| c.clone()).unwrap();
+        let default_code = cfg.ethnicity_mapping_rules["SouthConeSA"].iter().find(|(_, r)| **r == MappingRule::Default).map(|(c, _)| c.clone()).unwrap();
         let arg = cfg.resolve("ARG", &default_code);
         assert_eq!(arg.candidates, Some(Candidates::Single("SouthConeSA".into())));
         // 全局块内的 "default"：CHN 码 0 → Ethnics[CHN]。
@@ -564,9 +616,9 @@ mod tests {
         // 权重和为 99（实测配置里存在）：分界在 66/99 处，而不是 66/100。
         let w = [66.0, 33.0];
         assert_eq!(Standard3Config::weighted_index(&w, 0.0), 0);
-        assert_eq!(Standard3Config::weighted_index(&w, 0.5), 0);            // 49.5 < 66
+        assert_eq!(Standard3Config::weighted_index(&w, 0.5), 0); // 49.5 < 66
         assert_eq!(Standard3Config::weighted_index(&w, 66.0 / 99.0 - 1e-9), 0);
-        assert_eq!(Standard3Config::weighted_index(&w, 66.0 / 99.0), 1);    // 正好落在第二项
+        assert_eq!(Standard3Config::weighted_index(&w, 66.0 / 99.0), 1); // 正好落在第二项
         assert_eq!(Standard3Config::weighted_index(&w, 0.999999), 1);
         // 单元素与全零权重：不 panic、恒取首项。
         assert_eq!(Standard3Config::weighted_index(&[5.0], 0.7), 0);
@@ -580,7 +632,8 @@ mod tests {
         // 内置默认本身必须通过校验。
         base().validate().unwrap();
         // ① 版本不对
-        let mut c = base(); c.version = 3;
+        let mut c = base();
+        c.version = 3;
         assert!(c.validate().unwrap_err().contains("Version"));
         // ② 未知块键（既非国籍码也非目录名）
         let mut c = base();
@@ -614,11 +667,14 @@ mod tests {
         });
         assert!(c.validate().unwrap_err().contains("大于 0"));
         // ⑦ 缺全局默认块 / FolderList 为空或有重复
-        let mut c = base(); c.ethnicity_mapping_rules.remove(DEFAULT_BLOCK);
+        let mut c = base();
+        c.ethnicity_mapping_rules.remove(DEFAULT_BLOCK);
         assert!(c.validate().unwrap_err().contains(DEFAULT_BLOCK));
-        let mut c = base(); c.folder_list = vec![];
+        let mut c = base();
+        c.folder_list = vec![];
         assert!(c.validate().unwrap_err().contains("FolderList"));
-        let mut c = base(); c.folder_list.push(c.folder_list[0].clone());
+        let mut c = base();
+        c.folder_list.push(c.folder_list[0].clone());
         assert!(c.validate().unwrap_err().contains("重复"));
     }
 
@@ -639,8 +695,14 @@ mod tests {
                 let r = cfg.resolve(nat, &code.to_string());
                 let c = r.candidates.clone().unwrap_or_else(|| panic!("{nat}/{code} 无法解析"));
                 match &c {
-                    Candidates::Single(d) => { *kinds.entry("single").or_insert(0) += 1; targeted.insert(d.clone()); }
-                    Candidates::Uniform(v) => { *kinds.entry("uniform").or_insert(0) += 1; targeted.extend(v.iter().cloned()); }
+                    Candidates::Single(d) => {
+                        *kinds.entry("single").or_insert(0) += 1;
+                        targeted.insert(d.clone());
+                    }
+                    Candidates::Uniform(v) => {
+                        *kinds.entry("uniform").or_insert(0) += 1;
+                        targeted.extend(v.iter().cloned());
+                    }
                     Candidates::Weighted { dirs, weights } => {
                         *kinds.entry("weighted").or_insert(0) += 1;
                         targeted.extend(dirs.iter().cloned());
@@ -670,8 +732,7 @@ mod tests {
     fn pick_falls_back_to_owner_folder_when_target_dir_missing() {
         let mut cfg = RuleConfig::builtin().standard3;
         // 人为把 ESP 码 1 指到包内不存在的目录，验证第一级回退用本国基础池。
-        cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default()
-            .insert("1".into(), MappingRule::Directly("NorthernSA".into()));
+        cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default().insert("1".into(), MappingRule::Directly("NorthernSA".into()));
         let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
             ("Spain".into(), sset(&["sp1"])),
             ("Anglosphere".into(), sset(&["an1"])),
@@ -686,11 +747,9 @@ mod tests {
     fn pick_second_level_fallback_random_and_skip() {
         let mut cfg = RuleConfig::builtin().standard3;
         // ESP 码 1 指向包内没有的目录，且本国基础池 Spain 也没建 → 只能走第二级。
-        cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default()
-            .insert("1".into(), MappingRule::Directly("NorthernSA".into()));
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
-            ("Anglosphere".into(), sset(&["an1"])),
-        ]);
+        cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default().insert("1".into(), MappingRule::Directly("NorthernSA".into()));
+        let faces_map: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("Anglosphere".into(), sset(&["an1"]))]);
         // random：从递归全池抽到图（目录可以不是 Spain）。
         let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
         let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
@@ -704,9 +763,7 @@ mod tests {
     #[test]
     fn pick_unknown_nationality_goes_straight_to_fallback() {
         let cfg = RuleConfig::builtin().standard3;
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
-            ("Spain".into(), sset(&["sp1"])),
-        ]);
+        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([("Spain".into(), sset(&["sp1"])),]);
         // ZZZ 不在 Ethnics：归属者目录未知 → 全局块的 "default" 也解析不出候选 → 兜底。
         let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
         let img = rule.pick(&player("r-1", "ZZZ", "1"), true).unwrap();
@@ -747,11 +804,9 @@ mod tests {
 
     #[test]
     fn exclude_used_removes_occupied_images() {
-        // Preserve 禁重复：已占用的图按 from 全路径从两份索引剔除（池耗尽语义由真实包形态组覆盖）。
+        // Preserve 禁重复：已占用的图按 from 全路径从全池剔除（池耗尽语义由真实包形态组覆盖）。
         let cfg = RuleConfig::builtin().standard3;
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
-            ("Spain".into(), sset(&["sp1", "sp2"])),
-        ]);
+        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([("Spain".into(), sset(&["sp1", "sp2"]))]);
         let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
         rule.exclude_used(&sset(&["Spain/sp1"]));
         for _ in 0..5 {
@@ -807,8 +862,7 @@ mod tests {
         let layout = crate::facepack_scanner::classify(
             &scan.faces_map.keys().cloned().collect::<BTreeSet<_>>(), false, &refs);
         // 清单 62 目录全在 → 判标准三完整包；多出的 Staff/WF/Scandinavian 不影响判定。
-        assert_eq!(layout,
-                   crate::facepack_scanner::PackLayout::Standard { standard: 3, complete: true });
+        assert_eq!(layout, crate::facepack_scanner::PackLayout::Standard { standard: 3, complete: true });
         let rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
         // 规则可用目录只收清单内且非空的：包外目录不进规则池（含与清单目录同在一级的 Scandinavian）。
         assert_eq!(rule.rule_dirs.len(), cfg.folder_list.len());
@@ -846,8 +900,7 @@ mod tests {
                     "{nat}/{code} 抽到 {}/{}，候选只有 {cands:?}", img.dir, img.stem);
                 assert!(folders.contains(img.dir.as_str()), "{nat}/{code} 抽到清单外目录");
                 let base = dir.path().join(&img.dir).join(&img.stem);
-                assert!(["png", "jpg", "jpeg"].iter()
-                    .any(|e| std::path::Path::new(&format!("{}.{e}", base.display())).is_file()),
+                assert!(["png", "jpg", "jpeg"].iter().any(|e| std::path::Path::new(&format!("{}.{e}", base.display())).is_file()),
                     "{nat}/{code} → {}/{} 在包里不存在", img.dir, img.stem);
             }
         }
@@ -856,7 +909,7 @@ mod tests {
     #[test]
     fn real_shape_no_duplicates_exhausts_every_image_once() {
         // 每目录 1 张 + Scandinavian 2 张 + 两棵嵌套子树各 1 张。
-        // 禁重复持续抽：主池抽空 → 归属者目录（同池，也空）→ 递归兜底收尾包外目录的图，
+        // 禁重复持续抽：规则候选抽空 → 归属者目录（同池，也空）→ 递归兜底收尾包外目录的图，
         // 必须恰好抽完全部图片、无一张重复，耗尽后稳定返回 None。
         let rcfg = RuleConfig::builtin();
         let cfg = &rcfg.standard3;
@@ -881,24 +934,23 @@ mod tests {
     }
 
     #[test]
-    fn dotted_filename_has_single_identity_in_both_indexes() {
-        // 含点号文件名（"sp.1.png"）经扫描后在主池与兜底池里是同键 "sp.1"。
-        // 词干规则若在两份索引里分歧（老口径主池 "sp"、兜底池 "sp.1"），会出现两个后果：
-        // ① 写出的 from 定位不到真实文件；② 同一张图先被规则发出、再从兜底池发出第二次。
+    fn dotted_filename_has_single_identity_in_the_pool() {
+        // 含点号文件名（"sp.1.png"）的词干是 "sp.1" 而非 "sp"：from 必须能定位到真实文件，
+        // 且规则与兜底共用同一份池，同一张图不得被发出两次。
         let rcfg = RuleConfig::builtin();
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("Spain")).unwrap();
         std::fs::write(dir.path().join("Spain").join("sp.1.png"), b"png").unwrap();
         let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
-        // ① 禁重复连抽两次：第一次拿走 "sp.1"，第二次主池与兜底池都已摘空 → None。
+        // ① 禁重复连抽两次：第一次拿走 "sp.1"，第二次池已摘空 → None。
         let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, &rcfg.standard3);
         let img = rule.pick(&player("r-1", "ESP", "1"), false).unwrap();
         assert_eq!((img.dir.as_str(), img.stem.as_str()), ("Spain", "sp.1"));
         assert!(
             rule.pick(&player("r-2", "ESP", "1"), false).is_none(),
-            "同一张图不得从兜底池被第二次发出"
+            "同一张图不得被第二次发出"
         );
-        // ② Preserve 剔除：from "Spain/sp.1" 在主池与兜底池里都命中，抽不出第二张。
+        // ② Preserve 剔除：from "Spain/sp.1" 命中池中剩余的唯一一项，抽不出第二张。
         let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, &rcfg.standard3);
         rule.exclude_used(&sset(&["Spain/sp.1"]));
         assert!(rule.pick(&player("r-3", "ESP", "1"), true).is_none());

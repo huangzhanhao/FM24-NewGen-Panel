@@ -3,20 +3,23 @@
 //! 【为什么这个标准没有 json 规则文件】它没有任何可配数据：布局判定靠"无子目录 + 根目录有图"，
 //! 抽图靠单一根池。所以 `RuleConfig` 里没有它的字段，`folder_lists()` 里也没有它，
 //! `IMPLEMENTED_STANDARDS` 的拦截同样不经过它（那个拦截只针对 `PackLayout::Standard`）。
-use super::{sorted_unique, PickedImage, PickRule};
+use super::{sorted_unique, PickRule, PickedImage};
 use crate::rtf_scanner::PlayerRecord;
 use rand::Rng;
 use std::collections::BTreeSet;
 
 /// 包根全部图片为一个单一池，完全随机抽图。
 /// 池用有序 `Vec`：随机下标直取 O(1)、禁重复 `swap_remove` 也是 O(1)（理由见 templates::Pools）。
-pub struct Standard1Rule { pool: Vec<String> }
+pub struct Standard1Rule {
+    pool: Vec<String>,
+}
 
 impl Standard1Rule {
-    /// 用包根图片池（`scan.root_images`）构造；`pick` 忽略球员的国籍与种族码，纯粹从池中随机取图。
-    /// 【为什么传引用】扫描结果就在调用方手上，构造时转一次池即可，不必先整份克隆再转第二遍。
+    /// 用包根图片池（`scan.root_images`）构造，传引用避免二次克隆。
     pub fn new(pool: &BTreeSet<String>) -> Self {
-        Self { pool: sorted_unique(pool.iter().cloned()) }
+        Self {
+            pool: sorted_unique(pool.iter().cloned()),
+        }
     }
 }
 
@@ -27,11 +30,20 @@ impl PickRule for Standard1Rule {
     }
 
     fn pick(&mut self, _player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
-        if self.pool.is_empty() { return None; }
+        if self.pool.is_empty() {
+            return None;
+        }
         let idx = rand::rng().random_range(0..self.pool.len());
-        // 下标直取 O(1)（旧写法 iter().nth(idx) 是 O(idx)）；禁重复就地摘除，不再按值 linear search。
-        let stem = if duplicates { self.pool[idx].clone() } else { self.pool.swap_remove(idx) };
-        Some(PickedImage { dir: String::new(), stem })
+        // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
+        let stem = if duplicates {
+            self.pool[idx].clone()
+        } else {
+            self.pool.swap_remove(idx)
+        };
+        Some(PickedImage {
+            dir: String::new(),
+            stem,
+        })
     }
 }
 
@@ -41,13 +53,20 @@ mod tests {
 
     fn player(uid: &str, nat: &str, code: &str) -> PlayerRecord {
         PlayerRecord {
-            uid: uid.into(), primary_nat: nat.into(), sec_nat: String::new(),
-            name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
-            ethnicity_code: code.into(), detailed: None,
+            uid: uid.into(),
+            primary_nat: nat.into(),
+            sec_nat: String::new(),
+            name: "T".into(),
+            hair_length: "1".into(),
+            hair_color: "1".into(),
+            ethnicity_code: code.into(),
+            detailed: None,
         }
     }
 
-    fn sset(v: &[&str]) -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() }
+    fn sset(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
 
     #[test]
     fn standard1_picks_from_root_and_excludes_used() {

@@ -2,18 +2,19 @@
 //! 这两种布局**不是标准**——它们没有目录组织约定可循，也没有 json 规则文件；
 //! 抽图逻辑 = 把包内所有子/孙目录（含根）的图片归入一个大池，完全随机抽。
 //! 对外的标准号映射（Empty → 1、Unknown → 0）只在 `PackLayout::standard()` 一处。
-use super::{pick_from_pools_flat, sorted_unique, PickedImage, PickRule, Pools};
+use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools};
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 包内所有子/孙目录（含根）的全部图片归入一个大池，完全随机抽图。
 /// 选中的 dir 原样写入映射（可空、可多级），config.xml 的 from 即相对路径。
-pub struct UnknownRule { pools: Pools }
+pub struct UnknownRule {
+    pools: Pools,
+}
 
 impl UnknownRule {
-    /// 用递归全池（`scan.recursive_pools`，含根与全部子/孙目录）构造；`pick` 把全池展平后随机取图。
-    /// 【为什么传引用】扫描结果就在调用方手上，构造时转一次池即可，不必先整份克隆再转第二遍。
+    /// 用递归全池（`scan.recursive_pools`）构造；`pick` 把全池展平后随机取图，传引用避免二次克隆。
     pub fn new(recursive_pools: &BTreeMap<String, BTreeSet<String>>) -> Self {
         let pools = recursive_pools
             .iter()
@@ -42,16 +43,25 @@ mod tests {
 
     fn player(uid: &str, nat: &str, code: &str) -> PlayerRecord {
         PlayerRecord {
-            uid: uid.into(), primary_nat: nat.into(), sec_nat: String::new(),
-            name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
-            ethnicity_code: code.into(), detailed: None,
+            uid: uid.into(),
+            primary_nat: nat.into(),
+            sec_nat: String::new(),
+            name: "T".into(),
+            hair_length: "1".into(),
+            hair_color: "1".into(),
+            ethnicity_code: code.into(),
+            detailed: None,
         }
     }
 
-    fn sset(v: &[&str]) -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() }
+    fn sset(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
 
     /// 池也断言成有序 Vec：`sorted_unique` 之后顺序固定，禁重复抽空即断言集合相等。
-    fn vset(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+    fn vset(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
 
     fn pools_fixture() -> BTreeMap<String, BTreeSet<String>> {
         BTreeMap::from([
@@ -73,7 +83,7 @@ mod tests {
         }
         assert_eq!(seen, sset(&["r1", "A/x1", "A/x2", "A/sub/d1"]));
         assert!(rule.pick(&player("r-1", "ZZZ", "1"), false).is_none()); // 池耗尽
-        // 禁重复剔除按全路径：A/x1 与孙目录 d1 被占用后不再出现，其余仍在（重置池后验证）。
+                                                                         // 禁重复剔除按全路径：A/x1 与孙目录 d1 被占用后不再出现，其余仍在（重置池后验证）。
         let mut rule = UnknownRule::new(&pools_fixture());
         rule.exclude_used(&sset(&["A/x1", "A/sub/d1"]));
         assert_eq!(rule.pools["A"], vset(&["x2"]));

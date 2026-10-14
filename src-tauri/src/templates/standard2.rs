@@ -2,7 +2,7 @@
 //! 抽图逻辑 = 国籍查表（json `Ethnics`）→ 种族码修正（json `CodeRules`）→ 池优先级 → 随机抽图。
 //! 规则全部来自 `assets/standard2.json`（内置默认）与 `data/rules/standard2.json`（用户可编辑），
 //! 本模块不硬编码任何目录名或码表。
-use super::{filter_pools, PickedImage, PickRule, Pools, RuleFile};
+use super::{filter_pools, PickRule, PickedImage, Pools, RuleFile};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -35,11 +35,17 @@ pub struct Standard2Config {
 
 /// 本标准的可编辑规则文件登记（命令层查表用）。
 pub fn rule_file() -> RuleFile {
-    RuleFile { name: "standard2", path: |data_dir: &Path| rule_path(data_dir), save: save_file }
+    RuleFile {
+        name: "standard2",
+        path: |data_dir: &Path| rule_path(data_dir),
+        save: save_file,
+    }
 }
 
 /// 用户可编辑规则文件路径：<data_dir>/rules/standard2.json。
-fn rule_path(data_dir: &Path) -> PathBuf { data_dir.join("rules").join("standard2.json") }
+fn rule_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("rules").join("standard2.json")
+}
 
 /// 解析 + 原子写回（json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
 fn save_file(path: &Path, content: &str) -> Result<(), String> {
@@ -59,7 +65,11 @@ pub fn apply_code_rule(
     match rules.get(code) {
         Some(rule) => {
             let hit = |name: &str| e1 == name || e2 == Some(name);
-            rule.prefer.iter().find(|n| hit(n)).cloned().unwrap_or_else(|| rule.fallback.clone())
+            rule.prefer
+                .iter()
+                .find(|n| hit(n))
+                .cloned()
+                .unwrap_or_else(|| rule.fallback.clone())
         }
         None => e1.to_string(),
     }
@@ -73,9 +83,12 @@ pub struct Standard2Rule {
 }
 
 impl Standard2Rule {
-    /// 按配置的 FolderList 过滤出抽图池（清单外目录与空目录都不进池），并持有配置的一份副本。
+    /// 按配置的 FolderList 过滤出抽图池（清单外目录与空目录都不进池）。
     pub fn new(faces_map: &BTreeMap<String, BTreeSet<String>>, cfg: &Standard2Config) -> Self {
-        Self { pools: filter_pools(faces_map, &cfg.folder_list), cfg: cfg.clone() }
+        Self {
+            pools: filter_pools(faces_map, &cfg.folder_list),
+            cfg: cfg.clone(),
+        }
     }
 
     /// 池优先级：国籍同名目录 > 种族目录 > 两者都不在池内时用全部目录。
@@ -83,8 +96,12 @@ impl Standard2Rule {
         let mut pools = Vec::new();
         let nat_in = self.pools.get(nationality).map(|s| !s.is_empty()).unwrap_or(false);
         let eth_in = self.pools.get(ethnicity).map(|s| !s.is_empty()).unwrap_or(false);
-        if nat_in { pools.push(nationality.to_string()); }
-        if eth_in { pools.push(ethnicity.to_string()); }
+        if nat_in { 
+            pools.push(nationality.to_string()); 
+        }
+        if eth_in { 
+            pools.push(ethnicity.to_string()); 
+        }
         if !self.pools.contains_key(nationality) && !self.pools.contains_key(ethnicity) {
             pools.extend(self.pools.keys().cloned());
         }
@@ -94,12 +111,19 @@ impl Standard2Rule {
     /// 依序取第一个非空池随机选图；禁重复时从池中移除。
     fn pick_image_from_pools(&mut self, pools: &[String], duplicates: bool) -> Option<String> {
         for dir in pools {
-            let Some(pool) = self.pools.get_mut(dir) else { continue };
-            if pool.is_empty() { continue; }
+            let Some(pool) = self.pools.get_mut(dir) else {
+                continue;
+            };
+            if pool.is_empty() {
+                continue;
+            }
             let idx = rand::rng().random_range(0..pool.len());
-            // 下标直取 O(1)（旧写法 iter().nth(idx) 是 O(idx) 线性游走）；
-            // 禁重复就地 swap_remove 摘除，不需要再按值 linear search 一遍。
-            return Some(if duplicates { pool[idx].clone() } else { pool.swap_remove(idx) });
+            // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
+            return Some(if duplicates {
+                pool[idx].clone()
+            } else {
+                pool.swap_remove(idx)
+            });
         }
         None
     }
@@ -127,7 +151,10 @@ impl PickRule for Standard2Rule {
         }
         let dirs = self.image_pool_dirs(&ethnicity, &player.primary_nat);
         let stem = self.pick_image_from_pools(&dirs, duplicates)?;
-        Some(PickedImage { dir: ethnicity, stem })
+        Some(PickedImage {
+            dir: ethnicity,
+            stem,
+        })
     }
 }
 
@@ -138,13 +165,20 @@ mod tests {
 
     fn player(uid: &str, nat: &str, code: &str) -> PlayerRecord {
         PlayerRecord {
-            uid: uid.into(), primary_nat: nat.into(), sec_nat: String::new(),
-            name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
-            ethnicity_code: code.into(), detailed: None,
+            uid: uid.into(),
+            primary_nat: nat.into(),
+            sec_nat: String::new(),
+            name: "T".into(),
+            hair_length: "1".into(),
+            hair_color: "1".into(),
+            ethnicity_code: code.into(),
+            detailed: None,
         }
     }
 
-    fn sset(v: &[&str]) -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() }
+    fn sset(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
 
     #[test]
     fn apply_code_rule_matches_legacy_correct_ethnic() {

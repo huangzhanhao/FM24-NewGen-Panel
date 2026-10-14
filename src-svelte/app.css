@@ -344,21 +344,46 @@ select option { background: var(--bg-surface); color: var(--text-1); }
 }
 .side-foot {
   margin-top: auto; padding: var(--sp-5) var(--sp-6); border-top: 1px solid var(--hairline);
-  display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); align-items: center;
+  display: flex; flex-wrap: nowrap; gap: var(--sp-1); align-items: center;
 }
-/* 底部外链：安静脚注，紧凑内边距保证 248 侧栏四枚链接单行排下 */
+/* 底部外链：安静脚注。禁止折行（四枚链接任何语言下都单行），靠逐级收紧字号/内边距适配窄侧栏；
+   ellipsis 仅作字体度量超预算时的兜底，正常尺寸预算内不会触发 */
 .side-foot .link {
-  padding: var(--pill-padding-y) var(--sp-3); border-radius: var(--radius-pill); color: var(--text-3);
+  padding: var(--pill-padding-y) var(--sp-2); border-radius: var(--radius-pill); color: var(--text-3);
+  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
 .side-foot .link:hover { background: var(--bg-raised); color: var(--accent); }
-/* 窄侧栏：收成 2×2 胶囊网格，整齐且永不溢出 */
+/* 窄侧栏（224/212）：字号降一档、内边距收窄，英文长词（Tutorial/Language）仍单行排下 */
 @media (max-width: 1180px) {
-  .side-foot {
-    display: grid; grid-template-columns: auto auto; justify-content: start;
-    gap: var(--sp-2) var(--sp-4);
-  }
+  .side-foot .link { font-size: var(--fs-xs); padding-inline: var(--sp-1); }
 }
+/* 最窄侧栏（200）：再收容器左右留白，补出长词所需的最后几像素 */
+@media (max-width: 900px) {
+  .side-foot { padding-inline: var(--sp-4); }
+}
+/* 「语言」菜单：details/summary 原生开合（无开关状态可管），选项向上弹出。
+   当前语言用强调色加粗标出，与组列表 current 同款语义。 */
+.lang-menu { position: relative; display: inline-flex; }
+.lang-menu > summary {
+  list-style: none; cursor: pointer; align-items: center; display: inline-flex;
+}
+.lang-menu > summary::-webkit-details-marker { display: none; }
+.lang-menu[open] > summary { background: var(--bg-raised); color: var(--accent); }
+.lang-menu > ul {
+  position: absolute; bottom: calc(100% + var(--sp-1)); left: 0; z-index: 20;
+  min-width: 100%; margin: 0; padding: var(--sp-1); list-style: none;
+  background: var(--bg-surface); border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-side);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.lang-opt {
+  width: 100%; text-align: left; white-space: nowrap; cursor: pointer;
+  padding: var(--sp-2) var(--sp-3); border: none; border-radius: var(--radius-md);
+  background: none; color: var(--text-1); font-size: var(--fs-sm);
+}
+.lang-opt:hover { background: var(--bg-raised); }
+.lang-opt.current { color: var(--accent); font-weight: var(--fw-semibold); }
 /* 存档操作两按钮纵向满宽排列：任何侧栏宽度下文字都完整可读（禁止省略号截断） */
 .prf-actions { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-3); }
 .prf-actions .btn { width: 100%; padding: var(--sp-2) var(--sp-3); white-space: nowrap; }

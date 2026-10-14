@@ -1,4 +1,4 @@
-<!-- Sidebar · 左侧边栏：管理存档（Profile）与头像包（组），新建/切换/删除存档、关联/选择/删除组，底部外部链接 -->
+<!-- Sidebar · 左侧边栏：管理存档（Profile）与头像包（组），新建/切换/删除存档、关联/选择/删除组，底部外部链接与语言切换 -->
 <script lang="ts">
   import { open, ask } from "@tauri-apps/plugin-dialog"; // open=选目录；ask=确认框
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,10 +10,17 @@
     imageaiStore,
     queueCancel,
   } from "../../stores/imageai.svelte"; // 队列运行中的作用域切换护栏
-  import { ui, toggleTheme } from "../../stores/ui.svelte";
+  import { ui, setLang, toggleTheme, type Lang } from "../../stores/ui.svelte";
   import Icon from "../../ui/Icon.svelte";
   // Vite 静态资源导入：打包后是带哈希的图片 URL（app-icon.png 在项目根）
   import brandLogo from "../../../../app-icon.png";
+
+  // 语言菜单的 details 元素：选中语言后必须手动收起（原生开合不会随选项点击关闭）
+  let langMenu = $state<HTMLDetailsElement | null>(null);
+  function pickLang(lang: Lang) {
+    setLang(lang);
+    langMenu?.removeAttribute("open");
+  }
 
   let newProfileName = $state("");
   let creating = $state(false); // 是否展开「新建存档」行
@@ -329,8 +336,14 @@
     {/if}
   </section>
 
-  <!-- 底部外部链接：默认浏览器打开教程 / 故障排查 / FAQ / Discord -->
+  <!-- 底部：首页/教程/FAQ 用默认浏览器打开（仓库暂无使用指引与 FAQ 文档，后两者暂用原地址顶替）；
+       「语言」弹出三语菜单，点选即切换整个界面语言并记忆到 localStorage -->
   <div class="side-foot">
+    <button
+      class="link small"
+      onclick={() => openUrl("https://github.com/huangzhanhao/NewGAN-Manager-ByHzH")}
+      >{t.sidebar.linkHome}</button
+    >
     <button
       class="link small"
       onclick={() => openUrl("https://www.bilibili.com/video/BV1ew411h759")}
@@ -339,20 +352,36 @@
     <button
       class="link small"
       onclick={() =>
-        openUrl(
-          "https://github.com/Maradonna90/NewGAN-Manager/wiki/Troubleshooting",
-        )}>{t.sidebar.linkTroubleshooting}</button
-    >
-    <button
-      class="link small"
-      onclick={() =>
         openUrl("https://github.com/Maradonna90/NewGAN-Manager/wiki/FAQ")}
       >{t.sidebar.linkFaq}</button
     >
-    <button
-      class="link small"
-      onclick={() => openUrl("https://discord.gg/UfRpJVc")}
-      >{t.sidebar.linkDiscord}</button
-    >
+    <details class="lang-menu" bind:this={langMenu}>
+      <summary class="link small" title={t.sidebar.langMenuTitle}
+        >{t.lang.label}</summary
+      >
+      <ul>
+        <li>
+          <button
+            class="lang-opt"
+            class:current={ui.lang === "zh-CN"}
+            onclick={() => pickLang("zh-CN")}>{t.lang.zhCN}</button
+          >
+        </li>
+        <li>
+          <button
+            class="lang-opt"
+            class:current={ui.lang === "zh-TW"}
+            onclick={() => pickLang("zh-TW")}>{t.lang.zhTW}</button
+          >
+        </li>
+        <li>
+          <button
+            class="lang-opt"
+            class:current={ui.lang === "en"}
+            onclick={() => pickLang("en")}>{t.lang.en}</button
+          >
+        </li>
+      </ul>
+    </details>
   </div>
 </aside>

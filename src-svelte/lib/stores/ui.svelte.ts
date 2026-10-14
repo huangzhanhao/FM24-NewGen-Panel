@@ -9,6 +9,12 @@
 export type Theme = 'dark' | 'light';
 const THEME_KEY = 'ngm-theme'; // localStorage 记忆键名
 
+/** 界面语言：zh-CN=简体中文（默认）/ zh-TW=繁體中文 / en=English。
+ *  取值同时是 text.ts 三字典的分发键；不自动探测浏览器语言——
+ *  用户显式选一次即持久化，探测会在中英用户间给出意外默认值。 */
+export type Lang = 'zh-CN' | 'zh-TW' | 'en';
+const LANG_KEY = 'ngm-lang';
+
 /** 工作台：'archive'=存档资料 / 'replace'=批量·单人头像替换 / 'ai'=AI生成头像。
  *  顺序即主流程顺序（先备料 → 再替换 → 可选 AI 生图），顶栏序号圆按此顺序排列。 */
 export type Workbench = 'archive' | 'replace' | 'ai';
@@ -22,9 +28,20 @@ function readTheme(): Theme {
   }
 }
 
+/** 启动时读取上次选择的语言（没有记录或值非法时默认简体中文）。 */
+function readLang(): Lang {
+  try {
+    const v = localStorage.getItem(LANG_KEY);
+    return v === 'zh-TW' || v === 'en' ? v : 'zh-CN';
+  } catch {
+    return 'zh-CN'; // 与 readTheme 同款：存储不可用时静默回退
+  }
+}
+
 export const ui = $state({
   logOpen: false, // 日志抽屉是否打开
   theme: readTheme() as Theme, // 当前主题（写入 <html data-theme> 切换整套 CSS 令牌）
+  lang: readLang() as Lang, // 当前界面语言（text.ts 按此键分发三语文案）
   /** 当前工作台。与 logOpen 同类——它是「界面在哪一屏」，不是业务数据，故放这里而非 appStore；
    *  也不持久化：每次启动都从「存档资料」开始，用户先看清手里有什么料。 */
   workbench: 'archive' as Workbench,
@@ -44,4 +61,14 @@ export function toggleTheme() {
     // 存储不可用时仅对本次会话生效
   }
   applyTheme();
+}
+
+/** 切换界面语言并持久化（侧栏「语言」菜单调用）。 */
+export function setLang(lang: Lang) {
+  ui.lang = lang;
+  try {
+    localStorage.setItem(LANG_KEY, lang);
+  } catch {
+    // 存储不可用时仅对本次会话生效
+  }
 }

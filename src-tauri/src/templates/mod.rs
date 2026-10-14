@@ -1,18 +1,17 @@
 //! 头像包「标准」的抽图模型总入口：**一个标准 = 一个自包含模块**。
-//! 每个标准模块（standardN.rs）里放着它自己的三样东西：规则 json 的结构体、抽图算法、单元测试。
-//! 标准之间互不 import —— 因为每套头像包的目录组织方式不同，抽图逻辑天然不同，
-//! 强行共享只会让改一处影响另一处。本文件只放「跨标准无语义」的东西：
-//!   1. `PickRule` trait 与 `PickedImage`：所有标准都遵守的接口与返回值；
-//!   2. `for_layout`：唯一分发入口（按头像包扫描出的布局挑一套规则）；
-//!   3. `RuleConfig`：各标准规则的聚合与加载（内置默认 + 用户可编辑 json 双层来源）；
-//!   4. `filter_pools` / `pick_from_pools_flat`：两个纯机械工具，不含任何标准语义；
-//!   5. `validate_registry`：标准之间的登记冲突守卫。
+//! 各 standardN.rs 自带规则结构体、抽图算法、单测，标准之间互不 import ——
+//! 每套头像包目录组织不同，抽图逻辑天然不同，强行共享只会让改一处影响另一处。
+//! 本文件只放跨标准共享的部分：
+//!   1. `PickRule` trait 与 `PickedImage`：统一接口与返回值；
+//!   2. `for_layout`：唯一分发入口（按扫描出的布局挑规则）；
+//!   3. `RuleConfig`：规则聚合与加载（内置默认 + 用户可编辑 json）；
+//!   4. `filter_pools` / `pick_from_pools_flat` / `sorted_unique`：纯机械工具；
+//!   5. `validate_registry`：标准间登记冲突守卫。
 //!
-//! 头像包布局判定在 `facepack_scanner::classify`（数据驱动，按各标准的 FolderList 推断），
-//! 本模块不重复实现判定 —— 判定与分发各只有一处真源。
+//! 布局判定在 `facepack_scanner::classify`，本模块不重复实现 —— 判定与分发各只有一处真源。
 //!
-//! 【扩展点】新增标准四/五/六：①`assets/standardN.json` ②`templates/standardN.rs`
-//! （自带 schema + validate + 规则 + 单测，只 import 本文件的 trait 与两个机械工具）
+//! 【扩展点】新增标准：①`assets/standardN.json` ②`templates/standardN.rs`
+//! （自带 schema + validate + 规则 + 单测，只 import 本文件的 trait 与机械工具）
 //! ③`assets.rs` 加 `STANDARD{N}_RAW` ④本文件登记（RuleConfig 字段 / builtin / load /
 //! ensure_user_files / folder_lists / rule_files / for_layout 分支 / IMPLEMENTED_STANDARDS）
 //! ⑤前端 `api.ts` + `RuleEditor.svelte` + `text.ts` 各加一项。判定层零改动。
@@ -28,18 +27,20 @@ use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// 当前已实现抽图规则的标准号；replace_flow 据此对清单外的标准拦截提示。
-/// 标准一（平铺）与空包 / 无法识别的退化布局不经过这个拦截：它们不走 `PackLayout::Standard`。
+/// 当前已实现抽图规则的标准号；replace_flow 据此拦截清单外的标准。
+/// 标准一（平铺）与空包/无法识别布局不走 `PackLayout::Standard`，不经过此拦截。
 pub const IMPLEMENTED_STANDARDS: [u8; 2] = [2, 3];
 
-/// 一次抽图的结果：图片相对头像包根的目录路径（"" = 根，多级 "子目录/孙目录"）+ 文件词干。
-/// 写 config.xml 时 dir + stem 经 record_from 拼成 from（统一相对路径口径）。
+/// 一次抽图结果：图片相对头像包根的目录（"" = 根，多级 "子目录/孙目录"）+ 文件词干。
+/// 写 config.xml 时 dir + stem 经 record_from 拼成 from。
 #[derive(Debug)]
-pub struct PickedImage { pub dir: String, pub stem: String }
+pub struct PickedImage {
+    pub dir: String,
+    pub stem: String,
+}
 
-/// 抽图规则统一接口：每个标准一套实现。
-/// 【为什么 pick 不带 config 参数】每套规则在构造时只拿自己那份配置，之后不再看别的标准；
-/// 这样"某标准的抽图逻辑"完全封闭在它自己的文件里，读一个文件就能读完整套行为。
+/// 抽图规则统一接口：每个标准一套实现。pick 不带 config 参数 ——
+/// 各规则构造时只拿自己那份配置，整套行为封闭在自己的文件里，读一个文件即知全部逻辑。
 pub trait PickRule {
     /// Preserve+禁重复：把已有映射占用的图片从池中剔除。
     /// used 为「from 全路径」键集合（record_from 形式：种族目录非空 → "目录/词干"，平铺 → "词干"）。
@@ -55,9 +56,9 @@ pub struct RuleConfig {
     pub standard3: standard3::Standard3Config,
 }
 
-/// 一个可编辑规则文件的登记表项：命令层只查这张表，不再按标准号写 match。
-/// 【为什么用函数指针而不是泛型/闭包】每项对应一个不同的 Config 类型，函数指针能把
-/// 「解析 + 校验 + 写回」整套动作擦除到同一张表里，模板增加时 commands.rs 零改动。
+/// 可编辑规则文件的登记表项：命令层只查这张表，不再按标准号写 match。
+/// 用函数指针而非泛型/闭包 —— 每项 Config 类型不同，函数指针把「解析+校验+写回」
+/// 擦除到同一张表里，新增标准时 commands.rs 零改动。
 pub struct RuleFile {
     /// 前端传的规则文件名（`"standardN"`）。
     pub name: &'static str,
@@ -78,11 +79,13 @@ impl RuleConfig {
         }
     }
 
-    /// 所有参与目录判定的标准 (标准号, FolderList)，按标准号升序登记。
-    /// 【这张表的顺序就是判定的唯一真源】`facepack_scanner::classify` 两轮都是先命中先赢，
-    /// 因此任意两份清单不能有共同目录名（交集为空，由 `validate_registry` 守卫）。
+    /// 参与目录判定的标准 (标准号, FolderList)，按标准号升序。
+    /// 顺序即判定真源：`classify` 先命中先赢，故两份清单交集必须为空（`validate_registry` 守卫）。
     pub fn folder_lists(&self) -> Vec<(u8, &Vec<String>)> {
-        vec![(2, &self.standard2.folder_list), (3, &self.standard3.folder_list)]
+        vec![
+            (2, &self.standard2.folder_list),
+            (3, &self.standard3.folder_list),
+        ]
     }
 
     /// 加载生效规则：用户文件存在则用之，缺失用内置默认，格式错误报错（含文件路径）。
@@ -106,25 +109,28 @@ impl RuleConfig {
             }
         }
         // 结构校验：用户改坏规则 json 时在这里拦下（不静默回退内置默认），错误信息含文件路径。
-        cfg.standard3.validate().map_err(|e| format!("标准三规则无效：{}（{e}）", s3.display()))?;
+        cfg.standard3
+            .validate()
+            .map_err(|e| format!("标准三规则无效：{}（{e}）", s3.display()))?;
         validate_registry(&cfg)?;
         Ok(cfg)
     }
 }
 
-/// 标准之间的登记冲突守卫：任意两份 FolderList **不得有任何共同目录名**（交集为空）。
-/// 【为什么是交集而不是「互不包含」】`classify` 的两轮判定都是先命中先赢（见 facepack_scanner），
-/// 只要两份清单共享一个目录名，「只用这几个共享目录的包」就会被判给登记在前的那个标准——
-/// 互不包含拦不住这种**部分交叉**，而它恰恰是用户按文档新增「标准四」时最容易踩中的：
-/// 整包用错抽图模型，且全程没有任何报错。设计文档（标准二.md §5）本来就要求两清单交集为 0。
-/// 空清单跳过（空集是任何集合的子集，属退化情形，也不可能与谁重合）。
+/// 标准间登记冲突守卫：任意两份 FolderList 交集必须为空。
+/// 【为什么查交集而非「互不包含」】classify 先命中先赢，互不包含拦不住部分交叉：
+/// 共享目录会让「只用这几个目录的包」被判给登记在前的标准，整包用错模型且全程无报错
+/// （新增标准时最易踩中，设计文档标准二.md §5 本就要求交集为 0）。
+/// 空清单跳过（空集是任何集合的子集，属退化情形）。
 pub fn validate_registry(cfg: &RuleConfig) -> Result<(), String> {
     let lists = cfg.folder_lists();
     for i in 0..lists.len() {
         for j in (i + 1)..lists.len() {
             let (na, fa) = lists[i];
             let (nb, fb) = lists[j];
-            if fa.is_empty() || fb.is_empty() { continue; }
+            if fa.is_empty() || fb.is_empty() {
+                continue;
+            }
             let a: BTreeSet<&str> = fa.iter().map(String::as_str).collect();
             let b: BTreeSet<&str> = fb.iter().map(String::as_str).collect();
             let shared: Vec<&str> = a.intersection(&b).copied().collect();
@@ -165,22 +171,29 @@ pub fn ensure_user_files(data_dir: &Path) -> Result<(), String> {
 }
 
 /// 按扫描出的布局选择对应标准规则（唯一分发入口）。
-/// 【一律借用、由各规则自己转池】大包索引（28 万图片名）整份 clone 一次就是几十 MB 的白复制，
-/// 所以这里只传 `&PackScan` 的引用，各规则构造时按需把要用的那部分转成自己的池。
+/// 只借 `&PackScan`、由各规则自己转池 —— 大包索引（28 万图片名）整份 clone 是几十 MB 白复制，
+/// 各规则构造时按需把要用的部分转成自己的池。
 pub fn for_layout(layout: PackLayout, scan: &PackScan, config: &RuleConfig) -> Box<dyn PickRule> {
     match layout {
         // 标准一：包根单一池，完全随机。
         PackLayout::Flat => Box::new(standard1::Standard1Rule::new(&scan.root_images)),
         PackLayout::Standard { standard, .. } => match standard {
-            2 => Box::new(standard2::Standard2Rule::new(&scan.faces_map, &config.standard2)),
+            2 => Box::new(standard2::Standard2Rule::new(
+                &scan.faces_map,
+                &config.standard2,
+            )),
             3 => Box::new(standard3::Standard3Rule::new(
-                &scan.faces_map, &scan.recursive_pools, &config.standard3)),
+                &scan.faces_map,
+                &scan.recursive_pools,
+                &config.standard3,
+            )),
             // 未实现标准号已被 replace_flow 拦截；防御性返回永不命中的空规则。
             _ => Box::new(standard1::Standard1Rule::new(&BTreeSet::new())),
         },
         // 空包 / 无法识别：递归全池全随机（Empty 池为空 → 全部球员跳过）。
-        PackLayout::Empty | PackLayout::Unknown =>
-            Box::new(unknown::UnknownRule::new(&scan.recursive_pools)),
+        PackLayout::Empty | PackLayout::Unknown => {
+            Box::new(unknown::UnknownRule::new(&scan.recursive_pools))
+        }
     }
 }
 
@@ -197,13 +210,9 @@ pub fn for_layout(layout: PackLayout, scan: &PackScan, config: &RuleConfig) -> B
 pub type Pools = BTreeMap<String, Vec<String>>;
 
 /// 把图片词干收集成池：排序 + 去重。
-///
-/// 【去重不是多余的】上游扫描结果是 `BTreeSet`（天生按词干去重），但同目录下 `face1.png` 与
-/// `face1.jpg` 的词干相同——一旦上游换成非去重来源，Vec 会同时装下两项：禁重复时抽走第一项
-/// `swap_remove` 掉、第二项还在，两人就会拿到同一张图（from 相同）。显式去重把这条兜住，
-/// 三个平台的这个场景（同目录同词干不同扩展名）都是合法的。
-///
-/// 【排序是白送的】上游 BTreeSet 本就升序，Rust 的排序对已序输入接近线性，成本可忽略。
+/// 【去重】上游 BTreeSet 天生按词干去重，但同目录 `face1.png`/`face1.jpg` 词干相同且合法并存；
+/// 上游若换成非去重来源，禁重复时 swap_remove 只摘走一项，两人会拿到同一张图。
+/// 【排序】上游本就升序，对已序输入接近线性，成本可忽略。
 pub fn sorted_unique(items: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut v: Vec<String> = items.into_iter().collect();
     v.sort_unstable();
@@ -211,8 +220,8 @@ pub fn sorted_unique(items: impl IntoIterator<Item = String>) -> Vec<String> {
     v
 }
 
-/// 按"目录 → 图片集合"的池构造规则时通用：只保留 FolderList 内、且非空的目录。
-/// 【语义】json 未配置的多余子目录不进入抽图池。
+/// 构造"目录 → 图片集合"池的通用规则：只保留 FolderList 内且非空的目录，
+/// json 未配置的多余子目录不进池。
 fn filter_pools(faces_map: &BTreeMap<String, BTreeSet<String>>, folder_list: &[String]) -> Pools {
     folder_list
         .iter()
@@ -225,11 +234,13 @@ fn filter_pools(faces_map: &BTreeMap<String, BTreeSet<String>>, folder_list: &[S
         .collect()
 }
 
-/// 从"目录 → 图片集合"的多级池中全局随机取一张（展平计数按下标取，有序池保证可复现）。
-/// 禁重复时把选中的图从池中移除（swap_remove：O(1)，不需要按值查找）。标准三的兜底与 Unknown 布局共用。
+/// 从多级池中全局随机取一张（展平计数按下标取，有序池保证可复现）。
+/// 禁重复时 swap_remove 就地摘除（O(1)）。标准三兜底与 Unknown 布局共用。
 fn pick_from_pools_flat(pools: &mut Pools, duplicates: bool) -> Option<PickedImage> {
     let total: usize = pools.values().map(|s| s.len()).sum();
-    if total == 0 { return None; }
+    if total == 0 {
+        return None;
+    }
     let idx = rand::rng().random_range(0..total);
     let mut passed = 0usize;
     let mut chosen: Option<(String, String)> = None;
@@ -237,7 +248,11 @@ fn pick_from_pools_flat(pools: &mut Pools, duplicates: bool) -> Option<PickedIma
         if idx < passed + pool.len() {
             let i = idx - passed;
             // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
-            let stem = if duplicates { pool[i].clone() } else { pool.swap_remove(i) };
+            let stem = if duplicates {
+                pool[i].clone()
+            } else {
+                pool.swap_remove(i)
+            };
             chosen = Some((dir.clone(), stem));
             break;
         }
@@ -252,18 +267,16 @@ mod tests {
     use super::*;
 
     /// 真实头像包冒烟测试（`#[ignore]`，CI 不跑、未设环境变量时自动跳过）。用法：
-    /// `NEWGAN_REAL_PACK_DIR=<包根> cargo test --manifest-path src-tauri/Cargo.toml \
-    ///  real_pack_smoke -- --ignored --nocapture`
+    /// `NEWGAN_REAL_PACK_DIR=<包根> cargo test --manifest-path src-tauri/Cargo.toml real_pack_smoke -- --ignored --nocapture`
     ///
-    /// 全链路验证 scan → classify → 标准三抽图：233 国 × 11 码全量扫一遍，
-    /// 硬断言只有两条——每人都能抽到图、抽中的图在包里真实存在（config.xml 的 from
-    /// 不带扩展名，逐个试图片扩展名）；直中/回退占比与空清单目录只打印不拦，
-    /// 便于对任何社区包做体检（部分目录缺失时回退是正确行为而非错误）。
+    /// 全链路验证 scan → classify → 标准三抽图（233 国 × 11 码）。硬断言仅两条：
+    /// 每人抽到图、抽中的图在包里真实存在（from 不带扩展名，逐个试图片扩展名）；
+    /// 直中/回退占比与缺失目录只打印不拦 —— 部分目录缺失时回退是正确行为而非错误。
     #[test]
     #[ignore]
     fn real_pack_smoke_scan_classify_pick() {
-        use crate::xml_parser::record_from;
         use super::standard3::Candidates;
+        use crate::xml_parser::record_from;
         let Some(pack) = std::env::var_os("NEWGAN_REAL_PACK_DIR") else {
             eprintln!("未设 NEWGAN_REAL_PACK_DIR，跳过真实包冒烟测试");
             return;
@@ -271,7 +284,9 @@ mod tests {
         let pack = pack.to_string_lossy().to_string();
         // 规则来源与真实运行同源（开发数据目录的 rules/）；用户文件损坏不中断冒烟，退回内置默认。
         let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap().join("data");
+            .parent()
+            .unwrap()
+            .join("data");
         let config = RuleConfig::load(&data_dir).unwrap_or_else(|e| {
             eprintln!("用户规则不可用（{e}），改用内置默认");
             RuleConfig::builtin()
@@ -279,22 +294,41 @@ mod tests {
         let t = std::time::Instant::now();
         let scan = crate::facepack_scanner::scan_pack(&pack).unwrap();
         let total_imgs: usize = scan.recursive_pools.values().map(|s| s.len()).sum();
-        eprintln!("扫描：{} 个一级目录，递归池 {total_imgs} 张图，耗时 {:?}",
-                  scan.faces_map.len(), t.elapsed());
-        let refs: Vec<_> = config.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
-        let subdirs: BTreeSet<String> = scan.faces_map.keys()
+        eprintln!(
+            "扫描：{} 个一级目录，递归池 {total_imgs} 张图，耗时 {:?}",
+            scan.faces_map.len(),
+            t.elapsed()
+        );
+        let refs: Vec<_> = config
+            .folder_lists()
+            .iter()
+            .map(|(t, f)| (*t, *f))
+            .collect();
+        let subdirs: BTreeSet<String> = scan
+            .faces_map
+            .keys()
             .filter(|n| !crate::facepack_scanner::is_junk_dir(n))
-            .cloned().collect();
-        let layout = crate::facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &refs);
+            .cloned()
+            .collect();
+        let layout =
+            crate::facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &refs);
         eprintln!("判定：{layout:?}");
-        assert!(matches!(layout, PackLayout::Standard { standard: 3, .. }),
-                "该包未被判为标准三：{layout:?}");
+        assert!(
+            matches!(layout, PackLayout::Standard { standard: 3, .. }),
+            "该包未被判为标准三：{layout:?}"
+        );
         // 清单目录在包内的健康度：缺失 / 空目录列出来（对应「一键创建缺失目录」的语义）。
-        let unhealthy: Vec<&String> = config.standard3.folder_list.iter()
+        let unhealthy: Vec<&String> = config
+            .standard3
+            .folder_list
+            .iter()
             .filter(|d| scan.faces_map.get(*d).is_none_or(|s| s.is_empty()))
             .collect();
         if !unhealthy.is_empty() {
-            eprintln!("清单内缺失或为空的目录 {} 个：{unhealthy:?}", unhealthy.len());
+            eprintln!(
+                "清单内缺失或为空的目录 {} 个：{unhealthy:?}",
+                unhealthy.len()
+            );
         }
         // 第一轮：允许复用，全量 (国籍 × 码) 扫一遍，统计直中候选 vs 走回退。
         let mut rule = for_layout(layout, &scan, &config);
@@ -305,45 +339,78 @@ mod tests {
         for nat in cfg.ethnics.keys() {
             for code in 0..=10u8 {
                 let res = cfg.resolve(nat, &code.to_string());
-                let img = rule.pick(&PlayerRecord {
-                    uid: format!("{nat}/{code}"), primary_nat: nat.into(), sec_nat: String::new(),
-                    name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
-                    ethnicity_code: code.to_string(), detailed: None,
-                }, true).unwrap_or_else(|| panic!("{nat}/{code} 没抽到图"));
+                let img = rule
+                    .pick(
+                        &PlayerRecord {
+                            uid: format!("{nat}/{code}"),
+                            primary_nat: nat.into(),
+                            sec_nat: String::new(),
+                            name: "T".into(),
+                            hair_length: "1".into(),
+                            hair_color: "1".into(),
+                            ethnicity_code: code.to_string(),
+                            detailed: None,
+                        },
+                        true,
+                    )
+                    .unwrap_or_else(|| panic!("{nat}/{code} 没抽到图"));
                 let in_cands = match res.candidates.as_ref() {
                     Some(Candidates::Single(d)) => *d == img.dir,
                     Some(Candidates::Uniform(v)) => v.iter().any(|d| *d == img.dir),
                     Some(Candidates::Weighted { dirs, .. }) => dirs.iter().any(|d| *d == img.dir),
                     None => false,
                 };
-                if in_cands { direct += 1 } else { fallback += 1 }
+                if in_cands {
+                    direct += 1
+                } else {
+                    fallback += 1
+                }
                 *by_dir.entry(img.dir.clone()).or_insert(0) += 1;
                 let base = std::path::Path::new(&pack).join(&img.dir).join(&img.stem);
-                if !["png", "jpg", "jpeg"].iter().any(|e|
-                    std::path::Path::new(&format!("{}.{e}", base.display())).is_file())
+                if !["png", "jpg", "jpeg"]
+                    .iter()
+                    .any(|e| std::path::Path::new(&format!("{}.{e}", base.display())).is_file())
                 {
                     missing.push(format!("{}/{}", img.dir, img.stem));
                 }
             }
         }
-        assert!(missing.is_empty(),
-                "{} 条映射指向包里不存在的文件，如 {:?}", missing.len(), &missing[..missing.len().min(5)]);
+        assert!(
+            missing.is_empty(),
+            "{} 条映射指向包里不存在的文件，如 {:?}",
+            missing.len(),
+            &missing[..missing.len().min(5)]
+        );
         let mut ranked: Vec<_> = by_dir.iter().collect();
         ranked.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        eprintln!("全量 2563 组：直中候选 {direct}，走回退 {fallback}；目录命中数 Top8：{:?}",
-                  &ranked[..ranked.len().min(8)]);
-        // 第二轮：禁重复再扫一遍，验证两份索引的同步摘除在真实规模下也无重复。
+        eprintln!(
+            "全量 2563 组：直中候选 {direct}，走回退 {fallback}；目录命中数 Top8：{:?}",
+            &ranked[..ranked.len().min(8)]
+        );
+        // 第二轮：禁重复再扫一遍，验证真实规模下不产生重复映射。
         let mut rule = for_layout(layout, &scan, &config);
         let mut issued = BTreeSet::new();
         for (i, nat) in cfg.ethnics.keys().enumerate() {
             for code in 0..=10u8 {
-                let img = rule.pick(&PlayerRecord {
-                    uid: format!("nd-{nat}/{code}"), primary_nat: nat.into(), sec_nat: String::new(),
-                    name: "T".into(), hair_length: "1".into(), hair_color: "1".into(),
-                    ethnicity_code: code.to_string(), detailed: None,
-                }, false).unwrap_or_else(|| panic!("禁重复第 {i} 组 {nat}/{code} 没抽到图"));
-                assert!(issued.insert(record_from(&img.dir, &img.stem)),
-                        "禁重复抽到重复图 {img:?}");
+                let img = rule
+                    .pick(
+                        &PlayerRecord {
+                            uid: format!("nd-{nat}/{code}"),
+                            primary_nat: nat.into(),
+                            sec_nat: String::new(),
+                            name: "T".into(),
+                            hair_length: "1".into(),
+                            hair_color: "1".into(),
+                            ethnicity_code: code.to_string(),
+                            detailed: None,
+                        },
+                        false,
+                    )
+                    .unwrap_or_else(|| panic!("禁重复第 {i} 组 {nat}/{code} 没抽到图"));
+                assert!(
+                    issued.insert(record_from(&img.dir, &img.stem)),
+                    "禁重复抽到重复图 {img:?}"
+                );
             }
         }
         eprintln!("禁重复 {} 组：from 全部唯一", issued.len());
@@ -361,8 +428,14 @@ mod tests {
         }
         // 标准三：62 目录清单 + Ethnics（233 国）+ 规则块（国家/族群/全局共 43 个）+ Version 4 + Random 兜底。
         assert_eq!(cfg.standard3.folder_list.len(), 62);
-        assert!(cfg.standard3.folder_list.contains(&"SouthConeSA".to_string()));
-        assert!(cfg.standard3.folder_list.contains(&"WestSlavic".to_string()));
+        assert!(cfg
+            .standard3
+            .folder_list
+            .contains(&"SouthConeSA".to_string()));
+        assert!(cfg
+            .standard3
+            .folder_list
+            .contains(&"WestSlavic".to_string()));
         assert_eq!(cfg.standard3.ethnics.len(), 233);
         assert_eq!(cfg.standard3.ethnics["ESP"], "Spain");
         assert_eq!(cfg.standard3.ethnics["COL"], "Mestizo");
@@ -372,13 +445,24 @@ mod tests {
         let rules = &cfg.standard3.ethnicity_mapping_rules;
         assert_eq!(rules.len(), 43);
         // 三类块各抽查一条：国家块（BRA）、族群块（Mestizo）、全局块（_DEFAULT_）。
-        assert!(rules.contains_key("BRA") && rules.contains_key("Mestizo") && rules.contains_key("_DEFAULT_"));
-        assert_eq!(rules["_DEFAULT_"]["9"],
-                   standard3::MappingRule::Directly("MixedRace".into()));
+        assert!(
+            rules.contains_key("BRA")
+                && rules.contains_key("Mestizo")
+                && rules.contains_key("_DEFAULT_")
+        );
+        assert_eq!(
+            rules["_DEFAULT_"]["9"],
+            standard3::MappingRule::Directly("MixedRace".into())
+        );
         assert_eq!(rules["_DEFAULT_"]["0"], standard3::MappingRule::Default);
-        assert_eq!(rules["Mestizo"]["7"],
-                   standard3::MappingRule::Directly("IndigenousSA".into()));
-        assert!(matches!(rules["DOM"]["1"], standard3::MappingRule::Weighted { .. }));
+        assert_eq!(
+            rules["Mestizo"]["7"],
+            standard3::MappingRule::Directly("IndigenousSA".into())
+        );
+        assert!(matches!(
+            rules["DOM"]["1"],
+            standard3::MappingRule::Weighted { .. }
+        ));
         assert_eq!(cfg.standard3.fallback, standard3::Fallback::Random);
         // 内置默认必须通过自身的结构校验。
         cfg.standard3.validate().unwrap();
@@ -396,7 +480,11 @@ mod tests {
         assert_eq!(cfg.standard3.folder_list.len(), 62);
         // 二次 ensure：已存在不覆盖（写个标记内容验证不被冲掉）。
         let s2 = data.path().join("rules/standard2.json");
-        std::fs::write(&s2, "{\"FolderList\":[\"African\"],\"Ethnics\":{\"XXL\":\"African\"}}").unwrap();
+        std::fs::write(
+            &s2,
+            "{\"FolderList\":[\"African\"],\"Ethnics\":{\"XXL\":\"African\"}}",
+        )
+        .unwrap();
         ensure_user_files(data.path()).unwrap();
         let cfg = RuleConfig::load(data.path()).unwrap();
         assert_eq!(cfg.standard2.folder_list, vec!["African".to_string()]);
@@ -411,19 +499,33 @@ mod tests {
         assert_eq!(cfg.standard2.folder_list.len(), 14);
         // 标准三：json 格式合法但语义不成立（Version 缺失、无 _DEFAULT_ 块）→ 报错且含文件路径。
         let s3 = data.path().join("rules/standard3.json");
-        std::fs::write(&s3, "{\"FolderList\":[\"China\"],\"Ethnics\":{\"CHN\":\"China\"}}").unwrap();
+        std::fs::write(
+            &s3,
+            "{\"FolderList\":[\"China\"],\"Ethnics\":{\"CHN\":\"China\"}}",
+        )
+        .unwrap();
         let err = RuleConfig::load(data.path()).unwrap_err();
         assert!(err.contains("standard3.json"), "错误应含文件路径: {err}");
         assert!(err.contains("Version"), "应说明版本不符: {err}");
         std::fs::remove_file(&s3).unwrap();
-        assert_eq!(RuleConfig::load(data.path()).unwrap().standard3.folder_list.len(), 62);
+        assert_eq!(
+            RuleConfig::load(data.path())
+                .unwrap()
+                .standard3
+                .folder_list
+                .len(),
+            62
+        );
     }
 
     #[test]
     fn folder_lists_registers_all_standards() {
         let cfg = RuleConfig::builtin();
         let lists = cfg.folder_lists();
-        assert_eq!(lists.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(
+            lists.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
         assert!(lists.iter().all(|(_, f)| !f.is_empty()));
     }
 
@@ -435,15 +537,21 @@ mod tests {
         let mut cfg = RuleConfig::builtin();
         cfg.standard2.folder_list = vec!["China".into(), "Japan".into()];
         let err = validate_registry(&cfg).unwrap_err();
-        assert!(err.contains("标准2") && err.contains("标准3"), "应指名冲突标准: {err}");
+        assert!(
+            err.contains("标准2") && err.contains("标准3"),
+            "应指名冲突标准: {err}"
+        );
         assert!(err.contains("China"), "应给出重合目录名: {err}");
-        // 部分交叉（旧守卫放行的正是这一种）：两份清单互相都不包含，但共享一个目录名。
-        // 只用「Sudan」这一个目录的包会被 classify 判给登记在前的标准2，整包用错抽图模型。
+        // 部分交叉：两份清单互不包含但共享「Sudan」——「互不包含」式守卫拦不住，
+        // 只用 Sudan 的包会被 classify 判给登记在前的标准2，整包用错抽图模型。
         let mut cfg = RuleConfig::builtin();
         cfg.standard2.folder_list = vec!["Sudan".into(), "标准二独有".into()];
         cfg.standard3.folder_list = vec!["Sudan".into(), "标准三独有".into()];
         let err = validate_registry(&cfg).unwrap_err();
-        assert!(err.contains("Sudan") && err.contains("交集为 0"), "部分交叉必须被拒: {err}");
+        assert!(
+            err.contains("Sudan") && err.contains("交集为 0"),
+            "部分交叉必须被拒: {err}"
+        );
         // 空清单不参与判定（否则空集恒为子集，误报）。
         let mut cfg = RuleConfig::builtin();
         cfg.standard2.folder_list = Vec::new();

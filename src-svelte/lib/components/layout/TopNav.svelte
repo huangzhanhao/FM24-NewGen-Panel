@@ -16,11 +16,12 @@
    *  区分依据是「有没有可开工的最小前提」，不是缺了几项 */
   type ChipState = 'ok' | 'warn' | 'idle';
 
-  /** 三台定义：顺序即主流程顺序（备料 → 替换 → 可选 AI 生图） */
-  const items: ReadonlyArray<{ id: Workbench; label: string }> = [
-    { id: 'archive', label: t.workbench.archive },
-    { id: 'replace', label: t.workbench.replace },
-    { id: 'ai', label: t.workbench.ai },
+  /** 三台定义：顺序即主流程顺序（备料 → 替换 → 可选 AI 生图）。
+   *  只存 id，label 在模板里现取 t.workbench[id]——存字符串会快照住初始语言，切换后不刷新 */
+  const items: ReadonlyArray<{ id: Workbench }> = [
+    { id: 'archive' },
+    { id: 'replace' },
+    { id: 'ai' },
   ];
 
   /** 快照是否已读：与快照预览同一口径——snapshotReadPath 非空即读过当前档的 config.xml */
@@ -95,7 +96,7 @@
           onclick={() => (ui.workbench = it.id)}
         >
           <span class="num">{i + 1}</span>
-          <span>{it.label}</span>
+          <span>{t.workbench[it.id]}</span>
           <span class="wb-dot {states[i]}" title={stateTitle[states[i]]}></span>
           {#if i === 2 && queueBadge > 0}
             <span class="wb-badge" title={t.gen.queue.tabQueue}

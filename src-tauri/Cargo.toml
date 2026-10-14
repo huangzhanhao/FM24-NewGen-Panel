@@ -28,6 +28,10 @@ log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
 tauri-plugin-log = "2"
+# 生成图四角白底裁成圆角需要「解码 → 改像素 → 重编码 PNG」。厂商回图格式为 png/jpeg/webp
+# 三选一（见 image_ai_providers 各适配器的 extension 约定），只开这三个编解码器：
+# 默认特性里的 tiff/bmp/gif/avif 等一律用不到，白担编译时间与依赖面。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # indexmap 1.9.3 的 std 由 build.rs 探测（autocfg 派生子进程编译探测源码）。本机 spawn
 # 子进程时把匿名管道接到 stdin 必失败（Win32 231），探测源码喂不进去 ⇒ 不 emit has_std
 # ⇒ `IndexMap<K, V, S>` 落到无默认值的 #[cfg(not(has_std))] 分支。而 tauri-build /

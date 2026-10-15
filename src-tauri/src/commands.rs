@@ -485,6 +485,15 @@ pub async fn check_integrity(
         &config.folder_lists(),
         &mut |done, total| progress.report(done, total),
     );
+    state.logger.info(
+        "scan",
+        format!(
+            "检查完整性完成：{}（缺失 {} 个、多余 {} 个目录）",
+            layout_label(result.standard, &config),
+            result.missing.len(),
+            result.extra.len()
+        ),
+    );
     progress.finish();
     Ok(result)
 }
@@ -492,10 +501,13 @@ pub async fn check_integrity(
 /// 批量创建缺失目录（前端确认后调用）。
 #[tauri::command]
 pub fn create_missing_dirs(img_dir: String, names: Vec<String>) -> Result<(), String> {
+    let count = names.len();
     for name in names {
         std::fs::create_dir_all(Path::new(&img_dir).join(&name))
             .map_err(|e| format!("创建目录 {name} 失败: {e}"))?;
     }
+    // 命令无 State，走 log 门面（与队列收尾行同款）。
+    log::info!(target: "scan", "已创建缺失目录 {count} 个");
     Ok(())
 }
 
@@ -1688,7 +1700,9 @@ pub fn save_rule_file(
 ) -> Result<(), String> {
     let rf = rule_file(&name)?;
     let path = (rf.path)(&state.data_dir);
-    (rf.save)(&path, &content)
+    (rf.save)(&path, &content)?;
+    state.logger.info("rules", format!("已保存标准规则：{name}"));
+    Ok(())
 }
 
 /// 名单预览「头像」列预览：把列原文解析成当前头像包内的实际图片路径（找不到返回 null）。
@@ -2037,19 +2051,36 @@ pub fn save_provider(
 #[tauri::command]
 pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<Config, String> {
     let mut cfg = state.image.lock().unwrap();
+    // 删除前摘显示名供日志；名字为空时只记 id。
+    let label = match cfg.provider(&id) {
+        Some(p) if !p.name.trim().is_empty() => format!("{}（{id}）", p.name),
+        _ => id.clone(),
+    };
     image_ai::remove_provider(&mut cfg, &id)?;
     cfg.save_providers(&state.data_dir)?;
+    state.logger.info("image_ai", format!("已删除服务商：{label}"));
     Ok(cfg.clone())
 }
 
 #[tauri::command]
 pub fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Result<(), String> {
     let mut keys = state.image_keys.lock().unwrap();
-    if key.trim().is_empty() {
+    let cleared = key.trim().is_empty();
+    if cleared {
         keys.remove(&id);
     } else {
-        keys.insert(id, key);
+        keys.insert(id.clone(), key);
     }
+    drop(keys);
+    // 只记「设/清」这个动作，绝不记 Key 内容。
+    state.logger.info(
+        "image_ai",
+        if cleared {
+            format!("已清除服务商 Key：{id}")
+        } else {
+            format!("已记忆服务商 Key：{id}（仅本会话）")
+        },
+    );
     Ok(())
 }
 
@@ -2067,8 +2098,14 @@ pub fn save_prompt_template(
 #[tauri::command]
 pub fn delete_prompt_template(state: State<'_, AppState>, id: String) -> Result<Config, String> {
     let mut cfg = state.image.lock().unwrap();
+    // 删除前摘显示名供日志；名字为空时只记 id。
+    let label = match cfg.templates.iter().find(|t| t.id == id) {
+        Some(t) if !t.name.trim().is_empty() => format!("{}（{id}）", t.name),
+        _ => id.clone(),
+    };
     image_ai::remove_template(&mut cfg, &id)?;
     cfg.save_templates(&state.data_dir)?;
+    state.logger.info("image_ai", format!("已删除提示词模板：{label}"));
     Ok(cfg.clone())
 }
 
@@ -2102,8 +2139,32 @@ pub async fn generate_image(
     } else {
         String::new()
     };
+    // 日志标签先摘出来：req 随后按值交给 generate，之后取不到。
+    let provider = req.provider_id.clone();
+    let model = req.model.clone();
+    let label = match req.uid.as_deref().filter(|u| !u.is_empty()) {
+        Some(uid) => format!("{uid}｜{provider}/{model}"),
+        None => format!("{provider}/{model}"),
+    };
+    let started = Instant::now();
     // 单张直发不展示阶段：空回调（阶段进度只有队列批处理会呈现在界面上）。
-    image_ai::generate(&state.data_dir, &cfg, &key, req, &|_| {}).await
+    match image_ai::generate(&state.data_dir, &cfg, &key, req, &|_| {}).await {
+        Ok(result) => {
+            state.logger.info(
+                "image_ai",
+                format!(
+                    "生成完成：{label}，{} 张图，耗时 {:.1?}",
+                    result.images.len(),
+                    started.elapsed()
+                ),
+            );
+            Ok(result)
+        }
+        Err(e) => {
+            state.logger.error("image_ai", format!("生成失败：{label}：{}", e.message));
+            Err(e)
+        }
+    }
 }
 
 /// 读取持久画廊记录（data_dir/gallery.json），并逐条**现算**图片是否仍在会话临时目录。
@@ -2124,6 +2185,7 @@ pub fn save_generated_image(
         return Err("源图片已失效（临时目录已清理）".into());
     }
     json_store::copy_atomic(&src, Path::new(&target_path))?;
+    state.logger.info("image_ai", format!("生成图另存：{target_path}"));
     Ok(target_path)
 }
 
@@ -2400,6 +2462,7 @@ pub async fn start_queue(
 #[tauri::command]
 pub fn cancel_queue(state: State<'_, AppState>) -> Result<(), String> {
     state.queue.lock().unwrap().cancel = true;
+    state.logger.info("image_ai", "用户请求取消批量生成");
     Ok(())
 }
 

@@ -305,6 +305,8 @@ pub async fn run_queue(
     };
     // 0 视为 1；占位计数器是 u8（单机同时跑 255 张图不现实），更高配置一并截断。
     let concurrency = concurrency.clamp(1, u8::MAX as u32) as u8;
+    // 执行叙事的起点（收尾汇总在命令层 spawn 包装里）；并发记 clamp 后的实际生效值。
+    log::info!(target: "image_ai", "批量生成开始：{total} 条任务（并发 {concurrency}）");
     let in_flight = Arc::new(Mutex::new(0u8));
     // 已完成计数：终态条目（成功/失败/取消）每收一条 +1，作为进度事件的 `current`。
     // 为什么另设计数器而不复用派发序号：完成后才递增，才能表达「已完成 X / 总数 Y」。
@@ -414,6 +416,11 @@ pub async fn run_queue(
                     .get(&req.provider_id)
                     .map(|s| s.as_str())
                     .unwrap_or("");
+                // 失败行标签：有球员名带名（日志里一眼认出是谁），没有则只记 uid。
+                let label = match req.name.as_deref().filter(|n| !n.trim().is_empty()) {
+                    Some(name) => format!("{name}（{uid}）"),
+                    None => uid.clone(),
+                };
                 // 执行期重试：仅 `retryable` 错误重试，最多 MAX_ATTEMPTS 次（1 首发 + 2 重试）。
                 // 【为什么留在此处】重试属于「跑一张图」的执行细节，主派发循环只管并发占位；
                 // 重试期间条目保持 Running（不新增状态），前端据 attempts>1 显示「已重试 N 次」。
@@ -436,6 +443,13 @@ pub async fn run_queue(
                         // 首次失败为 0 → backoff_delay 给出 2s（见其文档）。
                         Err(err) if err.retryable && attempts < MAX_ATTEMPTS => {
                             let delay = backoff_delay(attempts - 1, err.retry_after);
+                            // 重试期间条目保持 Running、界面看不出重试在发生，日志是唯一留痕。
+                            log::warn!(
+                                target: "image_ai",
+                                "生成失败（第 {attempts} 次尝试，将重试）：{label}——{}；{:.1?} 后重试",
+                                err.message,
+                                delay
+                            );
                             task_sleeper.sleep(delay).await;
                             // 【取消对「尚未开始的重试」生效】一次重试即一次新的派发，故退避结束、
                             // 再次 execute 之前再读一次 cancel（短锁读，锁内不 await）。已请求取消
@@ -452,6 +466,22 @@ pub async fn run_queue(
                 };
 
                 let success = outcome.is_ok();
+                // 终态失败留痕：队列是会话态、重启即失，日志是唯一能回查「谁失败了、为什么」的通道。
+                // 取消类不记——那是用户显式动作，取消入口与收尾汇总已有专门行。
+                if let Err(err) = &outcome {
+                    if !matches!(err.kind, image_ai::GenErrorKind::Cancelled) {
+                        let attempts_note = if attempts > 1 {
+                            format!("（共尝试 {attempts} 次）")
+                        } else {
+                            String::new()
+                        };
+                        log::warn!(
+                            target: "image_ai",
+                            "生成失败：{label}——{}{attempts_note}",
+                            err.message
+                        );
+                    }
+                }
                 // 短锁回写终态；条目中途被移除时找不到 id，静默跳过。attempts 上一步已写，不动它。
                 {
                     let mut st = task_state.lock().unwrap();
@@ -518,6 +548,11 @@ pub async fn run_queue(
                 // 兜底判定的条目同样是终态：计入已完成，避免后续事件的 current 落拍。
                 *completed.lock().unwrap() += marked;
                 failed_ran += 1;
+                log::error!(
+                    target: "image_ai",
+                    "生成任务异常退出（panic）：{}",
+                    if marked > 0 { "条目已标记为失败" } else { "条目已非运行态，未重复标记" }
+                );
             }
         }
     }

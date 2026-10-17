@@ -622,6 +622,11 @@ pub struct GenRequest {
     /// 百炼 `enable_thinking`（仅百炼适配器消费；None = 按该模型默认值 true）。
     #[serde(default)]
     pub enable_thinking: Option<bool>,
+    /// 输出图片格式 `output_format`（png/jpeg）：仅声明 `supports_output_format` 的模型（火山
+    /// Seedream 5.0 系列、硅基流动全模型）消费，None = 适配器默认 png。取值由适配器白名单校验，
+    /// 前端选到的越界值不会直发厂商。
+    #[serde(default)]
+    pub output_format: Option<String>,
     /// 内部字段（前端不传）：`generate` 解析服务商后填入，适配器据此拼 endpoint；
     /// 与能力无关，故独立于能力快照。
     #[serde(default)]
@@ -665,6 +670,7 @@ pub(crate) fn test_req_base() -> GenRequest {
         watermark: None,
         prompt_extend_mode: None,
         enable_thinking: None,
+        output_format: None,
         caps: None,
     }
 }

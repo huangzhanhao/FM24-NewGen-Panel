@@ -249,6 +249,9 @@ const zhCN = {
     callModeAsync: "异步",
     watermark: "添加「AI生成」水印",
     watermarkHint: "水印位于图片右下角",
+    /** 输出图片格式（火山 Seedream / 硅基流动）：选项值是协议字段值 png/jpeg，不翻译 */
+    outputFormat: "输出格式",
+    outputFormatHint: "服务端返回的图片编码格式；仅声明该参数的模型可选",
     seed: "Seed",
     steps: "采样步数",
     stepsHint: "扩散采样步数，越大通常越慢、细节可能更充分",
@@ -358,7 +361,7 @@ const zhCN = {
     capProtoCallMode: "调用方式",
     capProtoQuality: "质量档位",
     capProtoResponseFormat: "返回 base64",
-    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（适配器固定 png）；4.5/4.0 仅 jpeg */
+    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（值随用户选择）；4.5/4.0 仅 jpeg */
     capProtoOutputFormat: "输出格式",
     capProtoSteps: "采样步数",
     capProtoGuidance: "引导系数",
@@ -950,6 +953,9 @@ const zhTW: Dict = {
     callModeAsync: "非同步",
     watermark: "新增「AI生成」水印",
     watermarkHint: "水印位於圖片右下角",
+    /** 輸出圖片格式（火山 Seedream / 矽基流動）：選項值是協議欄位值 png/jpeg，不翻譯 */
+    outputFormat: "輸出格式",
+    outputFormatHint: "服務端回傳的圖片編碼格式；僅宣告該參數的模型可選",
     seed: "Seed",
     steps: "取樣步數",
     stepsHint: "擴散取樣步數，越大通常越慢、細節可能更充分",
@@ -1059,7 +1065,7 @@ const zhTW: Dict = {
     capProtoCallMode: "呼叫方式",
     capProtoQuality: "品質檔位",
     capProtoResponseFormat: "返回 base64",
-    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（适配器固定 png）；4.5/4.0 仅 jpeg */
+    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（值随用户选择）；4.5/4.0 仅 jpeg */
     capProtoOutputFormat: "輸出格式",
     capProtoSteps: "取樣步數",
     capProtoGuidance: "引導係數",
@@ -1663,6 +1669,9 @@ const en: Dict = {
     callModeAsync: "Async",
     watermark: 'Add "AI generated" watermark',
     watermarkHint: "The watermark sits in the bottom-right corner of the image",
+    /** Output image format (Volcano Seedream / SiliconFlow): option values are protocol values, not translated */
+    outputFormat: "Output format",
+    outputFormatHint: "Encoding of the returned image; only models declaring this parameter offer it",
     seed: "Seed",
     steps: "Steps",
     stepsHint:
@@ -1782,7 +1791,7 @@ const en: Dict = {
     capProtoCallMode: "Call mode",
     capProtoQuality: "Quality tier",
     capProtoResponseFormat: "Return base64",
-    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（适配器固定 png）；4.5/4.0 仅 jpeg */
+    /** 火山 Seedream output_format：Pro/Flash/Lite 可设 png/jpeg（值随用户选择）；4.5/4.0 仅 jpeg */
     capProtoOutputFormat: "Output format",
     capProtoSteps: "Steps",
     capProtoGuidance: "Guidance",

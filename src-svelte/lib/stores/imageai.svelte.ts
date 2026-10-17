@@ -94,6 +94,18 @@ export function validateSizeRules(size: string, rules: SizeRules | null | undefi
   return null;
 }
 
+/**
+ * 「档位串模型」（wan 的 1K/2K/4K、火山 Seedream 的 1K/1.5K/2K…）选「自定义…」时的起步宽高：
+ * 这些模型的预设解析不出宽高，直接取该模型声明的**像素下限**当最小合法正方形——
+ * 总像素下限（`totalMin`）开方即边长；只有单边下限（`minSide`）时用它；
+ * 两者都没声明（自建 OpenAI 兼容服务）则保持历史字面量 350×350。
+ */
+export function customSizeStart(rules: SizeRules | null | undefined): [number, number] {
+  const floor = rules?.totalMin ? Math.ceil(Math.sqrt(rules.totalMin)) : (rules?.minSide ?? 0);
+  const side = floor > 0 ? floor : 350;
+  return [side, side];
+}
+
 export const imageaiStore = $state({
   config: null as ImageConfig | null,
   providerId: 'openai',
@@ -112,6 +124,7 @@ export const imageaiStore = $state({
   guidance: '', // 引导系数（硅基流动 guidance_scale / 魔搭 guidance）；留空或模型不支持时不发送
   promptExtend: true, // 百炼智能改写；默认随模型能力走，切服务商/模型时归位
   watermark: false, // 「AI生成」水印，官方默认关；仅模型支持时发送
+  outputFormat: 'png' as 'png' | 'jpeg', // 输出图片格式；仅模型声明 output_format 能力时发送
   promptExtendMode: 'direct', // 改写模式 direct/agent；仅 3.0 支持，切模型归位官方默认档
   enableThinking: true, // 思考模式；官方默认开，且仅改写开启时生效
   callMode: 'sync' as 'sync' | 'async', // 调用方式；仅支持异步的模型可选，切服务商/模型时归位同步
@@ -285,7 +298,10 @@ export function selectProvider(id: string) {
   imageaiStore.quality = 'auto';
   // 改写开关回该模型的官方默认（千问/万相开、z-image 关），不把上一家的选择带过来。
   imageaiStore.promptExtend = imageaiStore.modelInfo?.capabilities.promptExtendDefault ?? true;
-  imageaiStore.watermark = false;
+  // 水印回该模型声明的官方默认（火山 Seedream 全系列 false），同样不把上一家的选择带过来。
+  imageaiStore.watermark = imageaiStore.modelInfo?.capabilities.watermarkDefault ?? false;
+  // 输出格式回适配器默认 png（能力位只声明「可设」，没有逐模型默认值可读）。
+  imageaiStore.outputFormat = 'png';
   // 调用方式随模型复位：不同模型异步支持不同，不把上一家的选择带过来（与 promptExtend 同口径）。
   imageaiStore.callMode = 'sync';
 }
@@ -341,6 +357,10 @@ export function selectModel(model: string) {
   if (caps && imageaiStore.n > caps.maxN) imageaiStore.n = caps.maxN;
   // 改写默认值逐模型不同（z-image 关，开启即思考模式、单价翻倍）：切模型归位。
   imageaiStore.promptExtend = caps?.promptExtendDefault ?? true;
+  // 水印默认值同样按模型声明存放（watermarkDefault）：切模型归位，不把上一个模型的开关带过来。
+  imageaiStore.watermark = caps?.watermarkDefault ?? false;
+  // 输出格式同理回默认 png：不同模型的可用格式集不同（火山 4.5/4.0 根本不吃该参数）。
+  imageaiStore.outputFormat = 'png';
   // 采样步数 / 引导系数逐模型不同（硅基流动 Qwen-Image 不支持 guidance 等）：切模型归位。
   resetStepsGuidance();
   imageaiStore.promptExtendMode = caps?.promptExtendModeDefault || 'direct';
@@ -445,6 +465,8 @@ export async function generate(meta?: { size?: string; seed?: string }) {
       watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
       promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
       enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
+      // 输出格式仅在该模型声明可设时带值（火山 4.5/4.0 不吃该参数，后端按同一能力位再门控一遍）。
+      outputFormat: caps?.supportsOutputFormat ? imageaiStore.outputFormat : null,
       // 仅当模型支持异步且用户选了异步才传 'async'；否则传 null（后端默认同步）。
       callMode: caps?.supportsAsync && imageaiStore.callMode === 'async' ? 'async' : null,
     });
@@ -525,6 +547,8 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
         watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
         promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
         enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
+        // 输出格式仅在该模型声明可设时带值；否则传 null（后端按同一能力位再门控一遍）。
+        outputFormat: caps?.supportsOutputFormat ? imageaiStore.outputFormat : null,
         // 仅当模型支持异步且用户选了异步才传 'async'；否则传 null（后端默认同步）。
         callMode: caps?.supportsAsync && imageaiStore.callMode === 'async' ? 'async' : null,
       },

@@ -139,7 +139,7 @@ export interface Capabilities {
   supportsNegativePrompt: boolean;
   supportsResponseFormat: boolean;
   /** 火山 Seedream output_format（png/jpeg）：5.0 Pro/Flash/Lite 可设；4.5/4.0 仅回 jpeg、不可设。
-   *  其余协议不用。适配器固定要 png，本字段只决定参数是否发送。 */
+   *  其余协议不用。本字段只决定该参数是否发送，取值由工作台的输出格式选择给出。 */
   supportsOutputFormat?: boolean;
   qualities: string[];
   /** 以下字段可缺省，消费侧按「缺省=false/0」处理。 */
@@ -235,6 +235,9 @@ export interface GenRequest {
   promptExtendMode?: string | null;
   /** 百炼 `enable_thinking`（null/缺省 = 按该模型默认值 true）。 */
   enableThinking?: boolean | null;
+  /** 输出图片格式 `output_format`：'png' | 'jpeg'，仅声明 supportsOutputFormat 的模型（火山
+   *  Seedream 5.0 系列、硅基流动）消费；null/缺省 = 适配器默认 png。越界值由适配器白名单拦下。 */
+  outputFormat?: string | null;
   /** 内部字段（serde 缺省为空）：后端 generate 解析出服务商后回填 base_url，前端提交（单张/批量）
    *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。
    *  能力位不在此列：后端整体快照走 `caps`（前端亦不传）。 */

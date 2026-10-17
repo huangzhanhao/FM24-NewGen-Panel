@@ -115,7 +115,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
 /// - 文生图固定单图：`max_n=1`、[`Capabilities::supports_n`]=false（请求体不发 n）；
 /// - 全系列无 seed（不发）、无负向词/改写/质量档位、仅同步；
 /// - 全系列支持 `response_format`（适配器固定 b64_json）与 `watermark`（默认关，显式发 false）；
-/// - `output_format` 仅 Pro/Flash/Lite 可设（适配器固定 png）；4.5/4.0 只回 jpeg、传参报错；
+/// - `output_format` 仅 Pro/Flash/Lite 可设（值取用户选择 png/jpeg，未选默认 png）；4.5/4.0 只回 jpeg、传参报错；
 /// - 尺寸：`tiers` 为官方档位串，自定义像素按总像素区间 + 宽高比 [1/16, 16] 校验
 ///   （min/max_side 留 0 = 官方未给单边约束）。
 fn seedream_caps(
@@ -155,7 +155,8 @@ fn seedream_caps(
 /// - 恒发：`model` / `prompt` / `size`（档位串或小写 `x` 像素串，原样透传不转换）；
 /// - `response_format`：固定 `b64_json`（能力位门控，内置目录全开）；
 /// - `watermark`：用户值优先，未置回落能力集声明的默认（内置 false；官方服务端默认 true）；
-/// - `output_format`：仅 Pro/Flash/Lite 发，固定 `png`；4.5/4.0 整条省略（只回 jpeg）；
+/// - `output_format`：仅 Pro/Flash/Lite 发（4.5/4.0 传参报错，整条省略），值取用户选择
+///   （`png` / `jpeg`），未选或越界回落 `png`——见 [`super::output_format`]；
 /// - **绝不发** `n` / `seed` / `sequential_image_generation`（全系列无 n/seed；
 ///   Pro/Flash 收到 sequential 直接报错，Lite 等缺省即单图）。
 pub(crate) fn build_volcano_body(req: &GenRequest) -> serde_json::Value {
@@ -177,15 +178,15 @@ pub(crate) fn build_volcano_body(req: &GenRequest) -> serde_json::Value {
         );
     }
     if caps.supports_output_format {
-        obj.insert("output_format".into(), json!("png"));
+        obj.insert("output_format".into(), json!(super::output_format(req)));
     }
     v
 }
 
-/// 落盘图片后缀：4.5/4.0 不接受 `output_format`、服务端只回 JPEG；其余模型适配器固定要 PNG。
+/// 落盘图片后缀：4.5/4.0 不接受 `output_format`、服务端只回 JPEG；其余模型随用户选择的格式。
 pub(crate) fn image_extension(req: &GenRequest) -> &'static str {
     if req.caps().supports_output_format {
-        "png"
+        super::output_format(req)
     } else {
         "jpeg"
     }
@@ -489,6 +490,28 @@ mod tests {
         let b = build_volcano_body(&r);
         assert!(b.get("seed").is_none());
         assert!(b.get("n").is_none());
+    }
+
+    #[test]
+    fn body_output_format_follows_user_choice_and_falls_back_to_png() {
+        let mut r = req_for("doubao-seedream-5-0-flash-260915");
+        // 用户选 jpeg：请求体与落盘后缀都跟着走（此前适配器写死 png，勾了能力位也无处可选）。
+        r.output_format = Some("jpeg".into());
+        assert_eq!(build_volcano_body(&r)["output_format"], "jpeg");
+        assert_eq!(image_extension(&r), "jpeg");
+        // 未选回落 png（出厂口径不变）；越界值走白名单，不直发厂商。
+        r.output_format = None;
+        assert_eq!(build_volcano_body(&r)["output_format"], "png");
+        assert_eq!(image_extension(&r), "png");
+        r.output_format = Some("webp".into());
+        assert_eq!(build_volcano_body(&r)["output_format"], "png");
+        // 4.5/4.0 不可设：即便传了 jpeg 也整条省略、后缀恒 jpeg（服务端只回 jpeg）。
+        for id in ["doubao-seedream-4-5-251128", "doubao-seedream-4-0-250828"] {
+            let mut old = req_for(id);
+            old.output_format = Some("jpeg".into());
+            assert!(build_volcano_body(&old).get("output_format").is_none());
+            assert_eq!(image_extension(&old), "jpeg", "{id}");
+        }
     }
 
     #[test]

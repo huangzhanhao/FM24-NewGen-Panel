@@ -9,7 +9,7 @@
 //! - 恒发：`model` / `prompt` / `image_size`（`宽x高`，小写 `x`，原样透传不转换）；
 //! - `negative_prompt`；`seed`(0–9999999999)；`num_inference_steps`(1–100，默认 20)；
 //! - `batch_size`(1–4，**仅 Kwai-Kolors/Kolors 适用**)；`guidance_scale`(0–20，**仅 Kolors 适用**)；
-//! - `output_format`(png/jpeg，适配器固定 png)。
+//! - `output_format`(png/jpeg，值随用户选择，未选默认 png)。
 //!
 //! 【内置目录】只接入两个官方明列推荐分辨率的模型：
 //! - `Qwen/Qwen-Image`（出厂默认）
@@ -79,7 +79,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
 /// - `max_n`/`supports_n`：仅 Kolors 有 `batch_size`（1–4）；
 /// - `supports_steps`：全模型支持 `num_inference_steps`（1–100，默认 20）；
 /// - `supports_guidance`：仅 Kolors 支持 `guidance_scale`（0–20，默认 7.5）；
-/// - `supports_output_format`：全模型可设 png/jpeg（适配器固定 png）。
+/// - `supports_output_format`：全模型可设 png/jpeg（适配器默认 png，值随用户选择）。
 fn siliconflow_caps(
     sizes: &[&str],
     max_n: u32,
@@ -146,7 +146,7 @@ pub(crate) fn build_siliconflow_body(req: &GenRequest) -> serde_json::Value {
         }
     }
     if caps.supports_output_format {
-        obj.insert("output_format".into(), json!("png"));
+        obj.insert("output_format".into(), json!(super::output_format(req)));
     }
     v
 }
@@ -343,6 +343,19 @@ mod tests {
         for forbidden in ["size", "n"] {
             assert!(b.get(forbidden).is_none(), "不应出现 {forbidden}");
         }
+    }
+
+    #[test]
+    fn body_output_format_follows_user_choice() {
+        // 用户在能力位上勾了 output_format 就该能选到 jpeg（此前适配器写死 png，界面无处可选）。
+        let mut r = req_for("Qwen/Qwen-Image");
+        r.output_format = Some("jpeg".into());
+        assert_eq!(build_siliconflow_body(&r)["output_format"], "jpeg");
+        // 未选回落 png（出厂口径不变）；越界值走白名单，不直发厂商。
+        r.output_format = None;
+        assert_eq!(build_siliconflow_body(&r)["output_format"], "png");
+        r.output_format = Some("bmp".into());
+        assert_eq!(build_siliconflow_body(&r)["output_format"], "png");
     }
 
     // ===================== 响应解析 =====================

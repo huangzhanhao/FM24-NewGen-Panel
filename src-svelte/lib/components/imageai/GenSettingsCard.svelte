@@ -1,7 +1,7 @@
 <!-- GenSettingsCard · 生成设置卡：
      自上而下平铺——模板应用栏 / 正文 / 负向折叠（模型不支持则整项不出现）/ 调用方式 /
      参数区。参数区只有一层：左画幅帧（按宽高比实时缩放的输出预览，右侧一条竖分隔线），
-     右参数流（比例 / 尺寸 / 张数 / Seed / 质量 / 水印 / 改写模式 / 思考模式 / 智能改写，
+     右参数流（比例 / 尺寸 / 张数 / Seed / 质量 / 输出格式 / 水印 / 改写模式 / 思考模式 / 智能改写，
      一个自动折行的流）；无嵌套面板、无分组标题。
      左缘：**盒型元素**（模板栏 / 文本域 / 画幅盒）外沿贴卡内容边 16px；**纯文字行**（正文标题 /
      负向条 / 调用方式 / 尺寸提示）缩进 --sp-4 落到 26px（= 文本域内文左缘）。画幅盒是盒不是文字，
@@ -14,7 +14,14 @@
   import Icon from "../../ui/Icon.svelte";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text";
-  import { applyTemplate, imageaiStore, parseSize, rerollPrompt, SEED_MAX } from "../../stores/imageai.svelte";
+  import {
+    applyTemplate,
+    customSizeStart,
+    imageaiStore,
+    parseSize,
+    rerollPrompt,
+    SEED_MAX,
+  } from "../../stores/imageai.svelte";
   import NumberStepper from "./NumberStepper.svelte";
 
   let {
@@ -37,11 +44,14 @@
   // ---- 尺寸：预设 + 自定义混合。SIZE_CUSTOM 是下拉里「自定义…」的哨兵值，
   //      预设尺寸均为 WxH 形式（小写 x），不会与之相撞。 ----
   const SIZE_CUSTOM = "__custom__";
+  /** 「自定义…」的起步宽高：当前尺寸解析不出宽高（档位串模型）时，取该模型声明的像素下限
+   *  （见 store.customSizeStart）——写死的 350×350 低于火山/wan 的总像素下限，开局就是一条红线。 */
+  const startSize = () => customSizeStart(caps?.sizeRules);
   // 「自定义…」是显式选择的模式：即便合成值恰好等于某预设也保持自定义态，
   // 直到改选预设、或切服务商重置了尺寸才退出（切模型不动尺寸）。
   let sizeCustomMode = $state(false);
-  let sizeW = $state(parseSize(imageaiStore.size)?.[0] ?? 350);
-  let sizeH = $state(parseSize(imageaiStore.size)?.[1] ?? 350);
+  let sizeW = $state(parseSize(imageaiStore.size)?.[0] ?? startSize()[0]);
+  let sizeH = $state(parseSize(imageaiStore.size)?.[1] ?? startSize()[1]);
 
   const sizePresets = $derived(caps?.sizes ?? []);
   /** 尺寸输入框的上下限来自模型声明的约束：缺省 = 不设限（不硬编一套与模型无关的假范围），
@@ -80,12 +90,20 @@
   const qualityOptions = $derived(caps?.qualities ? ["auto", ...caps.qualities.filter((q) => q !== "auto")] : []);
 
   // store.size 变化（初始挂载、切服务商重置、自定义输入写回）时把 WxH 回填进两个数字输入；
-  // 解析失败保持现值。输入过程中的同值回填是幂等的，不会打断正在输入的数字。
+  // 解析不出宽高（档位串模型的 1K/2K 等）时取该模型的规则起步值：所以切模型也要重算一次，
+  // 否则上一个模型推出来的值会留在框里（火山 Pro 下限 921600、Lite 下限 1920²，两者不通用）。
+  // 用户真填过的自定义值不会被动：它已写回 store.size，走上面的解析分支原样保留。
+  // 输入过程中的同值回填是幂等的，不会打断正在输入的数字。
   $effect(() => {
+    void imageaiStore.model;
     const parsed = parseSize(imageaiStore.size);
     if (parsed) {
       sizeW = parsed[0];
       sizeH = parsed[1];
+    } else {
+      const start = startSize();
+      sizeW = start[0];
+      sizeH = start[1];
     }
   });
 
@@ -530,6 +548,22 @@
                   </button>
                 {/each}
               </div>
+            </div>
+          {/if}
+          {#if caps?.supportsOutputFormat}
+            <!-- 输出格式（火山 Seedream 5.0 系列 / 硅基流动）：选项值与协议字段一字不差（png/jpeg，
+                 不做大小写或中文转换），适配器按同一能力位门控后照此发送，落盘后缀随之走 -->
+            <div class="gfield f-format">
+              <label for="ig-output-format">{t.gen.outputFormat}</label>
+              <select
+                id="ig-output-format"
+                value={imageaiStore.outputFormat}
+                title={t.gen.outputFormatHint}
+                onchange={(e) => (imageaiStore.outputFormat = e.currentTarget.value as 'png' | 'jpeg')}
+              >
+                <option value="png">PNG</option>
+                <option value="jpeg">JPEG</option>
+              </select>
             </div>
           {/if}
           {#if caps?.supportsWatermark}
@@ -993,6 +1027,14 @@
   .f-thinking:hover .wm-text,
   .f-extend:hover .wm-text {
     color: var(--text-1);
+  }
+  /* 输出格式：与改写模式同档的短枚举下拉（选项只有 PNG / JPEG 两个短串） */
+  .f-format {
+    flex: none;
+  }
+  .f-format select {
+    flex: none;
+    width: 84px;
   }
   /* 改写模式：短枚举下拉，与比例同档定宽 */
   .f-extend-mode {

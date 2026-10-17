@@ -49,6 +49,7 @@ import {
   buildQueueEntries,
   clearSelection,
   clearSourcePlayer,
+  customSizeStart,
   enqueuePlayers,
   generate,
   imageaiStore,
@@ -346,6 +347,22 @@ describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
     expect(validateSizeRules('512*1440', { minSide: 512, maxSide: 1440 })).toBeNull();
     expect(validateSizeRules('500*1024', { minSide: 512, maxSide: 1440 })).not.toBeNull();
     expect(validateSizeRules('1024*1441', { minSide: 512, maxSide: 1440 })).not.toBeNull();
+  });
+
+  it('customSizeStart：起步值直接取模型声明的像素下限，不再写死 350×350', () => {
+    // 总像素下限开方 = 最小合法正方形边长：火山 5.0 Pro/Flash 921600 = 960²
+    const volcanoPro = { totalMin: 921_600, totalMax: 4_624_220, ratioMin: 1 / 16, ratioMax: 16 };
+    expect(customSizeStart(volcanoPro)).toEqual([960, 960]);
+    expect(customSizeStart({ totalMin: 3_686_400, totalMax: 16_777_216 })).toEqual([1920, 1920]); // 火山 Lite/4.5
+    expect(customSizeStart({ totalMin: 768 * 768, totalMax: 4096 * 4096 })).toEqual([768, 768]); // 万相 2.7
+    // 只声明单边下限（万相 2.2）时用单边下限
+    expect(customSizeStart({ minSide: 512, maxSide: 1440 })).toEqual([512, 512]);
+    // 无任何像素下限（自建 OpenAI 兼容服务）：保持历史字面量
+    expect(customSizeStart(null)).toEqual([350, 350]);
+    expect(customSizeStart({ totalMin: 0, minSide: 0 })).toEqual([350, 350]);
+    // 起步值必须落在规则内——否则「一点自定义就吃红线」的老毛病会以新形式回来
+    const [w, h] = customSizeStart(volcanoPro);
+    expect(validateSizeRules(`${w}x${h}`, volcanoPro)).toBeNull();
   });
 
   it('queueRetry 移除旧条目并用同参数重新排队', async () => {
@@ -646,5 +663,64 @@ describe('调用方式 callMode（A4：前端门控）', () => {
     imageaiStore.callMode = 'async'; // 再次强行置位
     const sync = await buildQueueEntries([{ uid: 'u2', name: '乙' }]);
     expect(sync[0].req.callMode).toBeNull();
+  });
+});
+
+describe('输出格式 outputFormat（火山 Seedream / 硅基流动：能力位门控 + 请求带值）', () => {
+  // 同一服务商两个模型：m2 可设 output_format、m-noformat 不可设，验证「勾了才能选、选了才发」。
+  const fmtCfg: ImageConfig = {
+    ...cfg,
+    providers: [
+      {
+        ...cfg.providers[0],
+        models: [
+          {
+            model: 'm2',
+            capabilities: { ...cfg.providers[0].models[0].capabilities, supportsOutputFormat: true },
+          },
+          { model: 'm-noformat', capabilities: { ...cfg.providers[0].models[0].capabilities } },
+        ],
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    imageaiStore.config = fmtCfg;
+    imageaiStore.prompt = '脸';
+    clearSourcePlayer();
+    vi.mocked(api.generateImage).mockClear();
+    vi.mocked(api.renderPrompt).mockClear();
+  });
+
+  it('selectProvider / selectModel 都把选择归位默认 png', () => {
+    selectProvider('p1');
+    selectModel('m2');
+    imageaiStore.outputFormat = 'jpeg'; // 用户选择
+    selectModel('m-noformat');
+    expect(imageaiStore.outputFormat).toBe('png');
+  });
+
+  it('generate：声明可设的模型带当前选择；未声明的模型送 null', async () => {
+    selectProvider('p1');
+    selectModel('m2'); // supportsOutputFormat=true
+    imageaiStore.outputFormat = 'jpeg';
+    await generate();
+    expect(vi.mocked(api.generateImage).mock.calls[0][0].outputFormat).toBe('jpeg');
+
+    selectModel('m-noformat'); // 不支持该参数
+    await generate();
+    expect(vi.mocked(api.generateImage).mock.calls[1][0].outputFormat).toBeNull();
+  });
+
+  it('buildQueueEntries：同一条能力位门控', async () => {
+    selectProvider('p1');
+    selectModel('m2');
+    imageaiStore.outputFormat = 'jpeg';
+    const entries = await buildQueueEntries([{ uid: 'u1', name: '甲' }]);
+    expect(entries[0].req.outputFormat).toBe('jpeg');
+
+    selectModel('m-noformat');
+    const none = await buildQueueEntries([{ uid: 'u2', name: '乙' }]);
+    expect(none[0].req.outputFormat).toBeNull();
   });
 });

@@ -227,6 +227,17 @@ pub(crate) fn capability_params(req: &GenRequest) -> serde_json::Map<String, ser
     m
 }
 
+/// 请求体里的 `output_format` 取值（仅声明 `supports_output_format` 的模型用）：
+/// `None` / 越界串 / 大小写不符一律回落 `png`（适配器出厂口径）。火山与硅基流动共用此白名单——
+/// 两处各写一份必然漂移，漂移的表现就是「前端选了 jpeg，发出去的还是 png」。
+pub(crate) fn output_format(req: &GenRequest) -> &'static str {
+    if req.output_format.as_deref() == Some("jpeg") {
+        "jpeg"
+    } else {
+        "png"
+    }
+}
+
 /// 生成阶段：适配器在执行链上按序上报（同步两段 Submitting→Downloading；异步三段
 /// Submitting→Polling→Downloading），供队列把「当前项正在做什么」推给前端。
 /// 【为什么由适配器上报】阶段是协议内部时序，应用层无从推断（同步/异步分支只在适配器内）。

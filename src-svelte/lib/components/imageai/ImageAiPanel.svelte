@@ -148,7 +148,13 @@
   <section class="conn-bar">
     <label class="cb-field">
       <span class="cb-label">{t.gen.provider}</span>
-      <select id="ig-provider" value={imageaiStore.providerId} onchange={(e) => selectProvider(e.currentTarget.value)}>
+      <!-- title = 全名：窄窗下这枚下拉会被压窄截断，悬停仍要能读到完整服务商名 -->
+      <select
+        id="ig-provider"
+        title={imageaiStore.provider?.name ?? ""}
+        value={imageaiStore.providerId}
+        onchange={(e) => selectProvider(e.currentTarget.value)}
+      >
         {#each imageaiStore.config?.providers ?? [] as p (p.id)}
           <option value={p.id}>{p.name}</option>
         {/each}
@@ -156,10 +162,11 @@
     </label>
     <label class="cb-field">
       <span class="cb-label">{t.gen.model}</span>
+      <!-- title = 模型 ID + 能力摘要：模型 ID 是最容易被截断的一行文字，能力摘要本就挂在这里 -->
       <select
         id="ig-model"
         value={imageaiStore.model}
-        title={capSummary}
+        title={imageaiStore.model ? `${imageaiStore.model} · ${capSummary}` : capSummary}
         onchange={(e) => selectModel(e.currentTarget.value)}
       >
         <!-- 默认模型不在明细行里时也要能选中（自建 OpenAI 兼容服务常无明细行） -->
@@ -304,8 +311,8 @@
     flex: none;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: var(--sp-3) var(--sp-6);
+    flex-wrap: nowrap;
+    gap: var(--sp-3) var(--sp-5);
     border: 1px solid var(--hairline);
     border-radius: var(--radius-lg);
     background: var(--bg-surface);
@@ -317,23 +324,32 @@
     align-items: center;
     gap: var(--sp-3);
     min-width: 0;
+    flex: 0 1 auto;
   }
   .cb-label {
     font-size: var(--fs-sm);
     color: var(--text-2);
     flex-shrink: 0;
   }
-  /* 全局 select 是 width:100%（铺满网格单元的口径），配置条内按内容自适应 */
+  /* 全局 select 是 width:100%（铺满网格单元的口径），配置条内按内容 96–220px 自适应 */
   .cb-field select {
     width: auto;
+    flex: 0 1 auto;
     max-width: 220px;
+    min-width: 96px;
+    text-overflow: ellipsis;
   }
-  /* Key 字段吃余宽，输入框有地方打长 Key */
+  /* Key 字段吃余宽，输入框有地方打长 Key；下限 96px 保证压缩时仍看得出是一枚输入框 */
   .cb-key {
     flex: 1 1 220px;
   }
   .cb-key .key-row {
     flex: 1;
+    min-width: 96px;
+  }
+  /* 设置钮恒按内容定宽：被压窄的话钮内文字会折成两行，把「单行配置条」破坏得更彻底 */
+  .conn-bar > .btn {
+    flex: none;
   }
   /* 就绪状态灯：三档文字与边框同色，色语与顶栏 chip 状态点一致
        .warn = 有未决项（缺 Key 或未选模型）→ 琥珀
@@ -406,6 +422,17 @@
     min-height: var(--control-h-xs);
     height: var(--control-h-xs);
     padding: 0;
+  }
+
+  /* ---------- 响应式：配置条折行回退（≤1024px，与下方栅格堆叠同断点） ----------
+     实测量到的边界：窗口 1024（可用列宽 756）时 Key 框恰好压到 96px 下限，再窄下去
+     各字段只能压破自己的最小内容宽 —— 下拉会盖住下一个标签，属于「看着像布局坏了」的错。
+     故与栅格同断点放回折行：宽窗单行常驻（默认 1280 窗口实测条高 50px、零溢出），
+     窄窗（本组件已切单列）宁可变两行，也不做横向溢出与控件互相重叠。 */
+  @media (max-width: 1024px) {
+    .conn-bar {
+      flex-wrap: wrap;
+    }
   }
 
   /* ---------- 主工作区 ---------- */

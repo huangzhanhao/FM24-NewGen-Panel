@@ -11,15 +11,19 @@
 //! 【代码结构，自上而下】数据契约（ProviderKind/错误分类/Capabilities/各结构体）→ data/ 路径
 //! 与小工具（new_id / now_ts）→ Config（双来源加载 + 内置服务商归并）→ CRUD 与准入校验 →
 //! 模板渲染 → 词库/码值回落 → build_vars → cut_white_corners（四角裁圆角）→ generate 编排 →
-//! 画廊记录与双淘汰闸门 → 单元测试。
+//! 画廊记录与双淘汰闸门 → 服务商 Key 的密文存储 → 单元测试。
 
 use crate::json_store::{self, LoadError};
+use base64::Engine as _;
 use rand::Rng;
+use ring::aead;
+use ring::digest;
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 // ===================== 数据契约（与前端 types.ts 一一对应，camelCase） ===========================
@@ -123,6 +127,24 @@ impl ImageGenError {
     pub fn with_retry_after(mut self, secs: Option<u64>) -> Self {
         self.retry_after = secs;
         self
+    }
+
+    /// 把文案里可能回显的 API Key 抹成 `[redacted]`。
+    /// 【为什么需要】厂商的 401 响应常把被拒的 Key 抄进 message，而这条文案会写进
+    /// data/newgan.log；用户贴日志求助时等于把 Key 公开。Key 含引号/反斜杠时日志里
+    /// 可能是 JSON 转义形态，两种拼写都要换。
+    pub fn scrub(&mut self, key: &str) {
+        let key = key.trim();
+        if key.is_empty() {
+            return;
+        }
+        let escaped = serde_json::to_string(key)
+            .map(|s| s.trim_matches('"').to_string())
+            .unwrap_or_else(|_| key.to_string());
+        self.message = self.message.replace(key, "[redacted]");
+        if escaped != key {
+            self.message = self.message.replace(&escaped, "[redacted]");
+        }
     }
 
     /// 按类别构造，retryable 取类别默认（仅 Network/RateLimited 为 true）。
@@ -357,7 +379,17 @@ pub struct ModelInfo {
     pub capabilities: Capabilities,
 }
 
-/// 服务商配置（不含 API Key）。
+/// 已加密的 API Key：`nonce` 与「密文‖tag」各自 base64。
+/// 【为什么单独一个结构】明文只在 set_provider_key 与发请求时短暂存在；落盘与回前端
+/// 都只经这个结构，避免有人把明文塞进 ProviderConfig。加解密见本文件末尾 seal_key / open_key。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedKey {
+    pub nonce: String,
+    pub data: String,
+}
+
+/// 服务商配置（不含明文 API Key）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
@@ -374,6 +406,11 @@ pub struct ProviderConfig {
     /// 模型明细行（尺寸/张数/能力位）；可为空——空时只有 default_model 可放行且高级能力全关
     #[serde(default)]
     pub models: Vec<ModelInfo>,
+    /// 加密后的 API Key（每家一把，跨平台不可复用）；None = 未配置。
+    /// 【绝不回前端】ProviderConfig 同时用于落盘与 IPC 返回，所以回前端前必须经
+    /// [`Config::public_view`] 清空，否则密文会随状态一起送到前端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SealedKey>,
 }
 
 /// 生图设置。
@@ -941,6 +978,17 @@ impl Config {
         json_store::save(&templates_path(d), &self.templates)
     }
 
+    /// 回前端前的视图：抹掉全部 Key 密文。
+    /// 【必须走这里】有 5 个命令会整体返回 Config；前端只认 keysSet 布尔，
+    /// 不需要也不该拿到密文。逐处清空必然漏，收口成一个方法。
+    pub fn public_view(&self) -> Self {
+        let mut out = self.clone();
+        for p in &mut out.providers {
+            p.api_key = None;
+        }
+        out
+    }
+
     /// 按 id 查服务商配置；不存在返回 None。
     pub fn provider(&self, id: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.id == id)
@@ -1015,7 +1063,14 @@ pub fn upsert_provider(cfg: &mut Config, mut p: ProviderConfig) -> Result<(), St
         return Err("服务商 ID 与名称不能为空".into());
     }
     match cfg.providers.iter_mut().find(|x| x.id == p.id) {
-        Some(slot) => *slot = p,
+        Some(slot) => {
+            // 前端不持有密文，回传的 api_key 恒为 None：**必须保留存量**，否则用户改一下
+            // 服务商名称就把 Key 静默抹掉且无任何报错。清空只走 set_provider_key（传空串）。
+            if p.api_key.is_none() {
+                p.api_key = slot.api_key.take();
+            }
+            *slot = p;
+        }
         None => cfg.providers.push(p),
     }
     Ok(())
@@ -1484,21 +1539,25 @@ pub fn build_vars(
 
 // ===================== 四角白底裁成圆角（生成图后处理） ==========================================
 
-/// 把生成图四角的白底裁成圆角弧：模型收到「圆角方形构图」只会把圆角外画成白底
-///（文生图产不出真 alpha），深色背景下白角扎眼。确定性后处理，与模型/服务商无关。
+/// 落盘前统一把四角裁成圆角，恒输出 RGBA PNG。
 ///
-/// 做法：每角对近白（min 通道 ≥ 228——用 245 会漏抗锯齿过渡带、裁完沿弧留亮线）的
-/// 连通像素做 flood fill，限本角象限内（白弧不过中线，兼作跑飞防护）。模型画的弧是
-/// 有机形、按「边缘跨度」量不准，故对白区每个像素求「恰好覆盖它所需半径」
-/// R = lx + ly + √(2·lx·ly)（弧方程解出：弧外 ⟺ 该式 < R），取最大值 + 3px 余量
-///（1~2px 会露离散亮残点）作裁切半径；仅在角上 R×R 方框内把弧外置透明，**宽高不变**。
-/// 半径 > 短边 1/4 视为大片白景物，跳过该角（裁错不可逆，宁可留白角）。
+/// 【为什么不再只认白角】文生图拿不到真 alpha，圆角只能由后处理给。旧版靠提示词让模型
+/// 把角外画成白底再裁白；提示词去掉那句之后，模型输出的是满幅方图，四角没有任何白弧，
+/// 只认白就等于不裁角。现在半径取「固定比例」与「实测白弧」的较大值：
+/// - 固定值 = round(短边 × `RADIUS_RATIO`)，满幅方图也能得到圆角；
+/// - 白弧实测沿用 flood fill（近白 min 通道 ≥ 228、限本角象限），半径超过短边 1/4 视为
+///   场景级白色、不采信，避免顺着白区吃进大片内容。
 ///
-/// `Ok(None)` = 四角均无可裁白弧（按原图原格式落盘）；`Ok(Some)` = 裁角后 PNG（恒 RGBA）；
-/// `Err` = 解码失败。
-fn cut_white_corners(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+/// 每个角只在自己的 r×r 方框内把圆弧外置透明，宽高不变（头像包不能变形）。
+/// `Err` = 解码/编码失败，调用方按原图原格式落盘，不拖垮已成功的生成。
+fn round_corners(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    /// 近白判定：用 245 会漏抗锯齿过渡带，裁完沿弧留亮线。
     const EDGE_T: u8 = 228;
+    /// 实测白弧的裁切余量：1~2px 仍会露离散亮残点。
     const MARGIN: u32 = 3;
+    /// 固定圆角半径占短边的比例；观感不对只改这一个数。
+    const RADIUS_RATIO: f32 = 0.10;
+
     let rgba = image::load_from_memory(bytes)
         .map_err(|e| format!("图片解码失败: {e}"))?
         .into_rgba8();
@@ -1510,6 +1569,9 @@ fn cut_white_corners(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
         raw[i].min(raw[i + 1]).min(raw[i + 2]) >= EDGE_T
     };
 
+    let fixed = (((w.min(h) as f32) * RADIUS_RATIO).round() as u32).max(1);
+    let cap = w.min(h) / 4;
+
     // 象限 = (起点, x 下界, x 上界, y 下界, y 上界)。
     let quadrants: [(u32, u32, u32, u32, u32, u32); 4] = [
         (0, 0, 0, w / 2, 0, h / 2),
@@ -1518,38 +1580,42 @@ fn cut_white_corners(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
         (w - 1, h - 1, w / 2, w, h / 2, h),
     ];
     let mut visited = vec![false; wz * hz];
-    let mut cut_any = false;
     for (sx, sy, x0, x1, y0, y1) in quadrants {
-        if !white_at(&raw, sx, sy) {
-            continue;
-        }
-        // flood fill 找齐本角白弧的连通区，同时取覆盖该区所需的最大弧半径。
-        let mut need = 0f64;
-        let mut stack = vec![(sx, sy)];
-        visited[sy as usize * wz + sx as usize] = true;
-        while let Some((x, y)) = stack.pop() {
-            let lx = (if sx == 0 { x } else { w - 1 - x }) as f64;
-            let ly = (if sy == 0 { y } else { h - 1 - y }) as f64;
-            need = need.max(lx + ly + (2.0 * lx * ly).sqrt());
-            for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
-                let nx = x as i64 + dx;
-                let ny = y as i64 + dy;
-                if nx < x0 as i64 || nx >= x1 as i64 || ny < y0 as i64 || ny >= y1 as i64 {
-                    continue;
+        // 1) 实测白弧：只有起点够白才 flood fill；量出的半径超出护栏就当没有。
+        let mut detected = 0u32;
+        if white_at(&raw, sx, sy) {
+            let mut need = 0f64;
+            let mut stack = vec![(sx, sy)];
+            visited[sy as usize * wz + sx as usize] = true;
+            while let Some((x, y)) = stack.pop() {
+                let lx = (if sx == 0 { x } else { w - 1 - x }) as f64;
+                let ly = (if sy == 0 { y } else { h - 1 - y }) as f64;
+                need = need.max(lx + ly + (2.0 * lx * ly).sqrt());
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let nx = x as i64 + dx;
+                    let ny = y as i64 + dy;
+                    if nx < x0 as i64 || nx >= x1 as i64 || ny < y0 as i64 || ny >= y1 as i64 {
+                        continue;
+                    }
+                    let vi = ny as usize * wz + nx as usize;
+                    if visited[vi] || !white_at(&raw, nx as u32, ny as u32) {
+                        continue;
+                    }
+                    visited[vi] = true;
+                    stack.push((nx as u32, ny as u32));
                 }
-                let vi = ny as usize * wz + nx as usize;
-                if visited[vi] || !white_at(&raw, nx as u32, ny as u32) {
-                    continue;
-                }
-                visited[vi] = true;
-                stack.push((nx as u32, ny as u32));
+            }
+            let r = need.ceil() as u32 + MARGIN;
+            if r <= cap {
+                detected = r;
             }
         }
-        let r = need.ceil() as u32 + MARGIN;
-        if r > w.min(h) / 4 {
+        // 2) 固定半径兜底，与实测取大。
+        let r = fixed.max(detected);
+        if r > cap {
             continue;
         }
-        // 只在本角 r×r 方框内工作：圆心 (r,r) 半径 r 的圆弧外（白角区）置透明。
+        // 只在本角 r×r 方框内工作：圆心 (r,r) 半径 r 的圆弧外（角区）置透明。
         for ly in 0..r {
             let gy = if sy == 0 { ly } else { h - 1 - ly };
             for lx in 0..r {
@@ -1561,23 +1627,19 @@ fn cut_white_corners(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
                 }
             }
         }
-        cut_any = true;
     }
 
-    if !cut_any {
-        return Ok(None);
-    }
     let out = image::RgbaImage::from_raw(w, h, raw).ok_or("图片像素缓冲与尺寸不一致")?;
     let mut png = Vec::new();
     image::DynamicImage::ImageRgba8(out)
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| format!("PNG 重编码失败: {e}"))?;
-    Ok(Some(png))
+    Ok(png)
 }
 
 // ===================== 生成编排：准入校验 → 适配器取字节 → 临时文件 → 画廊记录 ===================
 
-/// 执行一次生成：解析服务商/模型 → 唯一准入校验 → 适配器取回图片字节 → 四角裁圆角
+/// 执行一次生成：解析服务商/模型 → 唯一准入校验 → 适配器取回图片字节 → 四角裁圆角（恒 PNG）
 /// → 落盘 `.imgtmp` → 写画廊记录并按上限裁剪。记录写入与图片裁剪失败只告警，不掩盖已成功落盘的生成。
 ///
 /// # 参数
@@ -1636,13 +1698,12 @@ pub async fn generate(
     let mut images = Vec::new();
     for img in fetched.images {
         let id = new_id();
-        // 四角裁圆角；无可裁白弧或解码失败 → 原图原格式落盘（后处理不拖垮生成）。
-        // 裁过的图恒为 PNG，故成功分支扩展名统一 png。
-        let (bytes, ext) = match cut_white_corners(&img.bytes) {
-            Ok(Some(png)) => (png, "png".to_string()),
-            Ok(None) => (img.bytes, img.extension),
+        // 四角统一裁圆角；解码/编码失败 → 原图原格式落盘（后处理不拖垮生成）。
+        // 成功分支恒为 PNG（圆角需要 alpha），故扩展名统一 png。
+        let (bytes, ext) = match round_corners(&img.bytes) {
+            Ok(png) => (png, "png".to_string()),
             Err(e) => {
-                log::warn!(target: "image_ai", "四角裁角失败（按原图落盘）: {e}");
+                log::warn!(target: "image_ai", "裁角失败（按原图落盘）: {e}");
                 (img.bytes, img.extension)
             }
         };
@@ -1811,10 +1872,205 @@ pub fn load_gallery_items(data_dir: &Path) -> Vec<GalleryItem> {
         .collect()
 }
 
+// ===================== 服务商 Key 的密文存储 =========================================
+
+// 【威胁模型】只防“配置文件被转发 / 备份 / 上传后 Key 以明文泄露”。主密钥由固定盐与
+// 机器指纹派生、不落盘，因此文件拷到另一台机器或另一个系统账户就解不开——代价是
+// 换机 / 重装系统后要重填（用户已接受）。同一账户下的恶意程序、逆向二进制取出盐与算法
+// 不在防护范围内，不为它做任何额外努力。
+//
+// 【算法】ring 的 AES-256-GCM：一次调用完成加密与完整性校验，不必自己管 IV 长度、
+// 填充与 tag 校验。主密钥 = SHA-256(固定盐 ‖ 机器指纹)。
+//
+// 【容错口径】解密失败不是错误，是“未配置”：换机、重装、换账户、手改文件都会走到这里。
+// 调用方丢掉该条并记 warn，**绝不阻断启动**。
+
+/// 派生主密钥的固定盐。改动等于作废所有已存 Key，非必要不动。
+const KEY_SALT: &[u8] = b"NewGAN-Manager/image-ai/key-store/v1";
+
+/// GCM 随机数长度；AES-256-GCM 的 nonce 固定 12 字节。
+const KEY_NONCE_LEN: usize = 12;
+
+/// 机器指纹：启动时算一次并缓存，之后不再起子进程。
+fn key_fingerprint() -> &'static str {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(read_key_fingerprint)
+}
+
+/// 三平台取机器标识；任一环节失败都回落到空串（退化为“同目录混淆密文”），不阻断启动。
+fn read_key_fingerprint() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // GUI 应用起子进程时不要闪控制台窗口。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        if let Ok(out) = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = text.lines().find(|l| l.contains("MachineGuid")) {
+                if let Some(value) = line.split_whitespace().last() {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return value.to_string();
+                    }
+                }
+            }
+        }
+        // reg 被组策略/安全软件禁用时退到「计算机名 + 用户名」：仍能区分机器与账户，
+        // 代价是改计算机名后 Key 需重填（与换机同一类后果）。
+        return format!(
+            "{}|{}",
+            std::env::var("COMPUTERNAME").unwrap_or_default(),
+            std::env::var("USERNAME").unwrap_or_default()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = text.lines().find(|l| l.contains("IOPlatformUUID")) {
+                if let Some(start) = line.rfind('"') {
+                    let head = &line[..start];
+                    if let Some(open) = head.rfind('"') {
+                        return head[open + 1..].trim().to_string();
+                    }
+                }
+            }
+        }
+        return String::new();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_to_string("/etc/machine-id")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    String::new()
+}
+
+/// 主密钥：每次现算，不落盘。
+fn key_master_key() -> [u8; 32] {
+    let mut ctx = digest::Context::new(&digest::SHA256);
+    ctx.update(KEY_SALT);
+    ctx.update(key_fingerprint().as_bytes());
+    let digest = ctx.finish();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(digest.as_ref());
+    key
+}
+
+/// 加密一把 Key。空串不该走到这里（清空是“字段置 None”）。
+pub fn seal_key(key: &str) -> Result<SealedKey, String> {
+    let mut nonce_bytes = [0u8; KEY_NONCE_LEN];
+    SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| "生成随机数失败，无法保存 Key".to_string())?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_master_key())
+        .map_err(|_| "初始化加密算法失败".to_string())?;
+    let sealing = aead::LessSafeKey::new(unbound);
+    let mut buf = key.as_bytes().to_vec();
+    sealing
+        .seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key(nonce_bytes),
+            aead::Aad::empty(),
+            &mut buf,
+        )
+        .map_err(|_| "加密 Key 失败".to_string())?;
+    Ok(SealedKey {
+        nonce: base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
+        data: base64::engine::general_purpose::STANDARD.encode(&buf),
+    })
+}
+
+/// 解密；任何一步不成立都返回 None（调用方按“未配置”处理）。
+pub fn open_key(sealed: &SealedKey) -> Option<String> {
+    let nonce_vec = base64::engine::general_purpose::STANDARD
+        .decode(sealed.nonce.as_bytes())
+        .ok()?;
+    let nonce_bytes: [u8; KEY_NONCE_LEN] = nonce_vec.try_into().ok()?;
+    let mut buf = base64::engine::general_purpose::STANDARD
+        .decode(sealed.data.as_bytes())
+        .ok()?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_master_key()).ok()?;
+    let opening = aead::LessSafeKey::new(unbound);
+    let plain = opening
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(nonce_bytes),
+            aead::Aad::empty(),
+            &mut buf,
+        )
+        .ok()?;
+    String::from_utf8(plain.to_vec()).ok()
+}
+
+/// 启动时把配置里的密文逐条解密成会话内存的 Key 表。
+/// 解不开的条目**跳过并记一条 warn**（不打印密文，更不打印明文）。
+pub fn load_stored_keys(providers: &[ProviderConfig]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for p in providers {
+        let Some(sealed) = p.api_key.as_ref() else {
+            continue;
+        };
+        match open_key(sealed) {
+            Some(key) if !key.trim().is_empty() => {
+                out.insert(p.id.clone(), key);
+            }
+            _ => log::warn!(
+                target: "image_ai",
+                "服务商 {} 的 Key 无法解密（换机/重装或文件被修改），按未配置处理",
+                p.id
+            ),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rtf_scanner::{DetailedInfo, PlayerRecord}; // build_vars 单测的样本类型
+
+    #[test]
+    fn seal_then_open_roundtrips_and_rejects_tampered_blob() {
+        let sealed = seal_key("sk-test-1234").unwrap();
+        assert_eq!(open_key(&sealed).as_deref(), Some("sk-test-1234"));
+        // 同一把 Key 两次封装的 nonce 不同（随机），密文也不同。
+        let again = seal_key("sk-test-1234").unwrap();
+        assert_ne!(sealed.data, again.data);
+
+        // nonce 长度不对 → None
+        let bad_nonce = SealedKey {
+            nonce: "AAAA".into(),
+            data: sealed.data.clone(),
+        };
+        assert_eq!(open_key(&bad_nonce), None);
+
+        // 密文被改一位 → 校验失败 → None（不返回乱码）
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(sealed.data.as_bytes())
+            .unwrap();
+        bytes[0] ^= 0x01;
+        let tampered = SealedKey {
+            nonce: sealed.nonce.clone(),
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        };
+        assert_eq!(open_key(&tampered), None);
+    }
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -1976,6 +2232,7 @@ mod tests {
                 base_url: "https://x/compatible-mode/v1".into(),
                 default_model: "qwen-image-3.0".into(),
                 models: vec![], // 明细行缺失：正是用户文件的真实形状
+                api_key: None,
             },
         )
         .unwrap();
@@ -1994,6 +2251,7 @@ mod tests {
                 base_url: "https://x/compatible-mode/v1".into(),
                 default_model: String::new(),
                 models: vec![],
+                api_key: None,
             },
         )
         .unwrap();
@@ -2149,14 +2407,16 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_six_providers() {
-        // openai 来自 assets JSON；dashscope/volcano/siliconflow/modelscope/comfyui 由 reconcile 顺序注入。
+    fn builtin_has_seven_providers() {
+        // openai 与 sensenova 来自 assets JSON（都是 OpenAI 图像协议，零适配器代码）；
+        // dashscope/volcano/siliconflow/modelscope/comfyui 由 reconcile 顺序注入。
         let cfg = Config::builtin();
         let ids: Vec<&str> = cfg.providers.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
                 "openai",
+                "sensenova",
                 "dashscope",
                 "volcano",
                 "siliconflow",
@@ -2173,10 +2433,10 @@ mod tests {
         assert_eq!(comfy.base_url, "http://127.0.0.1:8188");
         // 出厂 gpt-image-1 必须关掉 response_format（官方不支持该参数，传了会 400）。
         assert!(!caps("openai", "gpt-image-1").supports_response_format);
-        // 火山：默认模型与目录规模随出厂快照；能力抽查：单张、无 seed/n、有水印与 output_format。
+        // 火山：默认模型 + 能力抽查（单张、无 seed/n、有水印与 output_format）；目录条目数不锁，
+        // 上架新模型时不该逼着改这里。
         let volcano = cfg.provider("volcano").unwrap();
         assert_eq!(volcano.default_model, "doubao-seedream-5-0-flash-260915");
-        assert_eq!(volcano.models.len(), 5);
         let flash = caps("volcano", "doubao-seedream-5-0-flash-260915");
         assert_eq!(flash.max_n, 1);
         assert!(!flash.supports_seed, "Seedream 全系列无 seed");
@@ -2185,8 +2445,8 @@ mod tests {
         assert!(flash.supports_watermark);
         assert!(!flash.watermark_default);
         assert!(flash.supports_output_format, "Flash 可设 png/jpeg");
-        // 4.5 只回 jpeg：不能发 output_format；旧出厂模型名不应出现在目录中。
-        assert!(!caps("volcano", "doubao-seedream-4-5-251128").supports_output_format);
+        // 4.0 只回 jpeg：不能发 output_format；旧出厂模型名不应出现在目录中。
+        assert!(!caps("volcano", "doubao-seedream-4-0-20260415").supports_output_format);
         assert!(cfg.model("volcano", "seedream-5.0-flash").is_none());
         // 百炼模型目录代码内置：三系列 6 个模型抽查关键差异。
         let qwen = caps("dashscope", "qwen-image-3.0-pro");
@@ -2238,6 +2498,7 @@ mod tests {
                 base_url: "https://proxy.example.com/api/v1".into(),
                 default_model: "my-own-model".into(),
                 models: vec![],
+                api_key: None,
             },
             ProviderConfig {
                 id: "volcano".into(),
@@ -2249,6 +2510,7 @@ mod tests {
                     model: "my-seedream".into(),
                     capabilities: Capabilities::default(),
                 }],
+                api_key: None,
             },
         ];
         // 两处 kind 归位 + 缺失内置（siliconflow/modelscope/comfyui）整块注入 → 有变更。
@@ -2285,6 +2547,7 @@ mod tests {
                 base_url: "https://api.openai.com/v1".into(),
                 default_model: "gpt-image-1".into(),
                 models: vec![],
+                api_key: None,
             },
             ProviderConfig {
                 id: "dashscope".into(),
@@ -2296,6 +2559,7 @@ mod tests {
                     model: "wanx2.1-t2i-turbo".into(),
                     capabilities: Capabilities::default(),
                 }],
+                api_key: None,
             },
             crate::image_ai_providers::volcano::builtin_provider(),
             crate::image_ai_providers::siliconflow::builtin_provider(),
@@ -2363,12 +2627,11 @@ mod tests {
         assert_eq!(sf.kind, ProviderKind::Siliconflow);
         assert_eq!(sf.base_url, "https://api.siliconflow.cn/v1");
         assert_eq!(sf.default_model, "Qwen/Qwen-Image");
-        assert_eq!(sf.models.len(), 2);
+        assert_eq!(sf.models.len(), 4, "Qwen-Image + Kolors + Z-Image ×2");
         let ms = cfg.provider("modelscope").expect("魔搭必须被补入");
         assert_eq!(ms.kind, ProviderKind::Modelscope);
         assert_eq!(ms.base_url, "https://api-inference.modelscope.cn/v1");
         assert_eq!(ms.default_model, "Qwen/Qwen-Image-2.1");
-        assert_eq!(ms.models.len(), 3);
         // 再次 ensure 幂等：不再产生写盘变更。
         let before = fs::read_to_string(providers_path(root.path())).unwrap();
         Config::ensure_user_files(root.path()).unwrap();
@@ -2376,6 +2639,65 @@ mod tests {
             before,
             fs::read_to_string(providers_path(root.path())).unwrap()
         );
+    }
+
+    /// 前端不持有密文，保存服务商时 api_key 恒为 None：守卫必须保留存量，
+    /// 否则「改个名字」就把 Key 静默抹掉。显式传入密文（内部导入）时以传入为准。
+    #[test]
+    fn upsert_keeps_stored_key_when_incoming_has_none() {
+        let mut cfg = Config::builtin();
+        let sealed = SealedKey {
+            nonce: "nonce-1".into(),
+            data: "data-1".into(),
+        };
+        cfg.providers
+            .iter_mut()
+            .find(|p| p.id == "openai")
+            .unwrap()
+            .api_key = Some(sealed.clone());
+
+        let incoming = ProviderConfig {
+            id: "openai".into(),
+            kind: ProviderKind::OpenAI,
+            name: "改过名的 OpenAI".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            default_model: "gpt-image-1".into(),
+            models: vec![],
+            api_key: None,
+        };
+        upsert_provider(&mut cfg, incoming).unwrap();
+        let kept = cfg.provider("openai").unwrap();
+        assert_eq!(kept.name, "改过名的 OpenAI");
+        assert_eq!(kept.api_key, Some(sealed), "改名不得抹掉已存的 Key");
+
+        let replaced = SealedKey {
+            nonce: "nonce-2".into(),
+            data: "data-2".into(),
+        };
+        let mut with_key = kept.clone();
+        with_key.api_key = Some(replaced.clone());
+        upsert_provider(&mut cfg, with_key).unwrap();
+        assert_eq!(
+            cfg.provider("openai").unwrap().api_key,
+            Some(replaced),
+            "显式传入的密文应覆盖存量"
+        );
+    }
+
+    /// 回前端的视图必须抹掉密文；原对象保持不变（落盘仍要写出密文）。
+    #[test]
+    fn public_view_strips_sealed_keys() {
+        let mut cfg = Config::builtin();
+        cfg.providers[0].api_key = Some(SealedKey {
+            nonce: "n".into(),
+            data: "d".into(),
+        });
+        let view = cfg.public_view();
+        assert!(
+            view.providers.iter().all(|p| p.api_key.is_none()),
+            "回前端不得带密文"
+        );
+        assert!(cfg.providers[0].api_key.is_some(), "原对象不受影响");
     }
 
     #[test]
@@ -2423,6 +2745,7 @@ mod tests {
             base_url: "https://example.com/v1".into(),
             default_model: "m".into(),
             models: vec![],
+            api_key: None,
         };
         assert!(upsert_provider(&mut cfg, provider("  ", "x"))
             .unwrap_err()
@@ -2640,9 +2963,9 @@ mod tests {
         );
     }
 
-    // ---- cut_white_corners：四角白底裁成圆角 ------------------------------------------
+    // ---- round_corners：落盘前统一裁圆角 ---------------------------------------------
 
-    /// 合成「内容铺满、四角圆弧外为白」：贴近模型实际输出的圆角构图（白弧只在四角）。
+    /// 合成「内容铺满、四角圆弧外为白」：旧模板下模型的真实输出形态（白弧只在四角）。
     fn rounded_white_corner_sample(size: u32, radius: u32) -> image::RgbaImage {
         let mut img = image::RgbaImage::from_pixel(size, size, image::Rgba([20, 30, 40, 255]));
         let rr = (radius as i64) * (radius as i64);
@@ -2672,83 +2995,67 @@ mod tests {
     }
 
     #[test]
-    fn cut_white_corners_trims_arcs_and_skips_non_arcs() {
-        // 成功路径：白弧外的角区置透明、宽高保持不变。
-        // 100px 图、四角白弧半径 20：白区最远的边点 (19,0) 决定覆盖半径 19，加余量后裁切半径 22。
+    fn round_corners_cuts_white_arcs_and_full_bleed_squares() {
+        // ① 模型画了白角（旧模板）：实测半径 22 > 固定 10，按 22 裁，宽高不变。
         let sample = rounded_white_corner_sample(100, 20);
-        let png = cut_white_corners(&encode_as(&sample, image::ImageFormat::Png))
-            .unwrap()
-            .expect("白弧应触发裁角");
-        let out = image::load_from_memory(&png).unwrap().to_rgba8();
+        let out = image::load_from_memory(
+            &round_corners(&encode_as(&sample, image::ImageFormat::Png)).unwrap(),
+        )
+        .unwrap()
+        .to_rgba8();
         assert_eq!(out.dimensions(), (100, 100), "宽高必须保持不变");
         for (x, y) in [(0, 0), (99, 0), (0, 99), (99, 99)] {
             assert_eq!(out.get_pixel(x, y)[3], 0, "角 ({x},{y}) 弧外应透明");
         }
-        // (19,0)/(20,0) 被裁、(23,0) 保留：把裁切余量锁在 2–4px 带内——余量小了沿弧留
-        // 亮残点、大了多吃内容（(20,0) 正是被多吃 2px 的代价）。
+        // 余量锁在 2–4px 带内：余量小了沿弧留亮残点，大了多吃内容。
         assert_eq!(out.get_pixel(19, 0)[3], 0);
         assert_eq!(out.get_pixel(20, 0)[3], 0);
         assert_eq!(out.get_pixel(23, 0)[3], 255);
-        assert_eq!(out.get_pixel(50, 0)[3], 255);
         assert_eq!(*out.get_pixel(50, 50), image::Rgba([20, 30, 40, 255]));
 
-        // 只有左上角有白弧：其余三角必须原样保留——防「一角触发、四角齐裁」类越界。
-        let size = 100u32;
-        let radius = 20u32;
-        let mut img = image::RgbaImage::from_pixel(size, size, image::Rgba([20, 30, 40, 255]));
-        let rr = (radius as i64) * (radius as i64);
-        for ly in 0..radius {
-            for lx in 0..radius {
-                let dx = (radius - lx) as i64;
-                let dy = (radius - ly) as i64;
-                if dx * dx + dy * dy <= rr {
-                    continue;
-                }
-                img.put_pixel(lx, ly, image::Rgba([255, 255, 255, 255]));
-            }
-        }
-        let png = cut_white_corners(&encode_as(&img, image::ImageFormat::Png))
-            .unwrap()
-            .expect("左上角白弧应触发裁角");
-        let out = image::load_from_memory(&png).unwrap().to_rgba8();
-        assert_eq!(out.dimensions(), (size, size));
-        assert_eq!(out.get_pixel(0, 0)[3], 0, "有白弧的角应被裁");
-        for (x, y) in [(size - 1, 0), (0, size - 1), (size - 1, size - 1)] {
-            assert_eq!(out.get_pixel(x, y)[3], 255, "角 ({x},{y}) 无白弧不得被裁");
-        }
+        // ② 满幅方图（提示词不再要求圆角）：没有白弧也要按固定比例裁出圆角。
+        let plain = image::RgbaImage::from_pixel(100, 100, image::Rgba([10, 20, 30, 255]));
+        let out = image::load_from_memory(
+            &round_corners(&encode_as(&plain, image::ImageFormat::Png)).unwrap(),
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(out.dimensions(), (100, 100));
+        assert_eq!(out.get_pixel(0, 0)[3], 0, "无白弧的图也必须裁角");
+        assert_eq!(out.get_pixel(9, 0)[3], 0);
+        assert_eq!(out.get_pixel(10, 0)[3], 255, "固定半径之外的顶边不受影响");
+        assert_eq!(*out.get_pixel(50, 50), image::Rgba([10, 20, 30, 255]));
 
-        // 三种「不裁」情形都返回 None，调用方按原图原格式落盘：纯色深图（四角无白弧）；
-        // 深底中央封闭白块（白区不在角部，不该被波及）；整行白贴到顶角（场景级白色，
-        // 不是模型画的角弧——裁错不可逆，宁可留白）。
-        let plain = image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 20, 30, 255]));
-        assert!(
-            cut_white_corners(&encode_as(&plain, image::ImageFormat::Png))
-                .unwrap()
-                .is_none()
-        );
+        // ③ 场景级白（整行白贴顶角）不当作角弧：半径回落到固定值，不得顺着白区吃内容。
+        let mut scene = image::RgbaImage::from_pixel(64, 64, image::Rgba([15, 25, 35, 255]));
+        for x in 0..64 {
+            scene.put_pixel(x, 0, image::Rgba([255, 255, 255, 255]));
+        }
+        let out = image::load_from_memory(
+            &round_corners(&encode_as(&scene, image::ImageFormat::Png)).unwrap(),
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(out.get_pixel(0, 0)[3], 0);
+        assert_eq!(out.get_pixel(20, 0)[3], 255, "整行白不得被当成角弧");
+        assert_eq!(out.get_pixel(20, 0)[0], 255, "顶边白色内容原样保留");
+
+        // ④ 中央白块不受影响：只动四角。
         let mut sealed = image::RgbaImage::from_pixel(64, 64, image::Rgba([15, 25, 35, 255]));
         for y in 26..38 {
             for x in 26..38 {
                 sealed.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
             }
         }
-        assert!(
-            cut_white_corners(&encode_as(&sealed, image::ImageFormat::Png))
-                .unwrap()
-                .is_none()
-        );
-        let mut scene = image::RgbaImage::from_pixel(64, 64, image::Rgba([15, 25, 35, 255]));
-        for x in 0..64 {
-            scene.put_pixel(x, 0, image::Rgba([255, 255, 255, 255]));
-        }
-        assert!(
-            cut_white_corners(&encode_as(&scene, image::ImageFormat::Png))
-                .unwrap()
-                .is_none()
-        );
+        let out = image::load_from_memory(
+            &round_corners(&encode_as(&sealed, image::ImageFormat::Png)).unwrap(),
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(*out.get_pixel(32, 32), image::Rgba([255, 255, 255, 255]));
 
-        // 解码失败 → Err：generate 据此按原图原格式落盘，不拖垮成功生成。
-        assert!(cut_white_corners(b"not an image").is_err());
+        // ⑤ 解码失败 → Err：generate 据此按原图原格式落盘，不拖垮成功生成。
+        assert!(round_corners(b"not an image").is_err());
     }
 
     #[test]

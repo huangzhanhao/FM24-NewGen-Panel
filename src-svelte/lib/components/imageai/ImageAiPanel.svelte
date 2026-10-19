@@ -21,7 +21,6 @@
     loadImageState,
     selectModel,
     selectProvider,
-    setProviderKey,
   } from "../../stores/imageai.svelte";
 
   let providerOpen = $state(false);
@@ -48,10 +47,6 @@
     };
   });
 
-  // ---- API Key 直达输入：掩码显示、不回显真值，成功即清空 ----
-  let keyInput = $state("");
-  let keyEl = $state<HTMLInputElement | null>(null);
-
   // ---- 连接就绪度：Key 已设置 + 模型已选（顶栏 ③chip 的绿档还额外要求名单可读，口径更严）----
   // 无真正的连通性测试命令，这里以「Key 已设置」为代理判据，措辞不冒充「已连通」。
   // 本地 ComfyUI 无鉴权：免 Key（与后端 needs_key 口径一致），就绪度只看模型。
@@ -60,9 +55,9 @@
   const readyForKey = $derived(keySet && !!imageaiStore.model);
   const connStatus = $derived(readyForKey ? t.gen.statusReady : keySet ? t.gen.statusNoModel : t.gen.statusNoKey);
 
-  /** 状态灯的点击动作：聚焦 Key 输入框（配置条就在台顶，聚焦即直达）。 */
-  function focusKey() {
-    keyEl?.focus();
+  /** 状态灯的点击进入服务商设置里编辑Key。 */
+  function openProviderSettings() {
+    providerOpen = true;
   }
 
   const caps = $derived(imageaiStore.modelInfo?.capabilities);
@@ -88,24 +83,6 @@
   /** CTA 可用性：生成中 / 尺寸违规（store 单点，GenSettingsCard 同源）/ 提示词超长时禁用。 */
   const genDisabled = $derived(imageaiStore.generating || !!imageaiStore.sizeError || imageaiStore.promptOver);
 
-  // 切服务商时清空 Key 输入框（Key 跟随服务商，输入内容不跨服务商残留）；
-  // 尺寸重置与「自定义…」强制态退出由 GenSettingsCard 内部 effect 处理。
-  $effect(() => {
-    void imageaiStore.providerId;
-    keyInput = "";
-  });
-
-  async function commitKey() {
-    const key = keyInput.trim();
-    if (!key) return; // 空值 = 未输入，不动已设置的 Key
-    try {
-      await setProviderKey(imageaiStore.providerId, key);
-      keyInput = "";
-    } catch (e) {
-      await showError(e);
-    }
-  }
-
   onMount(() => {
     if (!imageaiStore.config) void loadImageState().catch(showError);
   });
@@ -116,14 +93,11 @@
     // 禁用态统一在入口拦截：快捷键（Ctrl+Enter）与数据源卡回调会绕过按钮 disabled，
     // 必须与主 CTA 同条件。带 meta 的「再生成」用原图尺寸，只在生成中拦截，不受当前 sizeError 影响。
     if (imageaiStore.generating || (!meta && genDisabled)) return;
-    // Key 框有未提交内容时先串行提交，避免 change 异步与生成竞态（提交失败中止生成）。
-    if (keyInput.trim()) await commitKey();
     genError = "";
     try {
       await generate(meta);
     } catch (e) {
-      // 生成失败写进结果区的内联错误条，供就地重试；后端错误已是结构化对象，须走统一格式化。
-      genError = formatError(e);
+      genError = formatError(e); // 生成失败写进结果区的内联错误条，供就地重试；后端错误已是结构化对象，须走统一格式化。
     }
   }
 
@@ -143,8 +117,7 @@
 
 <div class="panel">
   <!-- ① 服务配置条（全宽单行）：进台第一眼即见服务商 / 模型 / Key 就绪状态。
-       Key 只进后端会话内存（setProviderKey），不改持久化语义；
-       baseUrl 等完整表单留在服务商设置弹窗，能力摘要收进模型下拉的悬停提示。 -->
+       完整表单与能力摘要分别留在设置弹窗与模型下拉的悬停提示。 -->
   <section class="conn-bar">
     <label class="cb-field">
       <span class="cb-label">{t.gen.provider}</span>
@@ -178,37 +151,15 @@
         {/each}
       </select>
     </label>
-    <label class="cb-field cb-key">
-      <span class="cb-label">{t.gen.keyBarLabel}</span>
-      <div class="key-row">
-        <input
-          id="ig-key"
-          type="password"
-          autocomplete="off"
-          placeholder={imageaiStore.keysSet[imageaiStore.providerId]
-            ? t.gen.keyBarSetPlaceholder
-            : t.gen.keyBarPlaceholder}
-          bind:this={keyEl}
-          bind:value={keyInput}
-          onchange={commitKey}
-          onkeydown={(e) => {
-            if (e.key === "Enter") void commitKey();
-          }}
-        />
-        <button class="btn sm key-btn" title={t.gen.keySubmit} onclick={commitKey}>
-          <Icon name="check" class="ic" stroke={2.4} />
-        </button>
-      </div>
-    </label>
     <!-- Key 的唯一状态表达（判据 = keySet && model）。文字色与边框色随档位走：
          .warn 标「有未决项」（琥珀），缺 Key 时额外挂 ⚠ 图标；绿点绿边绿字 = 已就绪。
-         点它即聚焦上方输入框 -->
+         点它打开服务商设置（Key 的唯一编辑入口就在那里） -->
     <button
       class="cb-status"
       class:ok={readyForKey}
       class:warn={!readyForKey}
       title={readyForKey ? t.gen.statusReadyTitle : keySet ? connStatus : t.gen.keyMissingHint}
-      onclick={focusKey}
+      onclick={openProviderSettings}
     >
       {#if keySet}
         <span class="cb-dot" aria-hidden="true"></span>
@@ -339,14 +290,6 @@
     min-width: 96px;
     text-overflow: ellipsis;
   }
-  /* Key 字段吃余宽，输入框有地方打长 Key；下限 96px 保证压缩时仍看得出是一枚输入框 */
-  .cb-key {
-    flex: 1 1 220px;
-  }
-  .cb-key .key-row {
-    flex: 1;
-    min-width: 96px;
-  }
   /* 设置钮恒按内容定宽：被压窄的话钮内文字会折成两行，把「单行配置条」破坏得更彻底 */
   .conn-bar > .btn {
     flex: none;
@@ -404,31 +347,8 @@
     flex-shrink: 0;
   }
 
-  .key-row {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-  }
-  .key-row input {
-    flex: 1;
-    min-width: 0;
-    padding-right: 34px; /* 给输入框内嵌的提交钮（absolute right:3 + 24px）留位 */
-  }
-  .key-btn {
-    position: absolute;
-    right: 3px;
-    width: var(--control-h-xs);
-    min-height: var(--control-h-xs);
-    height: var(--control-h-xs);
-    padding: 0;
-  }
-
   /* ---------- 响应式：配置条折行回退（≤1024px，与下方栅格堆叠同断点） ----------
-     实测量到的边界：窗口 1024（可用列宽 756）时 Key 框恰好压到 96px 下限，再窄下去
-     各字段只能压破自己的最小内容宽 —— 下拉会盖住下一个标签，属于「看着像布局坏了」的错。
-     故与栅格同断点放回折行：宽窗单行常驻（默认 1280 窗口实测条高 50px、零溢出），
-     窄窗（本组件已切单列）宁可变两行，也不做横向溢出与控件互相重叠。 */
+     宽窗单行常驻；窄窗（本组件已切单列）宁可变两行，也不做横向溢出与控件互相重叠。 */
   @media (max-width: 1024px) {
     .conn-bar {
       flex-wrap: wrap;

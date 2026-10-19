@@ -21,9 +21,45 @@
           }
         }
       ]
+    },
+    {
+      "id": "sensenova",
+      "kind": "openai",
+      "name": "商汤 SenseNova",
+      "baseUrl": "https://token.sensenova.cn/v1",
+      "defaultModel": "sensenova-u1.5-lite",
+      "models": [
+        {
+          "model": "sensenova-u1.5-lite",
+          "capabilities": {
+            "sizes": ["2048x2048", "2720x1536", "1536x2720"],
+            "maxN": 1,
+            "supportsN": false,
+            "supportsSeed": false,
+            "supportsSteps": false,
+            "supportsNegativePrompt": false,
+            "supportsResponseFormat": false,
+            "supportsOutputFormat": true,
+            "supportsPromptExtend": true,
+            "promptExtendDefault": true,
+            "supportsWatermark": true,
+            "watermarkDefault": true,
+            "maxPromptChars": 0,
+            "sizeRules": {
+              "minSide": 512,
+              "maxSide": 4096,
+              "totalMin": 0,
+              "totalMax": 16777216,
+              "ratioMin": 0.3333,
+              "ratioMax": 3.0
+            },
+            "supportsAsync": false
+          }
+        }
+      ]
     }
   ],
-  "_comment": "dashscope（阿里云百炼）、volcano（火山方舟豆包 Seedream）、siliconflow（硅基流动）、modelscope（魔搭）四个服务商及模型目录均由 Rust 代码内置（image_ai_providers/ 下对应文件），不在本文件维护；运行时自动注入（缺失即整块补入，已存在只归位 kind）。",
+  "_comment": "dashscope（阿里云百炼）、volcano（火山方舟豆包 Seedream）、siliconflow（硅基流动）、modelscope（魔搭）、comfyui（本地）五个服务商及模型目录由 Rust 代码内置（image_ai_providers/ 下对应文件），不在本文件维护。本文件只保留 OpenAI 与商汤 SenseNova：两家都是 OpenAI 图像协议，零适配器代码，仅靠 baseUrl + 模型行接入。",
   "settings": {
     "defaultProviderId": "openai",
     "historyLimit": 20,

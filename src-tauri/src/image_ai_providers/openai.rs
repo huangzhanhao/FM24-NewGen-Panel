@@ -182,7 +182,7 @@ impl ImageProvider for OpenAiProvider {
             let json: serde_json::Value = resp
                 .json()
                 .await
-                .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
             // status 是分类的唯一稳定依据，故在拼串前按状态码分流（解析失败也一并归类）。
             let payloads = parse_images(&json).map_err(|e| {
                 from_http_status(status.as_u16(), format!("HTTP {status}：{}", e.message))

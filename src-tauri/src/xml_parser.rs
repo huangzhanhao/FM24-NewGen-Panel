@@ -155,12 +155,15 @@ pub fn write_xml(data: &[MappingEntry], img_dir: &Path, save_backup: bool) -> Re
 
 /// 只替换匹配 UID 的那一行（对等旧版 single_replacement_in_xml）。返回是否命中。
 /// 【何时用】「单人微调」功能：不改其他行，只把某个 UID 换成新图片。
+/// `insert_missing=true` 时，整表没有该 UID 就**追加一条新记录**（「保存并替换」用它把
+/// 生成图落进还没有映射的球员）；其余路径传 false，未命中即原样返回，不改文件。
 pub fn single_replacement(
     uid: &str,
     pack: &str,  // 新图片所在种族目录
     image: &str, // 新图片名
     img_dir: &Path,
     save_backup: bool,
+    insert_missing: bool,
 ) -> Result<bool, String> {
     let config_path = img_dir.join("config.xml");
     if !config_path.is_file() {
@@ -196,15 +199,36 @@ pub fn single_replacement(
         }
     }
     if !replaced {
-        // 文件在、但整表没有该 UID 的映射行（多为 UID 填错，或该球员本就不在本次映射里）。
-        // 不改文件、也不打备份：原来这条路径会照样重写整份文件，还白占一个 10 份轮转槽位，
-        // 同时命令层那条「单人换脸 X → Y」的 INFO 会误报成改成了。
-        log::warn!(
+        if !insert_missing {
+            // 文件在、但整表没有该 UID 的映射行（多为 UID 填错，或该球员本就不在本次映射里）。
+            // 不改文件、也不打备份：原来这条路径会照样重写整份文件，还白占一个 10 份轮转槽位，
+            // 同时命令层那条「单人换脸 X → Y」的 INFO 会误报成改成了。
+            log::warn!(
+                target: "xml",
+                "单人替换未命中：config.xml 中没有 UID {uid} 的映射行，文件未改动（{}）",
+                config_path.display()
+            );
+            return Ok(false);
+        }
+        // 追加一条：生成图要落进还没有映射的球员时走这里。
+        let Some(appended) = append_record_line(&text, &new_line) else {
+            log::warn!(
+                target: "xml",
+                "无法新增映射：config.xml 找不到 </list> / </records> 结束标签（{}）",
+                config_path.display()
+            );
+            return Ok(false);
+        };
+        if save_backup {
+            backup_rotation(&config_path, img_dir)?;
+        }
+        write_atomic(&config_path, appended).map_err(|e| e.to_string())?;
+        log::info!(
             target: "xml",
-            "单人替换未命中：config.xml 中没有 UID {uid} 的映射行，文件未改动（{}）",
+            "config.xml 中没有 UID {uid} 的映射行，已新增一条：{new_line}（{}）",
             config_path.display()
         );
-        return Ok(false);
+        return Ok(true);
     }
     if save_backup {
         backup_rotation(&config_path, img_dir)?;
@@ -212,6 +236,35 @@ pub fn single_replacement(
     write_atomic(&config_path, out).map_err(|e| e.to_string())?;
     Ok(true)
 }
+
+/// 在映射表末尾追加一行记录：插在 `</list>`（FM 正式格式的 `<record><list id="maps">`）
+/// 或 `</records>`（旧版/测试格式）所在行之前。
+/// 缩进沿用最后一条 `<record …/>`；换行沿用文件现有风格（CRLF 保持 CRLF，不整份改写）。
+/// 找不到结束标签时返回 None —— 调用方按未命中处理，绝不盲写。
+fn append_record_line(text: &str, new_line: &str) -> Option<String> {
+    let anchor = text
+        .rfind("</list>")
+        .or_else(|| text.rfind("</records>"))?;
+    let line_start = text[..anchor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let indent = text[..line_start]
+        .rsplit('\n')
+        .find_map(|line| {
+            let line = line.trim_end_matches('\r');
+            let body = line.trim_start();
+            (body.starts_with("<record ") && body.ends_with("/>"))
+                .then(|| line[..line.len() - body.len()].to_string())
+        })
+        .unwrap_or_else(|| "                ".to_string());
+    let mut out = String::with_capacity(text.len() + new_line.len() + indent.len() + 2);
+    out.push_str(&text[..line_start]);
+    out.push_str(&indent);
+    out.push_str(new_line);
+    out.push_str(nl);
+    out.push_str(&text[line_start..]);
+    Some(out)
+}
+
 
 /// 写前备份：`<前缀>_YYYYMMDD-HHMMSS.xml`，同一目录内仅保留最近 `BACKUP_KEEP` 份。
 /// 前缀用 ASCII 而非中文：FM 与各类脚本/同步盘处理非 ASCII 文件名更容易出岔子。
@@ -523,7 +576,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(single_replacement("r-1001", "MENA", "m9", &pack, false).unwrap());
+        assert!(single_replacement("r-1001", "MENA", "m9", &pack, false, false).unwrap());
         let parsed = parse_xml(&pack.join("config.xml")).unwrap();
         assert_eq!(parsed["r-1001"].ethnicity, "MENA");
         assert_eq!(parsed["r-1001"].image, "m9");
@@ -532,7 +585,7 @@ mod tests {
         let cfg = pack.join("config.xml");
         let before = std::fs::read(&cfg).unwrap();
         let entries_before = std::fs::read_dir(&pack).unwrap().count();
-        assert!(!single_replacement("r-9999", "MENA", "m9", &pack, true).unwrap());
+        assert!(!single_replacement("r-9999", "MENA", "m9", &pack, true, false).unwrap());
         assert_eq!(
             std::fs::read(&cfg).unwrap(),
             before,
@@ -543,6 +596,34 @@ mod tests {
             entries_before,
             "未命中却打出了一份备份"
         );
+    }
+
+
+    #[test]
+    fn single_replacement_inserts_missing_uid_only_when_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path();
+        let cfg = pack.join("config.xml");
+        std::fs::write(
+            &cfg,
+            "<record>\r\n    <list id=\"maps\">\r\n        <record from=\"Asian/a1\" to=\"graphics/pictures/person/1001/portrait\"/>\r\n    </list>\r\n</record>",
+        )
+        .unwrap();
+        // 不允许新增：一个字节都不动。
+        let before = std::fs::read(&cfg).unwrap();
+        assert!(!single_replacement("2002", "SpanMed", "b2", pack, false, false).unwrap());
+        assert_eq!(std::fs::read(&cfg).unwrap(), before);
+        // 允许新增：插到 </list> 前，缩进沿用现有记录，CRLF 保持。
+        assert!(single_replacement("2002", "SpanMed", "b2", pack, false, true).unwrap());
+        let got = std::fs::read_to_string(&cfg).unwrap();
+        assert!(
+            got.contains("        <record from=\"SpanMed/b2\" to=\"graphics/pictures/person/2002/portrait\"/>"),
+            "新增行缩进或内容不对: {got}"
+        );
+        assert_eq!(got.matches("\r\n").count(), 5, "CRLF 被改动: {got}");
+        let parsed = parse_xml(&cfg).unwrap();
+        assert_eq!(parsed["2002"].image, "b2");
+        assert_eq!(parsed["1001"].image, "a1");
     }
 
     #[test]
@@ -560,7 +641,7 @@ mod tests {
              </records>",
         )
         .unwrap();
-        assert!(single_replacement("2000472008", "SpanMed", "b1", pack, false).unwrap());
+        assert!(single_replacement("2000472008", "SpanMed", "b1", pack, false, false).unwrap());
         let got = std::fs::read_to_string(&cfg).unwrap();
         assert_eq!(got.matches("\r\n").count(), 3, "CRLF 行尾被动过:\n{got}");
         assert!(
@@ -712,7 +793,7 @@ mod tests {
         assert_eq!(parsed["r-1001"].ethnicity, "");
         assert_eq!(parsed["r-1001"].image, "img1");
         // 单人替换 pack="" → from="image"（平铺形态）
-        assert!(single_replacement("r-1001", "", "img2", &pack, false).unwrap());
+        assert!(single_replacement("r-1001", "", "img2", &pack, false, false).unwrap());
         let parsed2 = parse_xml(&pack.join("config.xml")).unwrap();
         assert_eq!(
             (

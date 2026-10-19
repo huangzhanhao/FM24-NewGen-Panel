@@ -20,8 +20,7 @@
 
 use super::{validate_model_caps, GenStage, ImageProvider, ProviderOutcome};
 use crate::image_ai::{
-    from_http_status, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig,
-    ProviderKind,
+    from_http_status, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig, ProviderKind,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -36,18 +35,14 @@ const DEFAULT_BASE: &str = "https://api.siliconflow.cn/v1";
 const DEFAULT_MODEL: &str = "Qwen/Qwen-Image";
 
 /// Qwen-Image 官方推荐分辨率。
-const QWEN_IMAGE_SIZES: &[&str] = &[
-    "1328x1328",
-    "1664x928",
-    "928x1664",
-    "1472x1140",
-    "1140x1472",
-    "1584x1056",
-    "1056x1584",
-];
+const QWEN_IMAGE_SIZES: &[&str] =
+    &["1328x1328", "1664x928", "928x1664", "1472x1140", "1140x1472", "1584x1056", "1056x1584"];
 
 /// Kwai-Kolors/Kolors 官方推荐分辨率。
 const KOLORS_SIZES: &[&str] = &["1024x1024", "960x1280", "768x1024", "720x1440", "720x1280"];
+
+/// Tongyi-MAI/Z-Image(-Turbo) 常用 1K 档。官方未给固定枚举，自定义尺寸交服务端校验。
+const ZIMAGE_SIZES: &[&str] = &["1024x1024", "768x1344", "1344x768"];
 
 // ===================== 内置模型目录 =====================
 
@@ -70,7 +65,17 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 // Kolors：batch_size 1–4、guidance_scale 0–20（默认 7.5）。
                 capabilities: siliconflow_caps(KOLORS_SIZES, 4, true, true),
             },
+            // Z-Image 系列：单张（无 batch_size）、不支持 guidance_scale，其余同基线。
+            ModelInfo {
+                model: "Tongyi-MAI/Z-Image-Turbo".into(),
+                capabilities: siliconflow_caps(ZIMAGE_SIZES, 1, false, false),
+            },
+            ModelInfo {
+                model: "Tongyi-MAI/Z-Image".into(),
+                capabilities: siliconflow_caps(ZIMAGE_SIZES, 1, false, false),
+            },
         ],
+        api_key: None,
     }
 }
 
@@ -80,12 +85,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
 /// - `supports_steps`：全模型支持 `num_inference_steps`（1–100，默认 20）；
 /// - `supports_guidance`：仅 Kolors 支持 `guidance_scale`（0–20，默认 7.5）；
 /// - `supports_output_format`：全模型可设 png/jpeg（适配器默认 png，值随用户选择）。
-fn siliconflow_caps(
-    sizes: &[&str],
-    max_n: u32,
-    supports_n: bool,
-    supports_guidance: bool,
-) -> Capabilities {
+fn siliconflow_caps(sizes: &[&str], max_n: u32, supports_n: bool, supports_guidance: bool) -> Capabilities {
     Capabilities {
         sizes: sizes.iter().map(|s| (*s).to_string()).collect(),
         max_n,
@@ -170,14 +170,8 @@ pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<String>, Imag
         return Ok(out);
     }
     // 错误形如 `{ "code": 20012, "message": "...", "data": "..." }`。
-    let msg = resp
-        .get("message")
-        .and_then(|m| m.as_str())
-        .unwrap_or("未知错误");
-    Err(ImageGenError::provider(
-        format!("服务商返回错误：{msg}"),
-        false,
-    ))
+    let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+    Err(ImageGenError::provider(format!("服务商返回错误：{msg}"), false))
 }
 
 pub struct SiliconflowProvider;
@@ -211,19 +205,15 @@ impl ImageProvider for SiliconflowProvider {
             let json: serde_json::Value = resp
                 .json()
                 .await
-                .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
             let urls = parse_images(&json).map_err(|e| {
-                from_http_status(status.as_u16(), format!("HTTP {status}：{}", e.message))
-                    .with_retry_after(retry_after)
+                from_http_status(status.as_u16(), format!("HTTP {status}：{}", e.message)).with_retry_after(retry_after)
             })?;
 
             progress(GenStage::Downloading);
             let mut images = Vec::with_capacity(urls.len());
             for u in urls {
-                images.push(
-                    super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u))
-                        .await?,
-                );
+                images.push(super::openai::fetch_payload(client, super::openai::ImagePayload::Url(u)).await?);
             }
             Ok(ProviderOutcome { images })
         })
@@ -232,9 +222,7 @@ impl ImageProvider for SiliconflowProvider {
     /// 端点由 base_url 拼出，空基址是本协议特有的门控；其余约束走共用解释。
     fn validate(&self, req: &GenRequest, caps: &Capabilities) -> Result<(), ImageGenError> {
         if req.base_url.trim().is_empty() {
-            return Err(ImageGenError::not_configured(
-                "请先在「服务商设置」中填写接口地址 Base URL",
-            ));
+            return Err(ImageGenError::not_configured("请先在「服务商设置」中填写接口地址 Base URL"));
         }
         validate_model_caps(req, caps)
     }
@@ -260,13 +248,7 @@ mod tests {
     }
 
     fn caps_of(model: &str) -> Capabilities {
-        builtin_provider()
-            .models
-            .iter()
-            .find(|m| m.model == model)
-            .unwrap()
-            .capabilities
-            .clone()
+        builtin_provider().models.iter().find(|m| m.model == model).unwrap().capabilities.clone()
     }
 
     fn strs(v: &[&str]) -> Vec<String> {
@@ -276,14 +258,17 @@ mod tests {
     // ===================== 内置目录 =====================
 
     #[test]
-    fn catalog_lists_two_models() {
+    fn catalog_lists_builtin_models() {
         let p = builtin_provider();
         assert_eq!(p.id, PROVIDER_ID);
         assert_eq!(p.kind, ProviderKind::Siliconflow);
         assert_eq!(p.base_url, DEFAULT_BASE);
         assert_eq!(p.default_model, "Qwen/Qwen-Image");
         let ids: Vec<&str> = p.models.iter().map(|m| m.model.as_str()).collect();
-        assert_eq!(ids, vec!["Qwen/Qwen-Image", "Kwai-Kolors/Kolors"]);
+        assert_eq!(
+            ids,
+            vec!["Qwen/Qwen-Image", "Kwai-Kolors/Kolors", "Tongyi-MAI/Z-Image-Turbo", "Tongyi-MAI/Z-Image"]
+        );
         assert!(ids.contains(&p.default_model.as_str()));
     }
 
@@ -362,8 +347,7 @@ mod tests {
 
     #[test]
     fn parse_images_reads_images_list() {
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"images":[{"url":"https://x/a.png"}],"seed":1}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(r#"{"images":[{"url":"https://x/a.png"}],"seed":1}"#).unwrap();
         assert_eq!(parse_images(&v).unwrap(), vec!["https://x/a.png"]);
     }
 

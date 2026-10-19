@@ -1,10 +1,10 @@
 <!-- ProviderDialog · 服务商设置弹窗：列表/新建/编辑/删除。
-     只管「落盘的配置结构」（id/kind/name/baseUrl/defaultModel/models）；
-     API Key 是会话级内存量（不落盘），由主界面配置条统一输入。复用全局 modal 类 -->
+     服务商配置与它自己的 API Key 都在这里编辑（一家一把，密文随该行落盘）；
+     工作台只展示 Key 状态，不再提供输入口。复用全局 modal 类 -->
 <script lang="ts">
   import { confirm, message } from "@tauri-apps/plugin-dialog";
   import { t } from "../../text";
-  import { deleteProvider, imageaiStore, saveProvider } from "../../stores/imageai.svelte";
+  import { deleteProvider, imageaiStore, saveProvider, setProviderKey } from "../../stores/imageai.svelte";
   import { showError } from "../../ui/dialog";
   import Icon from "../../ui/Icon.svelte";
   import type { Capabilities, ModelInfo, ProviderConfig, ProviderKindCode, SizeRules } from "../../types";
@@ -16,6 +16,22 @@
   let editing = $state<ProviderConfig | null>(null);
   /** 展开编辑能力的模型下标（-1 = 全收起）；一次只展开一个，清单可能有十几个模型 */
   let expandedIdx = $state(-1);
+  /** Key 输入（不回显已存值）：非空＝保存时写入/替换；清空只走「清除」按钮。 */
+  let keyInput = $state("");
+  /** 当前编辑行是否已有 Key：新建行（id 尚未生成）恒为 false。 */
+  const keySet = $derived(!!editing?.id && !!imageaiStore.keysSet[editing.id]);
+
+  function startEdit(p: ProviderConfig) {
+    keyInput = "";
+    expandedIdx = -1;
+    editing = $state.snapshot(p);
+  }
+
+  function startNew() {
+    keyInput = "";
+    expandedIdx = -1;
+    editing = blank();
+  }
 
   function blank(): ProviderConfig {
     return {
@@ -335,12 +351,32 @@
       editing.models = editing.models.filter((m) => m.model.trim());
       if (!editing.id) editing.id = `p-${crypto.randomUUID()}`;
       if (!editing.defaultModel && editing.models[0]) editing.defaultModel = editing.models[0].model;
-      // 只落盘配置：Key 由主界面配置条写入会话内存，本弹窗不碰
+      // 配置先落盘（新建行此刻才拿到 id），再写 Key —— set_provider_key 按 id 找行，顺序不能反。
       await saveProvider($state.snapshot(editing)); // config 整包写回 + 悬空回退见 store action
+      const key = keyInput.trim();
+      if (key && editing.kind !== "localcomfyui") await setProviderKey(editing.id, key);
+      keyInput = "";
       await message(t.gen.providerSaved, { title: t.dialog.info });
       editing = null;
     } catch (e) {
       await showError(e); // 保存失败必须弹窗，不能静默
+    }
+  }
+
+  /** 清除某服务商的 Key：后端把该行密文置空，前端同步「未设置」；不可撤销，先确认。 */
+  async function clearKey() {
+    if (!editing?.id) return;
+    if (
+      !(await confirm(t.gen.keyClearConfirm(editing.name || editing.id), {
+        title: t.dialog.warning,
+      }))
+    )
+      return;
+    try {
+      await setProviderKey(editing.id, "");
+      keyInput = "";
+    } catch (e) {
+      await showError(e);
     }
   }
 
@@ -383,7 +419,7 @@
               <div class="p-row">
                 <span>{p.name} <em>{p.kind}</em></span>
                 <span class="btns">
-                  <button class="btn sm" onclick={() => (editing = $state.snapshot(p))}>{t.gen.edit}</button>
+                  <button class="btn sm" onclick={() => startEdit(p)}>{t.gen.edit}</button>
                   <!-- 判据用 id 不用 kind：能否删讲「是不是内置」，与 kind 讲的「用什么协议」是两个维度。
                        必须与后端 remove_provider 同源（后端按 id 判），否则改 kind 会让按钮凭空消失 -->
                   {#if p.id !== "openai"}
@@ -441,6 +477,26 @@
                 title={editing.kind === "dashscope" ? t.gen.baseUrlHintDashscope : ""}
               />
             </div>
+            <!-- Key 跟着服务商走：一家一把，明文不回显。本地 ComfyUI 免鉴权，不显示这一行 -->
+            {#if editing.kind !== "localcomfyui"}
+              <div class="f-row">
+                <label for="pv-key">{t.gen.keyBarLabel}</label>
+                <input
+                  id="pv-key"
+                  type="password"
+                  autocomplete="off"
+                  bind:value={keyInput}
+                  placeholder={keySet ? t.gen.keyBarSetPlaceholder : t.gen.keyBarPlaceholder}
+                />
+                {#if keySet}
+                  <button class="btn sm" onclick={clearKey}>{t.gen.keyClear}</button>
+                {:else}
+                  <span class="f-hint">{t.gen.keyStatusUnset}</span>
+                {/if}
+              </div>
+              <!-- Key 的存储口径：密文落盘、绑定当前系统账户，换机/重装需重填。 -->
+              <p class="key-note">{t.gen.keyStorageHint}</p>
+            {/if}
             <!-- 默认模型：有清单时从清单里选（避免填出清单外不存在的模型名）；
                  清单为空才退化为自由输入 —— 那是「只填一个模型名、能力走后端兜底」的轻量路径 -->
             <div class="f-row">
@@ -616,7 +672,7 @@
           <button class="btn" onclick={() => (editing = null)}>{t.gen.back}</button>
           <button class="btn primary" onclick={onSave}>{t.gen.save}</button>
         {:else}
-          <button class="btn" onclick={() => (editing = blank())}>{t.gen.addProvider}</button>
+          <button class="btn" onclick={() => startNew()}>{t.gen.addProvider}</button>
           <button class="btn primary" onclick={() => (open = false)}>{t.gen.done}</button>
         {/if}
       </div>
@@ -709,6 +765,11 @@
   }
   .f-row-top .f-label {
     padding-top: 6px;
+  }
+  .key-note {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--text-3);
   }
   /* 模型清单 */
   .m-list {

@@ -435,10 +435,16 @@ pub async fn run_queue(
                             e.attempts = attempts;
                         }
                     }
-                    match task_executor
+                    let executed = task_executor
                         .execute(&task_data_dir, &task_cfg, key, &req, &progress_cb)
                         .await
-                    {
+                        // 厂商 401 常把被拒的 Key 抄进 message，而这条文案会进日志（用户贴日志
+                        // 求助时等于公开）：在留痕/展示之前统一抹掉，单点覆盖全部适配器。
+                        .map_err(|mut err| {
+                            err.scrub(key);
+                            err
+                        });
+                    match executed {
                         // 还可重试且服务端判定可重试：退避后重来。attempt-1 是「已重试次数」，
                         // 首次失败为 0 → backoff_delay 给出 2s（见其文档）。
                         Err(err) if err.retryable && attempts < MAX_ATTEMPTS => {

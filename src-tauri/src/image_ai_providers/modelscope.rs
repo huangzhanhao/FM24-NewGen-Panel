@@ -16,7 +16,9 @@
 //! 请求体：恒发 `model` / `prompt` / `size`（`宽x高`）；门控追加 `negative_prompt` / `seed` /
 //! `steps`(1–100) / `guidance`。**无 `n`**（单张）。
 //!
-//! 【内置目录】`Qwen/Qwen-Image-2.1`（默认）、`Qwen/Qwen-Image`、`MAILAND/majicflus_v1`。
+//! 【内置目录】`Qwen/Qwen-Image-2.1`（默认）、`Qwen-Image-2.1-Turbo`、`Qwen/Qwen-Image`、
+//! `Tongyi-MAI/Z-Image`、`Z-Image-Turbo`、`sayian/Z-Image-Turbo-fp32`（LoRA）、
+//! `krea/Krea-2-Turbo`、`orangeHong/allin-baitai1-krea2-turbo`（LoRA）、`MAILAND/majicflus_v1`。
 //! 用户配置里已存在该服务商时，模型行归用户所有、代码不接管
 //! （见 [`crate::image_ai::reconcile_builtin_providers`]）。
 
@@ -47,7 +49,9 @@ const TASK_TYPE_HEADER: &str = "X-ModelScope-Task-Type";
 const TASK_TYPE_VALUE: &str = "image_generation";
 
 /// 轮询总预算（超时归 `Provider(true)` 供用户重试）。
-const POLL_TOTAL_BUDGET: Duration = Duration::from_secs(120);
+/// 魔搭是排队制：实测 `Qwen/Qwen-Image` 单张 1024² 要 **228s**（`Qwen-Image-2.1` 快得多），
+/// 120s 会在正常排队时误杀。300s 覆盖实测值并留约 30% 余量，仍在 HTTP 客户端 600s 之内。
+const POLL_TOTAL_BUDGET: Duration = Duration::from_secs(300);
 
 /// Qwen-Image 系列推荐分辨率（公开 API 单边上限 2048）。
 const QWEN_IMAGE_SIZES: &[&str] = &[
@@ -60,6 +64,12 @@ const QWEN_IMAGE_SIZES: &[&str] = &[
 
 /// MAILAND/majicflus_v1 常用分辨率。
 const MAJICFLUS_SIZES: &[&str] = &["1024x1024", "768x1024", "1024x768"];
+
+/// Z-Image 系列（Turbo 与其 LoRA 变体同管线）推荐分辨率。
+const ZIMAGE_SIZES: &[&str] = &["1024x1024", "768x1344", "1344x768"];
+
+/// Krea 2 Turbo（FLUX 系，含其 LoRA 变体）常用分辨率。
+const KREA_SIZES: &[&str] = &["1024x1024", "1344x768", "768x1344"];
 
 // ===================== 内置模型目录 =====================
 
@@ -77,14 +87,40 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 capabilities: modelscope_caps(QWEN_IMAGE_SIZES),
             },
             ModelInfo {
+                model: "Qwen/Qwen-Image-2.1-Turbo".into(),
+                capabilities: modelscope_caps(QWEN_IMAGE_SIZES),
+            },
+            ModelInfo {
                 model: "Qwen/Qwen-Image".into(),
                 capabilities: modelscope_caps(QWEN_IMAGE_SIZES),
+            },
+            ModelInfo {
+                model: "Tongyi-MAI/Z-Image".into(),
+                capabilities: modelscope_caps(ZIMAGE_SIZES),
+            },
+            ModelInfo {
+                model: "Tongyi-MAI/Z-Image-Turbo".into(),
+                capabilities: modelscope_caps(ZIMAGE_SIZES),
+            },
+            // LoRA 变体：与基底同管线同参数，只换权重。
+            ModelInfo {
+                model: "sayian/Z-Image-Turbo-fp32".into(),
+                capabilities: modelscope_caps(ZIMAGE_SIZES),
+            },
+            ModelInfo {
+                model: "krea/Krea-2-Turbo".into(),
+                capabilities: modelscope_caps(KREA_SIZES),
+            },
+            ModelInfo {
+                model: "orangeHong/allin-baitai1-krea2-turbo".into(),
+                capabilities: modelscope_caps(KREA_SIZES),
             },
             ModelInfo {
                 model: "MAILAND/majicflus_v1".into(),
                 capabilities: modelscope_caps(MAJICFLUS_SIZES),
             },
         ],
+        api_key: None,
     }
 }
 
@@ -176,8 +212,9 @@ pub(crate) enum TaskState {
 }
 
 /// 解析任务端点响应：`SUCCEED` 取 `output_images`；`FAILED` 归服务商错误；
-/// 官方进行态（PENDING/RUNNING）继续轮询；**未知状态一律失败**（与 dashscope 的显式
-/// 枚举同口径：畸形响应/新增终态白等 120s 毫无收益，预算只兜「任务真在跑」的情形）。
+/// 官方进行态继续轮询；**未知状态一律失败**（与 dashscope 的显式枚举同口径：畸形响应/
+/// 新增终态白等预算毫无收益，预算只兜「任务真在跑」的情形）。
+/// `PROCESSING` 是部分模型（实测 `MAILAND/majicflus_v1`）实际返回的进行态，与 RUNNING 同义。
 pub(crate) fn parse_task(resp: &Value) -> TaskState {
     match resp
         .get("task_status")
@@ -210,7 +247,7 @@ pub(crate) fn parse_task(resp: &Value) -> TaskState {
                 .unwrap_or("魔搭生图任务失败");
             TaskState::Failed(classify_provider_error(200, code, msg.to_string()))
         }
-        "PENDING" | "RUNNING" => TaskState::Pending,
+        "PENDING" | "RUNNING" | "PROCESSING" => TaskState::Pending,
         _ => TaskState::Failed(ImageGenError::provider(
             "任务状态未知（响应畸形或任务已过期）",
             false,
@@ -219,14 +256,20 @@ pub(crate) fn parse_task(resp: &Value) -> TaskState {
 }
 
 /// 提取 `code: message` 形态的厂商错误细节；字段缺失用 fallback 兜底。
+/// 【为什么三种形态都要认】魔搭自己返回 `{"errors":{"message":…}}`（账号未验证、额度用尽都走它），
+/// 前置网关与兼容层则可能是 OpenAI 的 `{"error":{"message":…}}` 或平铺的 `{"code","message"}`。
+/// 只认平铺会把可执行的提示（去验证邮箱）压成一句「生图失败」，用户无从下手。
 fn error_detail(json: &Value) -> String {
     let code = json
         .get("code")
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "Error".into());
+        .and_then(|c| c.as_str())
+        .or_else(|| json.pointer("/errors/code").and_then(|c| c.as_str()))
+        .unwrap_or("Error");
     let msg = json
         .get("message")
         .and_then(|m| m.as_str())
+        .or_else(|| json.pointer("/errors/message").and_then(|m| m.as_str()))
+        .or_else(|| json.pointer("/error/message").and_then(|m| m.as_str()))
         .filter(|m| !m.is_empty())
         .unwrap_or("生图失败");
     format!("{code}: {msg}")
@@ -277,7 +320,7 @@ impl ImageProvider for ModelscopeProvider {
             let json: Value = created
                 .json()
                 .await
-                .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
             let task_id = if status.is_success() {
                 parse_submit(&json)?
             } else {
@@ -305,7 +348,10 @@ impl ImageProvider for ModelscopeProvider {
                 }
                 attempt += 1;
                 if started.elapsed() >= POLL_TOTAL_BUDGET {
-                    return Err(ImageGenError::provider("魔搭生图超时（120s）", true));
+                    return Err(ImageGenError::provider(
+                        format!("魔搭生图超时（{}s）", POLL_TOTAL_BUDGET.as_secs()),
+                        true,
+                    ));
                 }
 
                 let resp = client
@@ -324,7 +370,7 @@ impl ImageProvider for ModelscopeProvider {
                 let json: Value = resp
                     .json()
                     .await
-                    .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                    .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
                 if !status.is_success() {
                     let code = json.get("code").and_then(|c| c.as_str());
                     return Err(classify_provider_error(
@@ -389,21 +435,27 @@ mod tests {
     // ===================== 内置目录 =====================
 
     #[test]
-    fn catalog_lists_three_models() {
+    fn catalog_contains_builtin_models() {
         let p = builtin_provider();
         assert_eq!(p.id, PROVIDER_ID);
         assert_eq!(p.kind, ProviderKind::Modelscope);
         assert_eq!(p.base_url, DEFAULT_BASE);
         assert_eq!(p.default_model, "Qwen/Qwen-Image-2.1");
         let ids: Vec<&str> = p.models.iter().map(|m| m.model.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "Qwen/Qwen-Image-2.1",
-                "Qwen/Qwen-Image",
-                "MAILAND/majicflus_v1"
-            ]
-        );
+        // 目录会随后续上架的模型增长：只锁定当前必须有的，不做全等断言。
+        for id in [
+            "Qwen/Qwen-Image-2.1",
+            "Qwen/Qwen-Image-2.1-Turbo",
+            "Qwen/Qwen-Image",
+            "Tongyi-MAI/Z-Image",
+            "Tongyi-MAI/Z-Image-Turbo",
+            "sayian/Z-Image-Turbo-fp32",
+            "krea/Krea-2-Turbo",
+            "orangeHong/allin-baitai1-krea2-turbo",
+            "MAILAND/majicflus_v1",
+        ] {
+            assert!(ids.contains(&id), "{id} 应在内置目录里");
+        }
         assert!(ids.contains(&p.default_model.as_str()));
     }
 
@@ -448,6 +500,29 @@ mod tests {
     // ===================== 响应解析 =====================
 
     #[test]
+    fn error_detail_reads_nested_shapes_and_keeps_code_verbatim() {
+        // 魔搭账号类错误（未验证邮箱、额度用尽）走 errors.message
+        let v: Value = serde_json::from_str(
+            r#"{"errors":{"message":"complete your profile via email verification"},"request_id":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            error_detail(&v),
+            "Error: complete your profile via email verification"
+        );
+        // OpenAI 兼容前置层
+        let v: Value = serde_json::from_str(r#"{"error":{"message":"invalid api key"}}"#).unwrap();
+        assert_eq!(error_detail(&v), "Error: invalid api key");
+        // 平铺形态：code 原样取串，不带 JSON 引号
+        let v: Value =
+            serde_json::from_str(r#"{"code":"InvalidParameter","message":"size 不合法"}"#).unwrap();
+        assert_eq!(error_detail(&v), "InvalidParameter: size 不合法");
+        // 三种形态都没有 → 兜底
+        let v: Value = serde_json::from_str(r#"{"foo":1}"#).unwrap();
+        assert_eq!(error_detail(&v), "Error: 生图失败");
+    }
+
+    #[test]
     fn parse_submit_reads_task_id() {
         let v: Value = serde_json::from_str(r#"{"task_id":"t-1"}"#).unwrap();
         assert_eq!(parse_submit(&v).unwrap(), "t-1");
@@ -476,13 +551,16 @@ mod tests {
         let v: Value =
             serde_json::from_str(r#"{"task_status":"FAILED","message":"boom"}"#).unwrap();
         assert!(matches!(parse_task(&v), TaskState::Failed(_)));
-        let v: Value = serde_json::from_str(r#"{"task_status":"RUNNING"}"#).unwrap();
-        assert!(matches!(parse_task(&v), TaskState::Pending));
+        // 进行态：PENDING / RUNNING 之外，部分模型（majicflus）返回 PROCESSING。
+        for s in ["PENDING", "RUNNING", "PROCESSING"] {
+            let v: Value = serde_json::from_str(&format!(r#"{{"task_status":"{s}"}}"#)).unwrap();
+            assert!(matches!(parse_task(&v), TaskState::Pending), "{s}");
+        }
     }
 
     #[test]
     fn parse_task_unknown_and_missing_status_are_failure() {
-        // 只有官方进行态（PENDING/RUNNING）才继续轮询；畸形响应/未知终态径直失败。
+        // 只有官方进行态（PENDING/RUNNING/PROCESSING）才继续轮询；畸形响应/未知终态径直失败。
         for s in [
             r#"{"task_status":"UNKNOWN"}"#,
             r#"{"task_status":""}"#,

@@ -7,22 +7,30 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, GalleryItem, GenImage, GenRequest, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
+  AppSnapshot, GalleryItem, GenImage, GenRequest, SaveReplaceResult, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
   PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
 export const api = {
+  // 取应用全量状态快照（当前档/头像包组/RTF 等），前端各视图的首屏数据源。
   getAppState: () => invoke<AppSnapshot>('get_app_state'),
+  // 新建存档，返回刷新后的状态快照。
   createProfile: (name: string) => invoke<AppSnapshot>('create_profile', { name }),
+  // 删除指定存档，返回删除后的状态快照。
   deleteProfile: (name: string) => invoke<AppSnapshot>('delete_profile', { name }),
+  // 切换后端当前档（决定后续替换写回哪个存档），返回切换后的状态快照。
   switchProfile: (name: string) => invoke<AppSnapshot>('switch_profile', { name }),
+  // 选定头像包目录，返回更新后的状态快照。
   selectImageDirectory: (path: string) => invoke<AppSnapshot>('select_image_directory', { path }),
+  // 设定当前 RTF 名单文件（名单预览与替换的取数来源），返回状态快照。
   setCurrentRtf: (path: string) => invoke<AppSnapshot>('set_current_rtf', { path }),
   // 参数写 imgDir（驼峰），对应 Rust 端 img_dir（蛇形），Tauri 自动映射。
   setCurrentGroup: (imgDir: string) => invoke<AppSnapshot>('set_current_group', { imgDir }),
+  // 移除指定头像包组记录，返回删除后的状态快照。
   deleteGroup: (imgDir: string) => invoke<AppSnapshot>('delete_group', { imgDir }),
+  // 校验头像包目录结构，返回识别结果或错误说明列表，供前端提前提示用户。
   validateImageDirs: (imgDir: string) => invoke<string[]>('validate_image_dirs', { imgDir }),
   // 检查完整性：识别三套头像包标准并给出可补全的缺失目录（「检查完整性」按钮用）。
   checkIntegrity: (imgDir: string) => invoke<IntegrityResult>('check_integrity', { imgDir }),
@@ -39,68 +47,76 @@ export const api = {
   // 读取快照：解析当前展示档的存档 XML 快照并缓存（「读取快照」按钮 → 快照预览的数据源）。
   readSnapshot: (xmlPath: string) => invoke<SnapshotInfo>('read_snapshot', { xmlPath }),
   // 快照预览分页查询：UID 筛选 + 只对当前页解析图片路径（imgDir 为当前展示组的头像包目录）。
-  querySnapshot: (xmlPath: string) =>
-    invoke<SnapshotEntry[]>('query_snapshot', { xmlPath }),
-  // 读取/保存标准规则文件（name ∈ standard2|standard3；保存时后端先按该标准 schema 校验）。
+  querySnapshot: (xmlPath: string) => invoke<SnapshotEntry[]>('query_snapshot', { xmlPath }),
+  // 读取标准规则文件（name ∈ standard2|standard3）。
   readRuleFile: (name: 'standard2' | 'standard3') => invoke<string>('read_rule_file', { name }),
-  saveRuleFile: (name: 'standard2' | 'standard3', content: string) =>
-    invoke<void>('save_rule_file', { name, content }),
-  createMissingDirs: (imgDir: string, names: string[]) =>
-    invoke<void>('create_missing_dirs', { imgDir, names }), // void 表示不关心返回值
+  // 保存标准规则文件（保存时后端先按该标准 schema 校验）。
+  saveRuleFile: (name: 'standard2' | 'standard3', content: string) => invoke<void>('save_rule_file', { name, content }),
+  // 按给定的缺失目录名在头像包内批量补齐目录结构。
+  createMissingDirs: (imgDir: string, names: string[]) => invoke<void>('create_missing_dirs', { imgDir, names }),
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。
   // 发起前先问一次预检：只有后端判定 needsConfirm（「生成」+ 本档档景非空）时才弹确认，
   // 确认过的这一轮把 allowBlank 带上，流水线的写前拦截才会放行。
   preflightReplace: (mode: ReplaceArgs['mode']) => invoke<PreflightResult>('preflight_replace', { mode }),
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
+  // 请求取消正在进行的替换流水线。
   cancelReplace: () => invoke<void>('cancel_replace'),
+  // 取当前名单的全部球员记录（名单表格数据源）。
   queryPlayers: () => invoke<PlayerRecord[]>('query_players'),
   // queryPlayersByUids：按 uid 批量取球员记录（队列坞条目行身份信息：年龄/所在地帮认人）；
   // 只读后端 rtf_cache（与 query_players 同源），未命中的 uid 不在返回之列。
   queryPlayersByUids: (uids: string[]) => invoke<PlayerRecord[]>('query_players_by_uids', { uids }),
+  // 取单个球员的预览信息（球员详情查看用）。
   previewPlayer: (uid: string) => invoke<PlayerPreview>('preview_player', { uid }),
   // querySnapshotImages：快照预览当前页批量解析头像实际路径（与 relPaths 顺序一一对应；null = 找不到）。
-  querySnapshotImages: (imgDir: string, relPaths: string[]) =>
-    invoke<(string | null)[]>('query_snapshot_images', { imgDir, relPaths }),
+  querySnapshotImages: (imgDir: string, relPaths: string[]) => invoke<(string | null)[]>('query_snapshot_images', { imgDir, relPaths }),
   // queryAvatars：名单预览头像列按 UID 批量取头像绝对路径（一次拉一页；null = 无映射或图片不在包内）。
-  queryAvatars: (uids: string[]) =>
-    invoke<Record<string, string | null>>('query_avatars', { uids }),
-  replaceSingleFace: (uid: string, imagePath: string, saveBackup: boolean) =>
-    invoke<boolean>('replace_single_face', { uid, imagePath, saveBackup }),
+  queryAvatars: (uids: string[]) => invoke<Record<string, string | null>>('query_avatars', { uids }),
+  // 单人替换：把指定球员头像替换为给定图片，返回是否成功（saveBackup 控制是否留备份）。
+  replaceSingleFace: (uid: string, imagePath: string, saveBackup: boolean) => invoke<boolean>('replace_single_face', { uid, imagePath, saveBackup }),
   // resetSingleFace：单人重掷——按标准规则给该球员重新抽图（固定重抽语义，后端单点注释）。
-  resetSingleFace: (uid: string, saveBackup: boolean) =>
-    invoke<boolean>('reset_single_face', { uid, saveBackup }),
+  resetSingleFace: (uid: string, saveBackup: boolean) => invoke<boolean>('reset_single_face', { uid, saveBackup }),
   // readImage 返回 ArrayBuffer（二进制图片字节），前端再转成 blob URL 显示。
   readImage: (path: string) => invoke<ArrayBuffer>('read_image', { path }),
   // resolveAvatar：把名单「头像」列原文解析成当前头像包内的图片绝对路径（找不到为 null）。
   resolveAvatar: (avatar: string) => invoke<string | null>('resolve_avatar', { avatar }),
-  queryLogs: (level: string, only: boolean, offset: number, limit: number) =>
-    invoke<PageResult<LogLine>>('query_logs', { level, only, offset, limit }),
+  // 分页查询后端日志（按 level 过滤 + only 只看该级别，offset/limit 翻页）。
+  queryLogs: (level: string, only: boolean, offset: number, limit: number) => invoke<PageResult<LogLine>>('query_logs', { level, only, offset, limit }),
+  // 取 AI 生图全量配置（Provider 列表、提示词模板、密钥状态等），AI 设置页数据源。
   getImageAiState: () => invoke<ImageConfig>('get_image_ai_state'),
   // 画廊记录：持久清单 + 查询期现算的图片存在性（imageAvailable；绝不写回后端文件）。
   getGallery: () => invoke<GalleryItem[]>('get_gallery'),
+  // 新增/更新一个 Provider，返回更新后的完整 AI 配置。
   saveProvider: (provider: ProviderConfig) => invoke<ImageConfig>('save_provider', { provider }),
+  // 删除指定 Provider，返回更新后的完整 AI 配置。
   deleteProvider: (id: string) => invoke<ImageConfig>('delete_provider', { id }),
+  // 单独保存 Provider 的 API Key（密钥不回传前端，故与 Provider 配置分通道）。
   setProviderKey: (id: string, key: string) => invoke<void>('set_provider_key', { id, key }),
-  savePromptTemplate: (template: PromptTemplate) =>
-    invoke<ImageConfig>('save_prompt_template', { template }),
+  // 查询已配置密钥的 Provider id 列表（供前端显示「已配置」标记）。
+  getProviderKeyState: () => invoke<string[]>('get_provider_key_state'),
+  // 新增/更新提示词模板，返回更新后的完整 AI 配置。
+  savePromptTemplate: (template: PromptTemplate) => invoke<ImageConfig>('save_prompt_template', { template }),
+  // 删除指定提示词模板，返回更新后的完整 AI 配置。
   deletePromptTemplate: (id: string) => invoke<ImageConfig>('delete_prompt_template', { id }),
-  /** P1 无数据源：vars 不传（Rust 侧 `Option<HashMap>` → null 即 None），占位符全部取默认值。 */
-  renderPrompt: (body: string, vars?: Record<string, string>) =>
-    invoke<RenderOutcome>('render_prompt', { body, vars: vars ?? null }),
+  // 用模板体 + 变量即时渲染提示词（不落库），返回渲染结果或错误（模板编辑器实时预览用）。
+  renderPrompt: (body: string, vars?: Record<string, string>) => invoke<RenderOutcome>('render_prompt', { body, vars: vars ?? null }),
+  // 调用所选 Provider 生成图片，返回生成结果（含生成图 id；AI 生图主流程）。
   generateImage: (req: GenRequest) => invoke<GenResult>('generate_image', { req }),
-  saveGeneratedImage: (imageId: string, targetPath: string) =>
-    invoke<string>('save_generated_image', { imageId, targetPath }),
-  // P3 数据源：按名单球员构建变量并渲染模板（肤色码经字典转译为色卡号文本）；
-  // missing = 既无值又无默认值的占位符键名（同 render_prompt 口径）。
-  previewPrompt: (uid: string, templateId: string) =>
-    invoke<RenderOutcome>('preview_prompt', { uid, templateId }),
-  // P3 保存并替换：生成图复制到 <头像包>/_generated/ 并走单人换脸全链；批量替换进行中返回中文错误。
-  saveAndReplace: (imageId: string, uid: string, saveBackup: boolean) =>
-    invoke<GenImage>('save_and_replace', { imageId, uid, saveBackup }),
+  // 把生成的图片另存到指定路径，返回实际写入的路径。
+  saveGeneratedImage: (imageId: string, targetPath: string) => invoke<string>('save_generated_image', { imageId, targetPath }),
+  // 按球员 UID + 模板渲染提示词（不发起生成），供生成前确认。
+  previewPrompt: (uid: string, templateId: string) => invoke<RenderOutcome>('preview_prompt', { uid, templateId }),
+  // 保存生成图并替换该球员头像；replaced 区分「真改了映射」与「只落盘」。
+  saveAndReplace: (imageId: string, uid: string, saveBackup: boolean) => invoke<SaveReplaceResult>('save_and_replace', { imageId, uid, saveBackup }),
   // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
+  // 追加条目到队列（id 由后端补发），返回全量队列。
   addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),
+  // 按 id 移除队列条目，返回全量队列。
   removeFromQueue: (ids: string[]) => invoke<QueueEntry[]>('remove_from_queue', { ids }),
+  // 启动批量生成队列。
   startQueue: () => invoke<void>('start_queue'),
+  // 取消批量生成队列。
   cancelQueue: () => invoke<void>('cancel_queue'),
+  // 查询当前队列全量快照。
   queryQueue: () => invoke<QueueEntry[]>('query_queue'),
 };

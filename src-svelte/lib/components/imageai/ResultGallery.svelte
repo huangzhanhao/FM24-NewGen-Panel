@@ -36,8 +36,13 @@
     )
       return;
     try {
-      await saveAndReplace(imgId);
-      await message(t.gen.saveReplace.ok(sp.name), { title: t.dialog.info });
+      const r = await saveAndReplace(imgId);
+      // 未命中＝图片进了 _generated，但该球员在当前档没有映射行；必须警告，不能报成功。
+      if (r.replaced) {
+        await message(t.gen.saveReplace.ok(sp.name), { title: t.dialog.info });
+      } else {
+        await message(t.gen.saveReplace.notMapped(sp.name), { title: t.dialog.warning });
+      }
     } catch (e) {
       await showError(e); // 批量替换进行中被拒等后端错误走统一弹窗
     }

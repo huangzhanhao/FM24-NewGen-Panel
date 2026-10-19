@@ -134,7 +134,8 @@ export const imageaiStore = $state({
    *  与 results 一起构成画廊数据源，去重见 gallery 派生。 */
   records: [] as GeneratedImage[],
 
-  /** 会话内「已设置 Key」指示。Key 本体只进后端会话内存、不回传不持久化，刷新即清。 */
+  /** 哪些服务商「已设置 Key」。密文随服务商行落盘、明文只进后端会话内存，且永不回传前端；
+   *  刷新后由 getProviderKeyState 认回，判断依据只有布尔。 */
   keysSet: {} as Record<string, boolean>,
 
   /** 生图数据源球员（名单/单人预览入口写入）。null = 变量走模板默认值、手填 prompt 生效；
@@ -243,6 +244,13 @@ export function loadImageState(): Promise<void> {
   if (!loadPromise) {
     loadPromise = (async () => {
       imageaiStore.config = await api.getImageAiState();
+      // Key 已加密落盘：后端只回「哪些服务商配了 Key」（id 列表），据此点亮 keysSet。
+      // 失败不阻断——最坏情况是界面显示未设置、生成时后端仍能取到 Key。
+      try {
+        for (const id of await api.getProviderKeyState()) imageaiStore.keysSet[id] = true;
+      } catch {
+        // 忽略：留待用户重新输入，或下次进入时再拉
+      }
       selectProvider(imageaiStore.config.settings.defaultProviderId || 'openai');
       const tpl =
         imageaiStore.config.templates.find((x) => x.id === imageaiStore.templateId) ??
@@ -306,10 +314,10 @@ export function selectProvider(id: string) {
   imageaiStore.callMode = 'sync';
 }
 
-/** Key 仅进后端会话内存；成功后标记本会话「已设置」。 */
+/** Key 明文只进后端会话内存（密文落盘）；空串＝清除。成功后同步「已设置」标记。 */
 export async function setProviderKey(id: string, key: string) {
   await api.setProviderKey(id, key);
-  imageaiStore.keysSet[id] = true;
+  imageaiStore.keysSet[id] = !!key.trim();
 }
 
 // ---------------- 服务商 / 模板的写入出口（config 整包替换单点化） ----------------

@@ -28,7 +28,6 @@ mod xml_parser; // 读写 config.xml（FM 认的头像映射配置）
 
 use commands::AppState;
 use logger::{LogMemory, LogSink, Logger};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -285,6 +284,13 @@ pub fn run() {
 
             // 6) app.manage(...) 把全局状态交给 Tauri 托管：之后任何命令函数只需在参数里写
             //    State<'_, AppState>，Tauri 就会自动把这个状态传进去。
+            //    生图 Key 以密文存在配置里，启动时逐条解密进会话内存；解不开的按「未配置」
+            //    处理（换机 / 重装 / 换账户），只记 warn，不阻断启动。
+            let image_cfg = image_ai::Config::load(&data_dir).unwrap_or_else(|e| {
+                log::warn!(target: "image_ai", "读取生图配置失败，使用出厂默认: {e}");
+                image_ai::Config::builtin()
+            });
+            let image_keys = image_ai::load_stored_keys(&image_cfg.providers);
             app.manage(AppState {
                 pm: Mutex::new(pm),                              // 存档管理器（互斥锁保护）
                 logger: logger.clone(),                          // 日志器（Arc 共享）
@@ -294,13 +300,8 @@ pub fn run() {
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)), // 「扫描头像」的包索引缓存（初始为空）
                 snapshot_cache: Arc::new(Mutex::new(None)), // 快照解析缓存（「读取快照」/替换收尾写入；初始为空）
-                image: Arc::new(Mutex::new(
-                    image_ai::Config::load(&data_dir).unwrap_or_else(|e| {
-                        log::warn!(target: "image_ai", "读取生图配置失败，使用出厂默认: {e}");
-                        image_ai::Config::builtin()
-                    }),
-                )),
-                image_keys: Arc::new(Mutex::new(HashMap::new())),
+                image: Arc::new(Mutex::new(image_cfg)),
+                image_keys: Arc::new(Mutex::new(image_keys)),
                 queue: Arc::new(Mutex::new(image_ai_queue::QueueState::default())), // 批量生成队列（条目 + cancel 标志）
                 data_dir, // 便携数据目录（标准规则在其下 rules/）
             });
@@ -350,7 +351,8 @@ pub fn run() {
             commands::preview_prompt,  // 按球员数据源渲染模板（uid → build_vars → render）
             commands::save_provider,   // 新增/更新服务商配置（连同设置落盘 image_ai.json）
             commands::delete_provider, // 删除服务商配置（落盘 image_ai.json）
-            commands::set_provider_key, // 记住/清除 API Key（仅本会话内存，不落盘）
+            commands::set_provider_key, // 记住/清除 API Key（密文落盘，会话内存保留明文）
+            commands::get_provider_key_state, // 已配置 Key 的服务商 id 列表（只回 id，不回密文）
             commands::save_prompt_template, // 新增/更新提示词模板（落盘 prompts/templates.json）
             commands::delete_prompt_template, // 删除提示词模板（落盘 prompts/templates.json）
             commands::generate_image,  // 单张生成：调服务商出图（不跨 await 持锁）

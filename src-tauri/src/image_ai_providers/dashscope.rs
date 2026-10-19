@@ -114,6 +114,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 capabilities: zimage_caps(),
             },
         ],
+        api_key: None,
     }
 }
 
@@ -523,7 +524,7 @@ impl ImageProvider for DashscopeProvider {
             let json: Value = resp
                 .json()
                 .await
-                .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
             if !status.is_success() {
                 // 顶层 code 优先分类，否则按 HTTP 状态分流；message 沿用既有中文文案。
                 let code = json.get("code").and_then(|c| c.as_str());
@@ -575,7 +576,7 @@ async fn run_async(
     let json: Value = created
         .json()
         .await
-        .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+        .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
     let task_id = if status.is_success() {
         parse_submit(&json)?
     } else {
@@ -631,7 +632,7 @@ async fn run_async(
         let json: Value = resp
             .json()
             .await
-            .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+            .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
         if !status.is_success() {
             let code = json.get("code").and_then(|c| c.as_str());
             return Err(classify_provider_error(

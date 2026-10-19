@@ -13,7 +13,10 @@ vi.mock('../services/api', () => ({
     previewPrompt: vi.fn(async (uid: string) => ({ text: `${uid} 的渲染结果`, missing: [] })),
     // images 留空：generate 的 blob 加载循环不执行，无需替身 readImage
     generateImage: vi.fn(async () => ({ images: [] })),
-    saveAndReplace: vi.fn(async () => ({ id: 'g1', path: '/tmp/x.png', bytes: 1 })),
+    saveAndReplace: vi.fn(async () => ({
+      image: { id: 'g1', path: '/tmp/x.png', bytes: 1 },
+      replaced: true,
+    })),
     addToQueue: vi.fn(async (entries: QueueEntry[]) =>
       entries.map((e, i) => ({ ...e, id: `q${i + 1}` })),
     ),

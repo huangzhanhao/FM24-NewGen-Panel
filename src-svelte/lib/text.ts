@@ -179,10 +179,9 @@ const zhCN = {
     statusNoKey: "未设置 Key",
     statusNoModel: "未选模型",
     statusReadyTitle: "Key 已设置且模型已选（连通性以实际生成为准）",
-    /** 就绪卡：Key 未设置时条件出现（「去设置」聚焦配置条 Key 输入框） */
-    /** Key 输入框右侧状态胶囊的未设置态文案（警示胶囊的 title 用 keyMissingHint 讲清后果） */
+    /** 就绪状态灯缺 Key 档的 title：讲清后果 + 指出去哪设置 */
     keyMissingHint:
-      "生成前需先设置当前服务商的 API Key（仅本会话记忆，不落盘）——点此聚焦输入框",
+      "生成前需先设置当前服务商的 API Key——点此打开服务商设置",
     cardSource: "球员源 · 单人",
     cardSettings: "生成设置",
     resultsTitle: "本次结果",
@@ -191,7 +190,6 @@ const zhCN = {
     clearResultsTitle: "清空本次会话的全部生成结果",
     clearResultsConfirm: (n: number) =>
       `清空本次会话的 ${n} 张生成结果？临时图片将被删除，未手动保存的无法恢复。`,
-    keySubmit: "提交 Key",
     template: "提示词模板",
     manageTemplate: "管理模板",
     /** 模板管理弹窗：变量胶囊（点击在正文光标处插入占位符） */
@@ -320,13 +318,18 @@ const zhCN = {
       confirm: (name: string) =>
         `把这张生成图设为 ${name} 的头像？将写入头像包并替换其映射。`,
       ok: (name: string) => `已保存并替换 ${name} 的头像`,
+      notMapped: (name: string) =>
+        `图片已保存到 _generated 目录，但没能写入映射：当前头像包的 config.xml 缺失或结构异常。请检查头像包后重试。`,
       needSource: "请先选择数据源球员（名单预览行尾「去抽图」）",
     },
-    // 服务商设置
-    // 顶栏直达的 Key 掩码输入（唯一入口，与主界面配置条的 key-row 同源）
+    // 服务商设置：Key 跟着服务商走，这里是唯一编辑入口（工作台只显示状态）
     keyBarLabel: "API Key",
-    keyBarPlaceholder: "输入当前服务商的 Key，仅本会话记忆，不落盘",
-    keyBarSetPlaceholder: "已设置（不回显），如需更换请重新输入",
+    keyBarPlaceholder: "输入该服务商的 Key，加密保存在本机",
+    keyBarSetPlaceholder: "已设置（不回显）；输入新值即替换",
+    keyStatusUnset: "未设置",
+    keyClear: "清除 Key",
+    keyClearConfirm: (name: string) =>
+      `清除「${name}」的 API Key？清除后需重新输入才能生成。`,
     baseUrl: "接口地址 Base URL",
     /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
      *  地域必须与模型、API Key 一致，跨地域直接失败。 */
@@ -335,6 +338,8 @@ const zhCN = {
       "官方建议迁移到业务空间专属域 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1" +
       "（性能与稳定性更好；WorkspaceId 在控制台的业务空间详情页）。" +
       "模型、接口地址、API Key 三者必须同地域，跨地域调用会直接失败。",
+    keyStorageHint:
+      "API Key 由本机加密保存，仅当前系统账户可解；更换设备或重装系统后需重新填写。",
     kind: "类型",
     providerIdLabel: "ID",
     providerIdPlaceholder: "留空自动生成",
@@ -883,10 +888,9 @@ const zhTW: Dict = {
     statusNoKey: "未設定 Key",
     statusNoModel: "未選模型",
     statusReadyTitle: "Key 已設定且模型已選（連通性以實際生成為準）",
-    /** 就绪卡：Key 未设置时条件出现（「去设置」聚焦配置条 Key 输入框） */
-    /** Key 输入框右侧状态胶囊的未设置态文案（警示胶囊的 title 用 keyMissingHint 讲清后果） */
+    /** 就緒狀態燈缺 Key 檔的 title：講清後果 + 指出去哪設定 */
     keyMissingHint:
-      "生成前需先設定當前服務商的 API Key（僅本會話記憶，不落盤）——點此聚焦輸入框",
+      "生成前需先設定當前服務商的 API Key——點此開啟服務商設定",
     cardSource: "球員源 · 單人",
     cardSettings: "生成設定",
     resultsTitle: "本次結果",
@@ -895,7 +899,6 @@ const zhTW: Dict = {
     clearResultsTitle: "清空本次會話的全部生成結果",
     clearResultsConfirm: (n: number) =>
       `清空本次會話的 ${n} 張生成結果？臨時圖片將被刪除，未手動儲存的無法恢復。`,
-    keySubmit: "提交 Key",
     template: "提示詞模板",
     manageTemplate: "管理模板",
     /** 模板管理弹窗：变量胶囊（点击在正文光标处插入占位符） */
@@ -1024,13 +1027,18 @@ const zhTW: Dict = {
       confirm: (name: string) =>
         `把這張生成圖設為 ${name} 的頭像？將寫入頭像包並替換其對映。`,
       ok: (name: string) => `已儲存並替換 ${name} 的頭像`,
+      notMapped: (name: string) =>
+        `圖片已儲存到 _generated 目錄，但沒能寫入對映：當前頭像包的 config.xml 缺失或結構異常。請檢查頭像包後重試。`,
       needSource: "請先選擇資料來源球員（名單預覽行尾「去抽圖」）",
     },
-    // 服务商设置
-    // 顶栏直达的 Key 掩码输入（唯一入口，与主界面配置条的 key-row 同源）
+    // 服務商設定：Key 跟著服務商走，這裡是唯一編輯入口（工作台只顯示狀態）
     keyBarLabel: "API Key",
-    keyBarPlaceholder: "輸入當前服務商的 Key，僅本會話記憶，不落盤",
-    keyBarSetPlaceholder: "已設定（不回顯），如需更換請重新輸入",
+    keyBarPlaceholder: "輸入該服務商的 Key，加密儲存在本機",
+    keyBarSetPlaceholder: "已設定（不回顯）；輸入新值即替換",
+    keyStatusUnset: "未設定",
+    keyClear: "清除 Key",
+    keyClearConfirm: (name: string) =>
+      `清除「${name}」的 API Key？清除後需重新輸入才能生成。`,
     baseUrl: "介面位址 Base URL",
     /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
      *  地域必须与模型、API Key 一致，跨地域直接失败。 */
@@ -1039,6 +1047,8 @@ const zhTW: Dict = {
       "官方建議遷移到業務空間專屬域 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1" +
       "（效能與穩定性更好；WorkspaceId 在控制檯的業務空間詳情頁）。" +
       "模型、介面位址、API Key 三者必須同地域，跨地域呼叫會直接失敗。",
+    keyStorageHint:
+      "API Key 由本機加密儲存，僅當前系統帳戶可解；更換裝置或重裝系統後需重新填寫。",
     kind: "型別",
     providerIdLabel: "ID",
     providerIdPlaceholder: "留空自動生成",
@@ -1595,10 +1605,9 @@ const en: Dict = {
     statusNoModel: "No model",
     statusReadyTitle:
       "Key is set and model is selected (connectivity is proven by actual generation)",
-    /** 就绪卡：Key 未设置时条件出现（「去设置」聚焦配置条 Key 输入框） */
-    /** Key 输入框右侧状态胶囊的未设置态文案（警示胶囊的 title 用 keyMissingHint 讲清后果） */
+    /** Title of the missing-key state: state the consequence and point at the settings dialog */
     keyMissingHint:
-      "An API key for the current provider must be set before generating (kept in memory for this session only, never written to disk) — click to focus the input",
+      "An API key for the current provider must be set before generating — click to open provider settings",
     cardSource: "Player source · Single",
     cardSettings: "Generation settings",
     resultsTitle: "Results",
@@ -1607,7 +1616,6 @@ const en: Dict = {
     clearResultsTitle: "Clear all generation results of this session",
     clearResultsConfirm: (n: number) =>
       `Clear the ${n} generation results of this session? Temporary images will be deleted; any not saved manually cannot be recovered.`,
-    keySubmit: "Submit key",
     template: "Prompt template",
     manageTemplate: "Manage templates",
     /** 模板管理弹窗：变量胶囊（点击在正文光标处插入占位符） */
@@ -1748,15 +1756,20 @@ const en: Dict = {
       confirm: (name: string) =>
         `Set this generated image as ${name}'s avatar? It will be written into the facepack and its mapping replaced.`,
       ok: (name: string) => `Saved and replaced ${name}'s avatar`,
+      notMapped: (name: string) =>
+        `The image was saved to _generated, but the mapping could not be written: the current facepack's config.xml is missing or malformed. Check the facepack and retry.`,
       needSource:
         'Select a source player first ("Generate" at the end of a roster preview row)',
     },
-    // 服务商设置
-    // 顶栏直达的 Key 掩码输入（唯一入口，与主界面配置条的 key-row 同源）
+    // Provider settings: the key belongs to the provider; this is the only place to edit it
     keyBarLabel: "API Key",
     keyBarPlaceholder:
-      "Enter the current provider's key; kept in memory for this session only, never written to disk",
-    keyBarSetPlaceholder: "Set (not shown again); re-enter to replace it",
+      "Enter this provider's key; stored encrypted on this machine",
+    keyBarSetPlaceholder: "Set (not shown again); enter a new value to replace it",
+    keyStatusUnset: "Not set",
+    keyClear: "Clear key",
+    keyClearConfirm: (name: string) =>
+      `Clear the API key of "${name}"? You must enter it again before generating.`,
     baseUrl: "Base URL",
     /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
      *  地域必须与模型、API Key 一致，跨地域直接失败。 */
@@ -1765,6 +1778,8 @@ const en: Dict = {
       "Migration to the workspace-specific domain https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1 is officially recommended" +
       " (better performance and stability; find WorkspaceId on the workspace details page of the console)." +
       " Model, base URL and API key must share the same region; cross-region calls fail outright.",
+    keyStorageHint:
+      "The API key is stored encrypted on this machine and can only be decrypted by the current OS account; re-enter it after switching devices or reinstalling the system.",
     kind: "Kind",
     providerIdLabel: "ID",
     providerIdPlaceholder: "Leave empty to auto-generate",

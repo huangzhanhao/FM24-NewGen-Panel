@@ -4,33 +4,35 @@
 //! `data[].b64_json|url`、`error.code/message`），故 endpoint 拼接与响应解析复用
 //! [`super::openai`]；请求体由本模块按 Seedream 官方契约自行组装。
 //!
-//! 【内置目录】只接入当前在售的五个文生图模型（2026-10 官方口径，模型 ID 逐字照抄）：
+//! 【内置目录】只接入方舟目录里现役（无 `Retiring` 标记）的文生图模型，模型 ID 逐字照抄：
 //! - `doubao-seedream-5-0-pro-260628`（5.0 Pro）
 //! - `doubao-seedream-5-0-flash-260915`（5.0 Flash，出厂默认）
-//! - `doubao-seedream-5-0-260128`（5.0 Lite）
-//! - `doubao-seedream-4-5-251128`（4.5）
-//! - `doubao-seedream-4-0-250828`（4.0）
+//! - `doubao-seedream-4-0-20260415`（4.0 现役版本）
 //!
 //! 早期版本 assets 里出现过的 `seedream-5.0-flash` / `seedream-5.0-lite` / `seedream-4.0`
 //! 是从未调通的猜测模型名；该目录现由代码内置、缺失即整块注入（见
 //! [`crate::image_ai::reconcile_builtin_providers`]）。
 //!
 //! 【逐模型参数差异】（官方「图片生成 API」参数表，能力不声明就不发字段）：
-//! | 参数 | 5.0 Pro/Flash | 5.0 Lite | 4.5 | 4.0 |
-//! |---|---|---|---|---|
-//! | size 档位 | 1K/1.5K/2K（默认 2K） | 2K/3K/4K | 2K/4K | 1K/2K/4K |
-//! | 自定义像素总像素 | [921600(1280×720), 4624220] | [3686400(2560×1440), 16777216(4096²)] | 同 Lite | [921600, 16777216] |
-//! | 宽高比 | 全系列 [1/16, 16] ||||
-//! | output_format | png/jpeg | png/jpeg | **不可设，仅回 jpeg** | **不可设，仅回 jpeg** |
-//! | sequential_image_generation | **不支持，传参报错** | disabled/auto（组图） | 同 Lite | 同 Lite |
-//! | seed / n | **全系列均无此参数**（文生图固定单图）||||
-//! | watermark | bool，全系列支持；官方 curl 示例均显式 false（服务端默认 true 带「AI生成」水印）||||
-//! | response_format | url(默认,24h)/b64_json，全系列支持；适配器固定 b64_json 直返 ||||
+//! | 参数 | 5.0 Pro/Flash | 4.0 |
+//! |---|---|---|
+//! | size 档位 | 1K/1.5K/2K（默认 2K） | 1K/2K/4K |
+//! | 自定义像素总像素 | [921600(1280×720), 4624220] | [921600(1280×720), 16777216(4096²)] |
+//! | 宽高比 | 全系列 [1/16, 16] |||
+//! | output_format | png/jpeg | **不可设，仅回 jpeg** |
+//! | seed / n | **全系列均无此参数**（文生图固定单图）|||
+//! | watermark | bool，全系列支持；官方 curl 示例均显式 false（服务端默认 true 带「AI生成」水印）|||
+//! | response_format | url(默认,24h)/b64_json，全系列支持；适配器固定 b64_json 直返 |||
+//!
+//! 5.0 Lite（`doubao-seedream-5-0-260128`）与 4.5（`doubao-seedream-4-5-251128`）、旧版 4.0
+//! （`doubao-seedream-4-0-250828`）在方舟模型目录中的 `status` 已是 `Retiring`：接口回
+//! `InvalidEndpointOrModel.NotFound`（不是「未开通」的 `ModelNotOpen`），控制台无法开通，
+//! 故内置目录不收录。4.0 只保留现役版本 `doubao-seedream-4-0-20260415`。
 //!
 //! 本项目只做单轮文生图：`sequential_image_generation` 全系列不发送（Pro/Flash 发了直接报错；
-//! Lite/4.5/4.0 缺省即单图）；Pro/Flash 专属的图层拆分/参考图/交互编辑，以及 Lite 的联网能力，
-//! 均不在文生图场景接入。size 档位串与 `WxH` 像素串（小写 `x`，如 `2048x1024`）原样透传、
-//! 不可混用。prompt 官方仅给软建议（中文 ≤300 字 / 英文 ≤600 词），非硬限，故不设字符上限拦截。
+//! 4.0 缺省即单图）；Pro/Flash 专属的图层拆分/参考图/交互编辑不在文生图场景接入。
+//! size 档位串与 `WxH` 像素串（小写 `x`，如 `2048x1024`）原样透传、不可混用。
+//! prompt 官方仅给软建议（中文 ≤300 字 / 英文 ≤600 词），非硬限，故不设字符上限拦截。
 
 use super::{validate_model_caps, FetchedImage, GenStage, ImageProvider, ProviderOutcome};
 use crate::image_ai::{
@@ -56,8 +58,6 @@ const DEFAULT_MODEL: &str = "doubao-seedream-5-0-flash-260915";
 const TOTAL_MIN_720P: u64 = 1280 * 720;
 /// Pro/Flash 上限：2048²×1.1025 = 4624220。
 const TOTAL_MAX_PRO_FLASH: u64 = 4_624_220;
-/// 下限：2560×1440 = 3686400（Lite 与 4.5）。
-const TOTAL_MIN_2K: u64 = 2560 * 1440;
 /// 上限：4096² = 16777216。
 const TOTAL_MAX_4K: u64 = 4096 * 4096;
 
@@ -91,15 +91,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 ),
             },
             ModelInfo {
-                model: "doubao-seedream-5-0-260128".into(),
-                capabilities: seedream_caps(&["2K", "3K", "4K"], TOTAL_MIN_2K, TOTAL_MAX_4K, true),
-            },
-            ModelInfo {
-                model: "doubao-seedream-4-5-251128".into(),
-                capabilities: seedream_caps(&["2K", "4K"], TOTAL_MIN_2K, TOTAL_MAX_4K, false),
-            },
-            ModelInfo {
-                model: "doubao-seedream-4-0-250828".into(),
+                model: "doubao-seedream-4-0-20260415".into(),
                 capabilities: seedream_caps(
                     &["1K", "2K", "4K"],
                     TOTAL_MIN_720P,
@@ -108,6 +100,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 ),
             },
         ],
+        api_key: None,
     }
 }
 
@@ -236,7 +229,7 @@ impl ImageProvider for VolcanoProvider {
             let json: serde_json::Value = resp
                 .json()
                 .await
-                .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
             // 先取火山 error.code/message，再复用 OpenAI 的 data 解析（成功路径）。
             if !status.is_success() {
                 if let Some(msg) = error_message(&json) {
@@ -334,31 +327,6 @@ mod tests {
     // ===================== 内置目录 =====================
 
     #[test]
-    fn catalog_lists_five_current_models() {
-        let p = builtin_provider();
-        assert_eq!(p.id, PROVIDER_ID);
-        assert_eq!(p.kind, ProviderKind::Volcano);
-        assert_eq!(p.base_url, DEFAULT_BASE);
-        assert_eq!(p.default_model, "doubao-seedream-5-0-flash-260915");
-        let ids: Vec<&str> = p.models.iter().map(|m| m.model.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "doubao-seedream-5-0-pro-260628",
-                "doubao-seedream-5-0-flash-260915",
-                "doubao-seedream-5-0-260128",
-                "doubao-seedream-4-5-251128",
-                "doubao-seedream-4-0-250828",
-            ]
-        );
-        assert!(ids.contains(&p.default_model.as_str()));
-        // 早期的点分猜测模型名不得出现在内置目录里。
-        for old in ["seedream-5.0-flash", "seedream-5.0-lite", "seedream-4.0"] {
-            assert!(!ids.contains(&old), "{old} 是失效的旧猜测名");
-        }
-    }
-
-    #[test]
     fn catalog_common_caps_match_official_spec() {
         let p = builtin_provider();
         for m in &p.models {
@@ -403,19 +371,7 @@ mod tests {
         assert_eq!(flash.size_rules, pro.size_rules);
         assert!(flash.supports_output_format);
 
-        let lite = caps_of("doubao-seedream-5-0-260128");
-        assert_eq!(lite.sizes, vec!["2K", "3K", "4K"]);
-        let r = lite.size_rules.as_ref().unwrap();
-        assert_eq!(r.total_min, 3_686_400);
-        assert_eq!(r.total_max, 16_777_216);
-        assert!(lite.supports_output_format, "Lite 可设 png/jpeg");
-
-        let v45 = caps_of("doubao-seedream-4-5-251128");
-        assert_eq!(v45.sizes, vec!["2K", "4K"]);
-        assert_eq!(v45.size_rules, lite.size_rules);
-        assert!(!v45.supports_output_format, "4.5 仅回 jpeg、不可设格式");
-
-        let v40 = caps_of("doubao-seedream-4-0-250828");
+        let v40 = caps_of("doubao-seedream-4-0-20260415");
         assert_eq!(v40.sizes, vec!["1K", "2K", "4K"]);
         let r = v40.size_rules.as_ref().unwrap();
         assert_eq!(r.total_min, 921_600);
@@ -453,10 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn body_lite_uses_2k_png_and_passes_custom_pixels_verbatim() {
-        let mut r = req_for("doubao-seedream-5-0-260128");
-        assert_eq!(build_volcano_body(&r)["size"], "2K");
-        assert_eq!(build_volcano_body(&r)["output_format"], "png");
+    fn body_passes_custom_pixel_string_verbatim() {
+        let mut r = req_for("doubao-seedream-5-0-flash-260915");
         // 自定义像素串：小写 x 原样发（官方契约就是小写 x）。
         r.size = "2048x1024".into();
         assert_eq!(build_volcano_body(&r)["size"], "2048x1024");
@@ -464,20 +418,19 @@ mod tests {
     }
 
     #[test]
-    fn body_45_40_omit_output_format_and_report_jpeg() {
-        for id in ["doubao-seedream-4-5-251128", "doubao-seedream-4-0-250828"] {
-            let b = build_volcano_body(&req_for(id));
-            assert!(
-                b.get("output_format").is_none(),
-                "{id} 不接受 output_format，整条省略"
-            );
-            assert_eq!(b["response_format"], "b64_json");
-            assert_eq!(b["watermark"], false);
-            for forbidden in ["n", "seed", "sequential_image_generation"] {
-                assert!(b.get(forbidden).is_none(), "{id} 不应出现 {forbidden}");
-            }
-            assert_eq!(image_extension(&req_for(id)), "jpeg", "{id} 只回 JPEG");
+    fn body_40_omits_output_format_and_reports_jpeg() {
+        let id = "doubao-seedream-4-0-20260415";
+        let b = build_volcano_body(&req_for(id));
+        assert!(
+            b.get("output_format").is_none(),
+            "{id} 不接受 output_format，整条省略"
+        );
+        assert_eq!(b["response_format"], "b64_json");
+        assert_eq!(b["watermark"], false);
+        for forbidden in ["n", "seed", "sequential_image_generation"] {
+            assert!(b.get(forbidden).is_none(), "{id} 不应出现 {forbidden}");
         }
+        assert_eq!(image_extension(&req_for(id)), "jpeg", "{id} 只回 JPEG");
     }
 
     #[test]
@@ -505,13 +458,11 @@ mod tests {
         assert_eq!(image_extension(&r), "png");
         r.output_format = Some("webp".into());
         assert_eq!(build_volcano_body(&r)["output_format"], "png");
-        // 4.5/4.0 不可设：即便传了 jpeg 也整条省略、后缀恒 jpeg（服务端只回 jpeg）。
-        for id in ["doubao-seedream-4-5-251128", "doubao-seedream-4-0-250828"] {
-            let mut old = req_for(id);
-            old.output_format = Some("jpeg".into());
-            assert!(build_volcano_body(&old).get("output_format").is_none());
-            assert_eq!(image_extension(&old), "jpeg", "{id}");
-        }
+        // 4.0 不可设：即便传了 jpeg 也整条省略、后缀恒 jpeg（服务端只回 jpeg）。
+        let mut old = req_for("doubao-seedream-4-0-20260415");
+        old.output_format = Some("jpeg".into());
+        assert!(build_volcano_body(&old).get("output_format").is_none());
+        assert_eq!(image_extension(&old), "jpeg");
     }
 
     #[test]
@@ -548,24 +499,10 @@ mod tests {
     }
 
     #[test]
-    fn lite_and_45_size_rules_start_at_1440p() {
-        let caps = caps_of("doubao-seedream-5-0-260128");
-        let check = |size: &str| {
-            let mut r = req_for("doubao-seedream-5-0-260128");
-            r.size = size.into();
-            validate_model_caps(&r, &caps)
-        };
-        assert!(check("2K").is_ok());
-        assert!(check("2560x1440").is_ok(), "Lite/4.5 下限 3686400");
-        assert!(check("2559x1440").is_err(), "3_684_960 低于下限");
-        assert!(check("4096x4096").is_ok(), "4096² 上限");
-    }
-
-    #[test]
     fn model_40_accepts_720p_to_4k() {
-        let caps = caps_of("doubao-seedream-4-0-250828");
+        let caps = caps_of("doubao-seedream-4-0-20260415");
         let check = |size: &str| {
-            let mut r = req_for("doubao-seedream-4-0-250828");
+            let mut r = req_for("doubao-seedream-4-0-20260415");
             r.size = size.into();
             validate_model_caps(&r, &caps)
         };

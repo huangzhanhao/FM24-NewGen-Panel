@@ -249,6 +249,8 @@ export interface RenderOutcome { text: string; missing: string[]; }
 
 export interface GenImage { id: string; path: string; bytes: number; }
 
+export interface SaveReplaceResult { image: GenImage; replaced: boolean; }
+
 export interface GenResult {
   images: GenImage[];
 }

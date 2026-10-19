@@ -78,6 +78,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
             model: DEFAULT_MODEL.into(),
             capabilities: comfyui_caps(),
         }],
+        api_key: None,
     }
 }
 
@@ -296,7 +297,7 @@ impl ImageProvider for ComfyUIProvider {
             let json: Value = resp
                 .json()
                 .await
-                .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
             let prompt_id = if status.is_success() {
                 parse_submit(&json)?
             } else {
@@ -342,7 +343,7 @@ impl ImageProvider for ComfyUIProvider {
                 let json: Value = resp
                     .json()
                     .await
-                    .map_err(|e| ImageGenError::provider(format!("响应解析失败: {e}"), false))?;
+                    .map_err(|e| ImageGenError::provider(format!("HTTP {status}：响应解析失败: {e}"), false))?;
                 match parse_history(&json, &prompt_id) {
                     TaskState::Pending => continue,
                     TaskState::Failed(e) => return Err(e),

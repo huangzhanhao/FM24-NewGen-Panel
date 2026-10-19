@@ -27,6 +27,7 @@ chrono = "0.4"
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
+ring = "0.17"
 tauri-plugin-log = "2"
 # 生成图四角白底裁成圆角需要「解码 → 改像素 → 重编码 PNG」。厂商回图格式为 png/jpeg/webp
 # 三选一（见 image_ai_providers 各适配器的 extension 约定），只开这三个编解码器：

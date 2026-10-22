@@ -247,7 +247,9 @@ export function loadImageState(): Promise<void> {
       // Key 已加密落盘：后端只回「哪些服务商配了 Key」（id 列表），据此点亮 keysSet。
       // 失败不阻断——最坏情况是界面显示未设置、生成时后端仍能取到 Key。
       try {
-        for (const id of await api.getProviderKeyState()) imageaiStore.keysSet[id] = true;
+        // 整表重建而不是逐条置 true：后端列表是唯一事实源，删服务商/清 Key 后旧标记必须消失。
+        const ids = await api.getProviderKeyState();
+        imageaiStore.keysSet = Object.fromEntries(ids.map((id) => [id, true]));
       } catch {
         // 忽略：留待用户重新输入，或下次进入时再拉
       }
@@ -330,6 +332,8 @@ export async function saveProvider(provider: ProviderConfig) {
 
 export async function deleteProvider(id: string) {
   imageaiStore.config = await api.deleteProvider(id);
+  // 该 id 的 Key 已随后端配置行消失；前端标记一并清掉，避免同 id 重建后误显示「已设置」。
+  imageaiStore.keysSet[id] = false;
   ensureProviderValid();
 }
 

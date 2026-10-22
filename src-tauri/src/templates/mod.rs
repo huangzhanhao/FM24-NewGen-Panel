@@ -100,6 +100,9 @@ impl RuleConfig {
                 return Err(format!("标准二规则文件无法解析：{}（{e}）", s2.display()))
             }
         }
+        cfg.standard2
+            .validate()
+            .map_err(|e| format!("标准二规则无效：{}（{e}）", s2.display()))?;
         let s3 = dir.join("standard3.json");
         match json_store::load::<standard3::Standard3Config>(&s3) {
             Ok(user) => cfg.standard3 = user,

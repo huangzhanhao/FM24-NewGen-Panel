@@ -64,13 +64,13 @@ pub struct SnapshotCache {
 
 /// 「缓存作用域」：决定 `rtf_cache` / `mapping_cache` 归谁用的三个量——当前档、当前组、当前组的名单路径。
 /// 【为什么需要它】这两个缓存是「最近一次解析/生成的」语义，**没有路径键**
-/// （不像 `snapshot_cache`按快照路径命中、`faces_cache` 按目录 + 目录签名），它们的归属完全由这三项决定。
+/// （不像 `snapshot_cache` 按快照路径命中、`faces_cache` 按目录 + 目录签名），它们的归属完全由这三项决定。
 fn cache_scope(pm: &ProfileManager) -> (String, Option<String>, String) {
     (pm.cur_prf.clone(), pm.cur_group.clone(), pm.get_cur_rtf())
 }
 
 /// 存档/组/名单变更后调用：作用域变了就清掉那两个缓存（宁缺勿旧）。
-/// 清空后前端据快照把 `rosterReady` 复位，，各预览回到引导空态，等下一次「扫描RTF」或替换重新填充。
+/// 清空后前端据快照把 `rosterReady` 复位，各预览回到引导空态，等下一次「扫描RTF」或替换重新填充。
 fn clear_caches_if_scope_changed(state: &State<'_, AppState>, before: (String, Option<String>, String)) {
     // 锁只在这一句里持有：先取出改后的作用域，随后的两把锁与 pm 无嵌套关系。
     let after = cache_scope(&state.pm.lock().unwrap());

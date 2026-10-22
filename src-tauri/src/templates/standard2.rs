@@ -2,7 +2,7 @@
 //! 抽图逻辑 = 国籍查表（json `Ethnics`）→ 种族码修正（json `CodeRules`）→ 池优先级 → 随机抽图。
 //! 规则全部来自 `assets/standard2.json`（内置默认）与 `data/rules/standard2.json`（用户可编辑），
 //! 本模块不硬编码任何目录名或码表。
-use super::{filter_pools, PickRule, PickedImage, Pools, RuleFile};
+use super::{filter_pools, pick_from_pools_flat, PickRule, PickedImage, Pools, RuleFile};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -33,6 +33,44 @@ pub struct Standard2Config {
     pub code_rules: BTreeMap<String, CodeRule>,      // "CodeRules"：FM 种族码修正
 }
 
+impl Standard2Config {
+    /// 结构校验（配置不变量的守卫），与标准三同口径：`RuleConfig::load` 与保存规则文件共用这一个入口。
+    /// 【为什么必须拦】这里写错的目录名不会报错，只会让目标球员被静默跳过（`pick` 找不到该目录），
+    /// 日志里只剩下「未抽到图 N 人」的汇总，定位成本极高。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.folder_list.is_empty() {
+            return Err("FolderList 为空：标准二至少需要一个种族目录".into());
+        }
+        let folders: BTreeSet<&str> = self.folder_list.iter().map(String::as_str).collect();
+        if folders.len() != self.folder_list.len() {
+            let mut seen = BTreeSet::new();
+            let dup = self
+                .folder_list
+                .iter()
+                .find(|d| !seen.insert(d.as_str()))
+                .cloned()
+                .unwrap_or_default();
+            return Err(format!("FolderList 存在重复目录：{dup:?}"));
+        }
+        for (nat, dir) in &self.ethnics {
+            if !folders.contains(dir.as_str()) {
+                return Err(format!("Ethnics[{nat}] = {dir:?} 不在 FolderList 内"));
+            }
+        }
+        for (code, rule) in &self.code_rules {
+            let targets = rule.prefer.iter().chain(std::iter::once(&rule.fallback));
+            for dir in targets {
+                if !folders.contains(dir.as_str()) {
+                    return Err(format!(
+                        "CodeRules[{code}] 指向的目录 {dir:?} 不在 FolderList 内"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 本标准的可编辑规则文件登记（命令层查表用）。
 pub fn rule_file() -> RuleFile {
     RuleFile {
@@ -47,10 +85,11 @@ fn rule_path(data_dir: &Path) -> PathBuf {
     data_dir.join("rules").join("standard2.json")
 }
 
-/// 解析 + 原子写回（json_store 自动 pretty 格式化，相当于顺带规范化用户手改的格式）。
+/// 解析 + 结构校验 + 原子写回：非法内容不写盘，错误信息直接回显给规则编辑对话框。
 fn save_file(path: &Path, content: &str) -> Result<(), String> {
     let cfg: Standard2Config =
         serde_json::from_str(content).map_err(|e| format!("JSON 格式错误（标准二）：{e}"))?;
+    cfg.validate()?;
     json_store::save(path, &cfg).map_err(|e| format!("写入 {} 失败：{e}", path.display()))
 }
 
@@ -91,7 +130,7 @@ impl Standard2Rule {
         }
     }
 
-    /// 池优先级：国籍同名目录 > 种族目录 > 两者都不在池内时用全部目录。
+    /// 池优先级：国籍同名目录 > 种族目录。任一目录在池中不可用时由 `pick` 统一回落。
     fn image_pool_dirs(&self, ethnicity: &str, nationality: &str) -> Vec<String> {
         let mut pools = Vec::new();
         let nat_in = self.pools.get(nationality).map(|s| !s.is_empty()).unwrap_or(false);
@@ -102,14 +141,17 @@ impl Standard2Rule {
         if eth_in { 
             pools.push(ethnicity.to_string()); 
         }
-        if !self.pools.contains_key(nationality) && !self.pools.contains_key(ethnicity) {
-            pools.extend(self.pools.keys().cloned());
-        }
         pools
     }
 
-    /// 依序取第一个非空池随机选图；禁重复时从池中移除。
-    fn pick_image_from_pools(&mut self, pools: &[String], duplicates: bool) -> Option<String> {
+    /// 依序取第一个非空池随机选图；返回 (实际取图的目录, 词干)，禁重复时从池中移除。
+    /// 【为什么连目录一起返回】候选不止一个目录，from 必须指向图真正所在的那个，
+    /// 写死成别的目录会让 config.xml 指向不存在的路径。
+    fn pick_image_from_pools(
+        &mut self,
+        pools: &[String],
+        duplicates: bool,
+    ) -> Option<(String, String)> {
         for dir in pools {
             let Some(pool) = self.pools.get_mut(dir) else {
                 continue;
@@ -119,11 +161,12 @@ impl Standard2Rule {
             }
             let idx = rand::rng().random_range(0..pool.len());
             // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
-            return Some(if duplicates {
+            let stem = if duplicates {
                 pool[idx].clone()
             } else {
                 pool.swap_remove(idx)
-            });
+            };
+            return Some((dir.clone(), stem));
         }
         None
     }
@@ -138,7 +181,7 @@ impl PickRule for Standard2Rule {
     }
 
     fn pick(&mut self, player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
-        // 双国籍查表(json Ethnics) → 种族码修正(json CodeRules) → 校验目录在池内 → 选图。
+        // 双国籍查表(json Ethnics) → 种族码修正(json CodeRules) → 目标目录选图 → 全池兜底。
         let e2 = if player.sec_nat.is_empty() {
             None
         } else {
@@ -146,15 +189,14 @@ impl PickRule for Standard2Rule {
         };
         let e1 = self.cfg.ethnics.get(&player.primary_nat)?;
         let ethnicity = apply_code_rule(&player.ethnicity_code, e1, e2, &self.cfg.code_rules);
-        if !self.pools.contains_key(&ethnicity) {
-            return None; // 头像包缺该种族目录
-        }
         let dirs = self.image_pool_dirs(&ethnicity, &player.primary_nat);
-        let stem = self.pick_image_from_pools(&dirs, duplicates)?;
-        Some(PickedImage {
-            dir: ethnicity,
-            stem,
-        })
+        // 目标目录不可用（包里没建、或禁重复下已被抽空）时回落到全部目录，
+        // 与标准三「候选 → 归属者 → 全池」同口径：包里还有图就给出映射，而不是静默跳过。
+        // 回落范围仍在 FolderList 之内 —— 本标准的池只有清单内目录，包外目录进不来。
+        let Some((dir, stem)) = self.pick_image_from_pools(&dirs, duplicates) else {
+            return pick_from_pools_flat(&mut self.pools, duplicates);
+        };
+        Some(PickedImage { dir, stem })
     }
 }
 
@@ -230,8 +272,62 @@ mod tests {
         assert!(["s1", "s2"].contains(&img.stem.as_str()));
         // 未配置国籍（内置表查不到）→ 球员跳过。
         assert!(rule.pick(&player("r-2", "ZZZ", "1"), true).is_none());
-        // 池中无该种族目录（如 African 未建）→ 跳过。
-        assert!(rule.pick(&player("r-3", "NGA", "3"), true).is_none());
+        // 目标目录缺失（African 未建）→ 回落到池内其余目录，不再静默跳过该球员。
+        let img = rule.pick(&player("r-3", "NGA", "3"), true).unwrap();
+        assert!(
+            ["SpanMed", "Caucasian"].contains(&img.dir.as_str()),
+            "回落抽到了池外目录 {img:?}"
+        );
+    }
+
+    #[test]
+    fn standard2_records_the_dir_it_drew_from() {
+        // 包里有与国籍同名的目录并写进 FolderList → 取图优先走它，from 就必须记它。
+        let mut cfg = RuleConfig::builtin().standard2;
+        cfg.folder_list.push("ESP".into());
+        let faces_map = BTreeMap::from([
+            ("ESP".into(), sset(&["n1", "n2"])),
+            ("SpanMed".into(), sset(&["s1"])),
+        ]);
+        let mut rule = Standard2Rule::new(&faces_map, &cfg);
+        let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
+        assert_eq!(img.dir, "ESP");
+        assert!(["n1", "n2"].contains(&img.stem.as_str()));
+    }
+
+    #[test]
+    fn standard2_validate_rejects_dirs_outside_folder_list() {
+        // 出厂配置自身必须通过校验（否则每次替换都会在 load 处炸掉）。
+        RuleConfig::builtin().standard2.validate().unwrap();
+        // Ethnics 指向清单外目录 → 报错指名字段与值。
+        let mut cfg = RuleConfig::builtin().standard2;
+        cfg.ethnics.insert("XXX".into(), "Ghost".into());
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("Ethnics[XXX]") && err.contains("Ghost"), "{err}");
+        // CodeRules 的 prefer 与 fallback 都要在清单内。
+        let mut cfg = RuleConfig::builtin().standard2;
+        cfg.code_rules.insert(
+            "3".into(),
+            CodeRule { prefer: vec!["Ghost".into()], fallback: "African".into() },
+        );
+        assert!(cfg.validate().unwrap_err().contains("CodeRules[3]"));
+        cfg.code_rules.insert(
+            "3".into(),
+            CodeRule { prefer: vec![], fallback: "Ghost".into() },
+        );
+        assert!(cfg.validate().unwrap_err().contains("CodeRules[3]"));
+        // 空清单与重复目录。
+        cfg.folder_list = Vec::new();
+        assert!(cfg.validate().unwrap_err().contains("FolderList 为空"));
+        cfg.folder_list = vec!["African".into(), "African".into()];
+        assert!(cfg.validate().unwrap_err().contains("重复目录"));
+        // save_file 拦下同一类错误：校验失败不写盘。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rules/standard2.json");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let bad = "{\"FolderList\":[\"African\"],\"Ethnics\":{\"XXX\":\"Spain\"}}";
+        assert!(save_file(&p, bad).is_err());
+        assert!(!p.exists(), "校验失败不得写盘");
     }
 
     #[test]

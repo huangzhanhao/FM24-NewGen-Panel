@@ -16,19 +16,23 @@
   let editing = $state<ProviderConfig | null>(null);
   /** 展开编辑能力的模型下标（-1 = 全收起）；一次只展开一个，清单可能有十几个模型 */
   let expandedIdx = $state(-1);
-  /** Key 输入（不回显已存值）：非空＝保存时写入/替换；清空只走「清除」按钮。 */
+  /** Key 输入（不回显已存值）：非空＝保存时写入/替换。 */
   let keyInput = $state("");
+  /** 「清除 Key」的待提交标记：与弹窗其他编辑一致，点保存才真正写后端。 */
+  let keyCleared = $state(false);
   /** 当前编辑行是否已有 Key：新建行（id 尚未生成）恒为 false。 */
   const keySet = $derived(!!editing?.id && !!imageaiStore.keysSet[editing.id]);
 
   function startEdit(p: ProviderConfig) {
     keyInput = "";
+    keyCleared = false;
     expandedIdx = -1;
     editing = $state.snapshot(p);
   }
 
   function startNew() {
     keyInput = "";
+    keyCleared = false;
     expandedIdx = -1;
     editing = blank();
   }
@@ -351,11 +355,14 @@
       editing.models = editing.models.filter((m) => m.model.trim());
       if (!editing.id) editing.id = `p-${crypto.randomUUID()}`;
       if (!editing.defaultModel && editing.models[0]) editing.defaultModel = editing.models[0].model;
-      // 配置先落盘（新建行此刻才拿到 id），再写 Key —— set_provider_key 按 id 找行，顺序不能反。
-      await saveProvider($state.snapshot(editing)); // config 整包写回 + 悬空回退见 store action
+      // 配置先落盘（新建行此刻才拿到 id），再写/清 Key —— set_provider_key 按 id 找行，顺序不能反。
       const key = keyInput.trim();
-      if (key && editing.kind !== "localcomfyui") await setProviderKey(editing.id, key);
+      const needsKey = editing.kind !== "localcomfyui";
+      await saveProvider($state.snapshot(editing)); // config 整包写回 + 悬空回退见 store action
+      if (needsKey && key) await setProviderKey(editing.id, key);
+      else if (needsKey && keyCleared) await setProviderKey(editing.id, "");
       keyInput = "";
+      keyCleared = false;
       await message(t.gen.providerSaved, { title: t.dialog.info });
       editing = null;
     } catch (e) {
@@ -363,21 +370,10 @@
     }
   }
 
-  /** 清除某服务商的 Key：后端把该行密文置空，前端同步「未设置」；不可撤销，先确认。 */
-  async function clearKey() {
-    if (!editing?.id) return;
-    if (
-      !(await confirm(t.gen.keyClearConfirm(editing.name || editing.id), {
-        title: t.dialog.warning,
-      }))
-    )
-      return;
-    try {
-      await setProviderKey(editing.id, "");
-      keyInput = "";
-    } catch (e) {
-      await showError(e);
-    }
+  /** 只翻转待清除标记：真正的清空在保存时执行，点「返回」即随其他编辑一起丢弃。 */
+  function toggleKeyClear() {
+    keyCleared = !keyCleared;
+    if (keyCleared) keyInput = "";
   }
 
   async function onDelete(p: ProviderConfig) {
@@ -486,10 +482,17 @@
                   type="password"
                   autocomplete="off"
                   bind:value={keyInput}
-                  placeholder={keySet ? t.gen.keyBarSetPlaceholder : t.gen.keyBarPlaceholder}
+                  placeholder={keyCleared
+                    ? t.gen.keyWillClear
+                    : keySet
+                      ? t.gen.keyBarSetPlaceholder
+                      : t.gen.keyBarPlaceholder}
+                  oninput={() => (keyCleared = false)}
                 />
                 {#if keySet}
-                  <button class="btn sm" onclick={clearKey}>{t.gen.keyClear}</button>
+                  <button class="btn sm" onclick={toggleKeyClear}>
+                    {keyCleared ? t.gen.keyClearUndo : t.gen.keyClear}
+                  </button>
                 {:else}
                   <span class="f-hint">{t.gen.keyStatusUnset}</span>
                 {/if}

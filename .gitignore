@@ -72,4 +72,3 @@ $RECYCLE.BIN/
 .env.development
 .env.production
 docs/architecture
-src-tauri/rustfmt.toml

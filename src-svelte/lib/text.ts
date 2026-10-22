@@ -328,8 +328,8 @@ const zhCN = {
     keyBarSetPlaceholder: "已设置（不回显）；输入新值即替换",
     keyStatusUnset: "未设置",
     keyClear: "清除 Key",
-    keyClearConfirm: (name: string) =>
-      `清除「${name}」的 API Key？清除后需重新输入才能生成。`,
+    keyClearUndo: "撤销清除",
+    keyWillClear: "保存后将清除该服务商的 Key（点右侧可撤销）",
     baseUrl: "接口地址 Base URL",
     /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
      *  地域必须与模型、API Key 一致，跨地域直接失败。 */
@@ -1037,8 +1037,8 @@ const zhTW: Dict = {
     keyBarSetPlaceholder: "已設定（不回顯）；輸入新值即替換",
     keyStatusUnset: "未設定",
     keyClear: "清除 Key",
-    keyClearConfirm: (name: string) =>
-      `清除「${name}」的 API Key？清除後需重新輸入才能生成。`,
+    keyClearUndo: "撤銷清除",
+    keyWillClear: "儲存後將清除該服務商的 Key（點右側可撤銷）",
     baseUrl: "介面位址 Base URL",
     /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
      *  地域必须与模型、API Key 一致，跨地域直接失败。 */
@@ -1768,8 +1768,8 @@ const en: Dict = {
     keyBarSetPlaceholder: "Set (not shown again); enter a new value to replace it",
     keyStatusUnset: "Not set",
     keyClear: "Clear key",
-    keyClearConfirm: (name: string) =>
-      `Clear the API key of "${name}"? You must enter it again before generating.`,
+    keyClearUndo: "Undo clear",
+    keyWillClear: "The key will be cleared after saving (click again to undo)",
     baseUrl: "Base URL",
     /** 百炼基址的官方口径：公共域仍可用，业务空间专属域是官方建议迁移的新域名；
      *  地域必须与模型、API Key 一致，跨地域直接失败。 */

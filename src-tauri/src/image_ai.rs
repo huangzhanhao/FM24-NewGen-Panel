@@ -44,7 +44,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// 该协议是否需要 API Key（仅存活于会话内存）。本地 ComfyUI 无鉴权；后端两道 Key 门
+    /// 该协议是否需要 API Key。本地 ComfyUI 无鉴权；后端两道 Key 门
     /// （generate_image / start_queue）与前端就绪度判据同用本口径。
     pub fn needs_key(self) -> bool {
         !matches!(self, ProviderKind::LocalComfyUI)
@@ -1645,7 +1645,7 @@ fn round_corners(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// # 参数
 /// - `data_dir`：应用数据目录（`.imgtmp` 与 `gallery.json` 都在其下）；
 /// - `cfg`：生效配置（服务商/模型与两道淘汰闸门上限取自此处）；
-/// - `key`：API Key，仅存活于会话内存、不落盘（本地 ComfyUI 免鉴权，传空串）；
+/// - `key`：API Key 明文，只在本会话内存（密文随服务商行落盘；本地 ComfyUI 免鉴权，传空串）；
 /// - `req`：生成请求；本函数回填内部字段 base_url、caps 并门控 call_mode；
 /// - `progress`：阶段回调（提交/轮询/下载），适配器按序上报、本层只透传。
 pub async fn generate(

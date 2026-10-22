@@ -177,7 +177,7 @@
   <!-- ② 主工作区：左栏 = 球员源单人档案卡 + 常驻生成队列卡（占其下方空白），右栏 = 生成设置 / 结果 -->
   <div class="wb-grid">
     <div class="wb-left">
-      <!-- 数据源卡的「生成」走同一条 onGenerate：未提交 Key 先串行提交，错误进右栏内联条 -->
+      <!-- 数据源卡的「生成」走同一条 onGenerate，错误进右栏内联条 -->
       <SourcePlayerCard ongenerate={() => onGenerate()} />
       <QueueDock />
     </div>

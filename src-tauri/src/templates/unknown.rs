@@ -2,7 +2,7 @@
 //! 这两种布局**不是标准**——它们没有目录组织约定可循，也没有 json 规则文件；
 //! 抽图逻辑 = 把包内所有子/孙目录（含根）的图片归入一个大池，完全随机抽。
 //! 对外的标准号映射（Empty → 1、Unknown → 0）只在 `PackLayout::standard()` 一处。
-use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools};
+use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools, SkipReason};
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,16 +11,25 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 选中的 dir 原样写入映射（可空、可多级），config.xml 的 from 即相对路径。
 pub struct UnknownRule {
     pools: Pools,
+    /// 构造时的池内图数：区分「池本来就空」与「禁重复下被摘干」两种 None 成因。
+    initial_total: usize,
+    /// 最近一次 None 的成因（只在 pick 返回 None 后被读，初始值无意义）。
+    last_skip: SkipReason,
 }
 
 impl UnknownRule {
     /// 用递归全池（`scan.recursive_pools`）构造；`pick` 把全池展平后随机取图，传引用避免二次克隆。
     pub fn new(recursive_pools: &BTreeMap<String, BTreeSet<String>>) -> Self {
-        let pools = recursive_pools
+        let pools: Pools = recursive_pools
             .iter()
             .map(|(dir, stems)| (dir.clone(), sorted_unique(stems.iter().cloned())))
             .collect();
-        Self { pools }
+        let initial_total = pools.values().map(|s| s.len()).sum();
+        Self {
+            pools,
+            initial_total,
+            last_skip: SkipReason::EmptyPack,
+        }
     }
 }
 
@@ -32,7 +41,19 @@ impl PickRule for UnknownRule {
     }
 
     fn pick(&mut self, _player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
-        pick_from_pools_flat(&mut self.pools, duplicates)
+        let img = pick_from_pools_flat(&mut self.pools, duplicates);
+        if img.is_none() {
+            self.last_skip = if self.initial_total == 0 {
+                SkipReason::EmptyPack
+            } else {
+                SkipReason::PoolExhausted
+            };
+        }
+        img
+    }
+
+    fn last_skip_reason(&self) -> SkipReason {
+        self.last_skip
     }
 }
 
@@ -83,7 +104,8 @@ mod tests {
         }
         assert_eq!(seen, sset(&["r1", "A/x1", "A/x2", "A/sub/d1"]));
         assert!(rule.pick(&player("r-1", "ZZZ", "1"), false).is_none()); // 池耗尽
-                                                                         // 禁重复剔除按全路径：A/x1 与孙目录 d1 被占用后不再出现，其余仍在（重置池后验证）。
+        assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
+        // 禁重复剔除按全路径：A/x1 与孙目录 d1 被占用后不再出现，其余仍在（重置池后验证）。
         let mut rule = UnknownRule::new(&pools_fixture());
         rule.exclude_used(&sset(&["A/x1", "A/sub/d1"]));
         assert_eq!(rule.pools["A"], vset(&["x2"]));
@@ -91,10 +113,11 @@ mod tests {
         assert_eq!(rule.pools.get("").unwrap(), &vset(&["r1"]));
     }
 
-    /// 空包（Empty）走的是同一套规则：池为空 → 每个球员都跳过。
+    /// 空包（Empty）走的是同一套规则：池为空 → 每个球员都跳过，成因 = 整包无图。
     #[test]
     fn unknown_empty_pack_skips_every_player() {
         let mut rule = UnknownRule::new(&BTreeMap::from([(String::new(), BTreeSet::new())]));
         assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
     }
 }

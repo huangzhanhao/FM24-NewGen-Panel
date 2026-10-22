@@ -3,7 +3,7 @@
 //! 【为什么这个标准没有 json 规则文件】它没有任何可配数据：布局判定靠"无子目录 + 根目录有图"，
 //! 抽图靠单一根池。所以 `RuleConfig` 里没有它的字段，`folder_lists()` 里也没有它，
 //! `IMPLEMENTED_STANDARDS` 的拦截同样不经过它（那个拦截只针对 `PackLayout::Standard`）。
-use super::{sorted_unique, PickRule, PickedImage};
+use super::{sorted_unique, PickRule, PickedImage, SkipReason};
 use crate::rtf_scanner::PlayerRecord;
 use rand::Rng;
 use std::collections::BTreeSet;
@@ -12,13 +12,20 @@ use std::collections::BTreeSet;
 /// 池用有序 `Vec`：随机下标直取 O(1)、禁重复 `swap_remove` 也是 O(1)（理由见 templates::Pools）。
 pub struct Standard1Rule {
     pool: Vec<String>,
+    /// 构造时的池内图数：区分「池本来就空」与「禁重复下被摘干」两种 None 成因。
+    initial_total: usize,
+    /// 最近一次 None 的成因（只在 pick 返回 None 后被读，初始值无意义）。
+    last_skip: SkipReason,
 }
 
 impl Standard1Rule {
     /// 用包根图片池（`scan.root_images`）构造，传引用避免二次克隆。
     pub fn new(pool: &BTreeSet<String>) -> Self {
+        let pool = sorted_unique(pool.iter().cloned());
         Self {
-            pool: sorted_unique(pool.iter().cloned()),
+            initial_total: pool.len(),
+            pool,
+            last_skip: SkipReason::EmptyPack,
         }
     }
 }
@@ -31,6 +38,11 @@ impl PickRule for Standard1Rule {
 
     fn pick(&mut self, _player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
         if self.pool.is_empty() {
+            self.last_skip = if self.initial_total == 0 {
+                SkipReason::EmptyPack
+            } else {
+                SkipReason::PoolExhausted
+            };
             return None;
         }
         let idx = rand::rng().random_range(0..self.pool.len());
@@ -44,6 +56,10 @@ impl PickRule for Standard1Rule {
             dir: String::new(),
             stem,
         })
+    }
+
+    fn last_skip_reason(&self) -> SkipReason {
+        self.last_skip
     }
 }
 
@@ -86,9 +102,17 @@ mod tests {
     }
 
     #[test]
-    fn standard1_empty_pool_skips_every_player() {
+    fn standard1_skip_reasons_distinguish_empty_pack_from_exhausted() {
+        // 池本来就空（包根无图）→ EmptyPack。
         let mut rule = Standard1Rule::new(&BTreeSet::new());
         assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
         assert!(rule.pick(&player("r-1", "ESP", "1"), false).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
+        // 池有图但禁重复摘干 → PoolExhausted。
+        let mut rule = Standard1Rule::new(&sset(&["a"]));
+        assert!(rule.pick(&player("r-2", "ESP", "1"), false).is_some());
+        assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
     }
 }

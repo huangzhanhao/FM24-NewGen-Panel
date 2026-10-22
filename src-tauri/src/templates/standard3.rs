@@ -6,7 +6,7 @@
 //! 规则块的键有三类：国籍三字码（国家级块）、目录名（族群/群组块）、`_DEFAULT_`（全局块）。
 //! 每条规则有四种形态：`"default"`（归属者自己的目录）、`directly`（单一目录）、
 //! `random`（等概率多选一）、`randomWithWeight`（按权重多选一）。
-use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools, RuleFile};
+use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools, RuleFile, SkipReason};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -362,6 +362,14 @@ pub struct Standard3Rule {
     rule_dirs: BTreeSet<String>,
     cfg: Standard3Config, // 构造时只拿自己这份配置
     fallback: Fallback,
+    /// 构造时的全池图数：区分「池本来就空」与「禁重复下被摘干」两种 None 成因。
+    initial_total: usize,
+    /// 最近一次 None 的成因（只在 pick 返回 None 后被读，初始值无意义）。
+    last_skip: SkipReason,
+    /// 候选目录不可用、改从本国基础池取图的次数（stats 键 "owner_fallback"）。
+    owner_fallbacks: usize,
+    /// 候选与本国目录都不可用、经全池兜底取图的次数（stats 键 "pool_fallback"）。
+    pool_fallbacks: usize,
 }
 
 impl Standard3Rule {
@@ -380,6 +388,7 @@ impl Standard3Rule {
             .collect();
         // 根键兜底：扫描侧恒会写入 "" 键（无根图时为空集），这里补一次是为了不依赖该前提。
         pools.entry(String::new()).or_default();
+        let initial_total = pools.values().map(|s| s.len()).sum();
         let rule_dirs: BTreeSet<String> = cfg
             .folder_list
             .iter()
@@ -391,6 +400,10 @@ impl Standard3Rule {
             rule_dirs,
             fallback: cfg.fallback,
             cfg: cfg.clone(),
+            initial_total,
+            last_skip: SkipReason::EmptyPack,
+            owner_fallbacks: 0,
+            pool_fallbacks: 0,
         }
     }
 
@@ -472,14 +485,43 @@ impl PickRule for Standard3Rule {
         }
         if let Some(owner) = &res.owner_folder {
             if let Some(img) = self.take_from(owner, duplicates) {
+                // 走到这里说明候选目录没出图（缺失/为空/被抽空），属于第一级回落。
+                self.owner_fallbacks += 1;
                 return Some(img);
             }
         }
         match self.fallback {
             // 兜底从同一份全池抽：已摘除的图天然不会再发出，无需同步。
-            Fallback::Random => pick_from_pools_flat(&mut self.pools, duplicates),
-            Fallback::Skip => None,
+            Fallback::Random => {
+                let img = pick_from_pools_flat(&mut self.pools, duplicates);
+                match &img {
+                    Some(_) => self.pool_fallbacks += 1,
+                    None => {
+                        self.last_skip = if self.initial_total == 0 {
+                            SkipReason::EmptyPack
+                        } else {
+                            SkipReason::PoolExhausted
+                        };
+                    }
+                }
+                img
+            }
+            Fallback::Skip => {
+                self.last_skip = SkipReason::RuleSkip;
+                None
+            }
         }
+    }
+
+    fn last_skip_reason(&self) -> SkipReason {
+        self.last_skip
+    }
+
+    fn stats(&self) -> Vec<(&'static str, usize)> {
+        vec![
+            ("owner_fallback", self.owner_fallbacks),
+            ("pool_fallback", self.pool_fallbacks),
+        ]
     }
 }
 
@@ -741,6 +783,8 @@ mod tests {
         let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
         assert_eq!(img.dir, "Spain", "应回退到 Ethnics[ESP]");
         assert_eq!(img.stem, "sp1");
+        // 第一级回落要对上层可见：stats 累计一次「候选目录不可用改走本国基础池」。
+        assert_eq!(rule.stats(), vec![("owner_fallback", 1), ("pool_fallback", 0)]);
     }
 
     #[test]
@@ -750,14 +794,33 @@ mod tests {
         cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default().insert("1".into(), MappingRule::Directly("NorthernSA".into()));
         let faces_map: BTreeMap<String, BTreeSet<String>> =
             BTreeMap::from([("Anglosphere".into(), sset(&["an1"]))]);
-        // random：从递归全池抽到图（目录可以不是 Spain）。
+        // random：从递归全池抽到图（目录可以不是 Spain）；stats 累计一次全池兜底。
         let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
         let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
         assert_eq!(img.dir, "Anglosphere");
-        // skip：直接不给映射。
+        assert_eq!(rule.stats(), vec![("owner_fallback", 0), ("pool_fallback", 1)]);
+        // skip：直接不给映射，成因 = 规则主动跳过。
         cfg.fallback = Fallback::Skip;
         let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
         assert!(rule.pick(&player("r-2", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::RuleSkip);
+    }
+
+    #[test]
+    fn standard3_skip_reasons_distinguish_empty_pack_from_exhausted() {
+        let cfg = RuleConfig::builtin().standard3;
+        // 全池本来就空（包里一张图都没有）→ EmptyPack。
+        let empty: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut rule = Standard3Rule::new(&empty, &recursive(&empty), &cfg);
+        assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
+        // 池有图但禁重复摘干：Spain 仅一张，抽走后候选与本国目录同池已空、全池也空 → PoolExhausted。
+        let faces_map: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("Spain".into(), sset(&["sp1"]))]);
+        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
+        assert!(rule.pick(&player("r-2", "ESP", "1"), false).is_some());
+        assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! 抽图逻辑 = 国籍查表（json `Ethnics`）→ 种族码修正（json `CodeRules`）→ 池优先级 → 随机抽图。
 //! 规则全部来自 `assets/standard2.json`（内置默认）与 `data/rules/standard2.json`（用户可编辑），
 //! 本模块不硬编码任何目录名或码表。
-use super::{filter_pools, pick_from_pools_flat, PickRule, PickedImage, Pools, RuleFile};
+use super::{filter_pools, pick_from_pools_flat, PickRule, PickedImage, Pools, RuleFile, SkipReason};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -119,14 +119,25 @@ pub fn apply_code_rule(
 pub struct Standard2Rule {
     pools: Pools,
     cfg: Standard2Config, // 构造时只拿自己这份配置，之后不再看其他标准
+    /// 构造时的池内图数：区分「池本来就空」与「禁重复下被摘干」两种 None 成因。
+    initial_total: usize,
+    /// 最近一次 None 的成因（只在 pick 返回 None 后被读，初始值无意义）。
+    last_skip: SkipReason,
+    /// 目标目录不可用、改从全池回落取图的次数（stats 键 "target_dir_fallback"）。
+    fallback_picks: usize,
 }
 
 impl Standard2Rule {
     /// 按配置的 FolderList 过滤出抽图池（清单外目录与空目录都不进池）。
     pub fn new(faces_map: &BTreeMap<String, BTreeSet<String>>, cfg: &Standard2Config) -> Self {
+        let pools = filter_pools(faces_map, &cfg.folder_list);
+        let initial_total = pools.values().map(|s| s.len()).sum();
         Self {
-            pools: filter_pools(faces_map, &cfg.folder_list),
+            pools,
             cfg: cfg.clone(),
+            initial_total,
+            last_skip: SkipReason::EmptyPack,
+            fallback_picks: 0,
         }
     }
 
@@ -187,16 +198,38 @@ impl PickRule for Standard2Rule {
         } else {
             self.cfg.ethnics.get(&player.sec_nat).map(|s| s.as_str())
         };
-        let e1 = self.cfg.ethnics.get(&player.primary_nat)?;
+        let Some(e1) = self.cfg.ethnics.get(&player.primary_nat) else {
+            self.last_skip = SkipReason::NoNationRule;
+            return None;
+        };
         let ethnicity = apply_code_rule(&player.ethnicity_code, e1, e2, &self.cfg.code_rules);
         let dirs = self.image_pool_dirs(&ethnicity, &player.primary_nat);
         // 目标目录不可用（包里没建、或禁重复下已被抽空）时回落到全部目录，
         // 与标准三「候选 → 归属者 → 全池」同口径：包里还有图就给出映射，而不是静默跳过。
         // 回落范围仍在 FolderList 之内 —— 本标准的池只有清单内目录，包外目录进不来。
         let Some((dir, stem)) = self.pick_image_from_pools(&dirs, duplicates) else {
-            return pick_from_pools_flat(&mut self.pools, duplicates);
+            let img = pick_from_pools_flat(&mut self.pools, duplicates);
+            match &img {
+                Some(_) => self.fallback_picks += 1,
+                None => {
+                    self.last_skip = if self.initial_total == 0 {
+                        SkipReason::EmptyPack
+                    } else {
+                        SkipReason::PoolExhausted
+                    };
+                }
+            }
+            return img;
         };
         Some(PickedImage { dir, stem })
+    }
+
+    fn last_skip_reason(&self) -> SkipReason {
+        self.last_skip
+    }
+
+    fn stats(&self) -> Vec<(&'static str, usize)> {
+        vec![("target_dir_fallback", self.fallback_picks)]
     }
 }
 
@@ -270,14 +303,33 @@ mod tests {
         let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
         assert_eq!(img.dir, "SpanMed");
         assert!(["s1", "s2"].contains(&img.stem.as_str()));
-        // 未配置国籍（内置表查不到）→ 球员跳过。
+        // 未配置国籍（内置表查不到）→ 球员跳过，成因 = 国籍无映射。
         assert!(rule.pick(&player("r-2", "ZZZ", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::NoNationRule);
         // 目标目录缺失（African 未建）→ 回落到池内其余目录，不再静默跳过该球员。
         let img = rule.pick(&player("r-3", "NGA", "3"), true).unwrap();
         assert!(
             ["SpanMed", "Caucasian"].contains(&img.dir.as_str()),
             "回落抽到了池外目录 {img:?}"
         );
+        // 回落要对上层可见：stats 累计一次「目标目录不可用改走全池」。
+        assert_eq!(rule.stats(), vec![("target_dir_fallback", 1)]);
+    }
+
+    #[test]
+    fn standard2_skip_reasons_distinguish_empty_pack_from_exhausted() {
+        // 池本来就空（清单内目录都没建/全空）→ EmptyPack。
+        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut rule = Standard2Rule::new(&faces_map, &RuleConfig::builtin().standard2);
+        assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
+        // 池有图但禁重复摘干：SpanMed 仅一张，第二次目标目录已空、全池也空 → PoolExhausted。
+        let faces_map: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("SpanMed".into(), sset(&["s1"]))]);
+        let mut rule = Standard2Rule::new(&faces_map, &RuleConfig::builtin().standard2);
+        assert!(rule.pick(&player("r-2", "ESP", "1"), false).is_some());
+        assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
     }
 
     #[test]

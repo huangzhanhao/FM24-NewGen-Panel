@@ -39,6 +39,23 @@ pub struct PickedImage {
     pub stem: String,
 }
 
+/// 一名球员没抽到图（`pick` 返回 None）的成因：face_mapper 按它分组记日志。
+/// 不同成因的处置完全不同（改规则文件 / 改兜底策略 / 常规结局 / 换头像包），
+/// 混在一句固定文案里只会把排查的人带偏。
+/// 【目标目录缺失或为空不在其中】那已不再导致跳过：规则会先回落到他处取图，
+/// 由 `stats()` 的回落计数承载（见 face_mapper 的汇总日志）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SkipReason {
+    /// 国籍不在规则的 Ethnics 表内（规则的国籍映射缺失）。
+    NoNationRule,
+    /// 规则主动放弃该球员（标准三 Fallback::Skip）。
+    RuleSkip,
+    /// 禁重复模式下图片池被抽干（包里有图、但已发完）。
+    PoolExhausted,
+    /// 池内一张图都没有（空包 / 该标准口径下无可用目录）。
+    EmptyPack,
+}
+
 /// 抽图规则统一接口：每个标准一套实现。pick 不带 config 参数 ——
 /// 各规则构造时只拿自己那份配置，整套行为封闭在自己的文件里，读一个文件即知全部逻辑。
 pub trait PickRule {
@@ -47,6 +64,15 @@ pub trait PickRule {
     fn exclude_used(&mut self, used: &BTreeSet<String>);
     /// 为一名球员抽图；返回 None 表示该球员无法映射（跳过）。
     fn pick(&mut self, player: &PlayerRecord, duplicates: bool) -> Option<PickedImage>;
+    /// 最近一次 `pick` 返回 None 的成因（规则在 None 分支顺手记录；调用方只在拿到 None 时读）。
+    /// 无默认实现：新增规则必须显式回答「为什么跳过」，不许退回一句含混文案。
+    fn last_skip_reason(&self) -> SkipReason;
+    /// 本轮抽图的内部统计（事件名 → 次数，如目标目录不可用改走他处的回落计数）：
+    /// 选图内部过程对上层不可见，映射结束后由 face_mapper 一次性汇总落日志。
+    /// 默认空：没有内部回落概念的规则（标准一 / Unknown 布局）。
+    fn stats(&self) -> Vec<(&'static str, usize)> {
+        Vec::new()
+    }
 }
 
 /// 全部标准规则的集合。字段名与标准号一一对应（standardN）。

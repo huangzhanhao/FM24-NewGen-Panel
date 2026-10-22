@@ -8,12 +8,12 @@
 //!
 //! 【日志】关键处置经 `LogSink` 记录（模块名 facemap），一律记**上层看不到的内部信息**，
 //! 不与 replace_flow 的阶段日志重复：现有映射的读取结果与失败原因（原本被 `unwrap_or_default`
-//! 静默吞掉）、Preserve 的补漏人数与池剔除张数、以及未抽到图的球员清单（用户「某某还是原脸」
-//! 的第一手线索）。
+//! 静默吞掉）、Preserve 的补漏人数与池剔除张数、未抽到图的球员清单按成因分组（用户「某某还是原脸」
+//! 的第一手线索）、以及选图规则的回落统计（这批脸为什么看着不对的第一手线索）。
 use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::LogSink;
 use crate::rtf_scanner::PlayerRecord;
-use crate::templates::{self, PickRule, RuleConfig};
+use crate::templates::{self, PickRule, RuleConfig, SkipReason};
 use crate::xml_parser::{self, MappingEntry};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -202,7 +202,7 @@ impl FaceMapper {
         // 【xml_data 按值交出】Preserve/Overwrite 都要把「旧映射原样带回」，把所有权传下去后即可
         // 直接 `into_values()` 搬进结果 Vec；沿用 & 引用就必须 `values().cloned()` 整表克隆一遍
         // （15 万条实测约 0.1 s，纯白复制）。上面的 exclude_used 只借用了一次，此处移动不冲突。
-        match mode {
+        let result = match mode {
             Mode::Preserve => {
                 self.process_preserve(rtf_data, xml_data, duplicates, cancel, progress, logger)
             }
@@ -210,7 +210,12 @@ impl FaceMapper {
                 self.process_overwrite(rtf_data, xml_data, duplicates, cancel, progress, logger)
             }
             Mode::Generate => self.process_generate(rtf_data, duplicates, cancel, progress, logger),
+        };
+        // 取消（None）时回落计数只跑了一半，打出来只会误导，故只在跑完全程时汇总。
+        if result.is_some() {
+            report_rule_stats(&*self.rule, logger);
         }
+        result
     }
 
     /// Preserve：跳过 XML 已存在的 UID，只给新球员建映射，旧映射原样保留。
@@ -243,14 +248,14 @@ impl FaceMapper {
                 total
             ),
         );
-        let mut skipped = Vec::new(); // 抽不到图的 UID（汇总见 report_skipped）
+        let mut skipped = Vec::new(); // 抽不到图的球员（汇总见 report_skipped）
         for (i, p) in targets.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 return None; // 逐项检查取消，及时中断
             }
             match self.build_player_mapping(p, duplicates) {
                 Some(m) => mapping.push(m),
-                None => skipped.push(p.uid.clone()),
+                None => skipped.push(SkippedPlayer::of(p, self.rule.last_skip_reason())),
             }
             progress(MapStep::Players, i + 1, total);
         }
@@ -272,7 +277,7 @@ impl FaceMapper {
     ) -> Option<Vec<MappingEntry>> {
         let mut rest = xml_data; // 直接接管旧映射的所有权，逐个剔除名单内的（不再整表克隆一份）
         let mut mapping = Vec::new();
-        let mut skipped = Vec::new(); // 抽不到图的 UID（汇总见 report_skipped）
+        let mut skipped = Vec::new(); // 抽不到图的球员（汇总见 report_skipped）
         let total = rtf_data.len();
         for (i, p) in rtf_data.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
@@ -283,7 +288,7 @@ impl FaceMapper {
                 rest.remove(&p.uid); // 名单内球员全部重抽（从 rest 中移除旧的）
             } else {
                 // 【为什么不删掉旧的】重抽失败就保留他原本的映射，至少不会把已换好的人打回原脸。
-                skipped.push(p.uid.clone());
+                skipped.push(SkippedPlayer::of(p, self.rule.last_skip_reason()));
             }
             progress(MapStep::Players, i + 1, total);
         }
@@ -316,7 +321,7 @@ impl FaceMapper {
         logger: &impl LogSink,
     ) -> Option<Vec<MappingEntry>> {
         let mut mapping = Vec::new();
-        let mut skipped = Vec::new(); // 抽不到图的 UID（汇总见 report_skipped）
+        let mut skipped = Vec::new(); // 抽不到图的球员（汇总见 report_skipped）
         let total = rtf_data.len();
         // 【Generate 的副作用要说在前面】它从零生成、结果整份写回 config.xml：现有映射里**不在本名单
         // 中**的条目（退役/转会走的球员）会被直接丢弃。这一点上层看不见（replace_flow 只报最终条数），
@@ -339,7 +344,7 @@ impl FaceMapper {
             }
             match self.build_player_mapping(p, duplicates) {
                 Some(m) => mapping.push(m),
-                None => skipped.push(p.uid.clone()),
+                None => skipped.push(SkippedPlayer::of(p, self.rule.last_skip_reason())),
             }
             progress(MapStep::Players, i + 1, total);
         }
@@ -361,32 +366,104 @@ impl FaceMapper {
     }
 }
 
-/// 汇总「抽不到图」的球员：一行 WARN 报总数 + 至多 SKIP_LOG_MAX 个 UID（对等 rtf_scanner 的丢行日志口径）。
+/// 一名没抽到图的球员：UID + 姓名/国籍/种族码 + 成因。
+/// 【为什么带姓名】用户手里有的是名单上的姓名，日志只给裸 UID 根本对不上号。
+struct SkippedPlayer {
+    uid: String,
+    name: String,
+    nat: String,
+    code: String,
+    reason: SkipReason,
+}
+
+impl SkippedPlayer {
+    fn of(p: &PlayerRecord, reason: SkipReason) -> Self {
+        Self {
+            uid: p.uid.clone(),
+            name: p.name.clone(),
+            nat: p.primary_nat.clone(),
+            code: p.ethnicity_code.clone(),
+            reason,
+        }
+    }
+
+    /// 日志样例格式：`UID 姓名（国籍/种族码）`。
+    fn label(&self) -> String {
+        format!("{} {}（{}/{}）", self.uid, self.name, self.nat, self.code)
+    }
+}
+
+/// 汇总「抽不到图」的球员：按成因分组，每组一条 WARN 报总数 + 至多 SKIP_LOG_MAX 个样例
+/// （对等 rtf_scanner 的丢行日志口径）。
 /// 【为什么不逐条报】「池耗尽」是大名单 + 禁重复时的常规结局，几百上千条 WARN 会把日志刷爆，
-/// 而用户真正要的是「有多少人没图、从哪几个开始断的」——一条带样例的汇总就够。
-fn report_skipped(skipped: &[String], logger: &impl LogSink) {
+/// 而用户真正要的是「有多少人没图、因为什么、从哪几个开始断的」——分组带样例的汇总就够。
+/// 【为什么分组】不同成因的处置完全不同（改规则 / 改兜底策略 / 常规结局 / 换头像包），
+/// 一句固定文案只会把排查的人带偏。
+fn report_skipped(skipped: &[SkippedPlayer], logger: &impl LogSink) {
     if skipped.is_empty() {
         return;
     }
-    let head: Vec<&str> = skipped
-        .iter()
-        .take(SKIP_LOG_MAX)
-        .map(String::as_str)
+    let mut groups: std::collections::BTreeMap<SkipReason, Vec<&SkippedPlayer>> =
+        std::collections::BTreeMap::new();
+    for s in skipped {
+        groups.entry(s.reason).or_default().push(s);
+    }
+    for (reason, group) in groups {
+        let head: Vec<String> = group.iter().take(SKIP_LOG_MAX).map(|s| s.label()).collect();
+        let tail = if group.len() > SKIP_LOG_MAX {
+            format!(" 等 {} 名", group.len())
+        } else {
+            String::new()
+        };
+        let samples = format!("{}{}", head.join("、"), tail);
+        let msg = match reason {
+            SkipReason::NoNationRule => format!(
+                "{} 名球员因国籍未配置在规则的 Ethnics 表内而被跳过\
+                 （在「标准规则」里补配该国国籍后重跑即可配图）：{samples}",
+                group.len()
+            ),
+            SkipReason::RuleSkip => format!(
+                "{} 名球员因标准三兜底策略为「跳过」而未配图\
+                 （目标目录在头像包内不可用；把规则 Fallback 改为 random 可改为全池取图）：{samples}",
+                group.len()
+            ),
+            SkipReason::PoolExhausted => format!(
+                "{} 名球员没抽到图：禁重复模式下图片池已抽干\
+                 （大名单下的常规结局；需要全覆盖可勾选「允许复用」）：{samples}",
+                group.len()
+            ),
+            SkipReason::EmptyPack => format!(
+                "{} 名球员没抽到图：头像包内没有可用图片（请核对头像包目录是否选对）：{samples}",
+                group.len()
+            ),
+        };
+        logger.warn("facemap", msg);
+    }
+}
+
+/// 抽图回落汇总：选图规则内部的回落（首选目录不可用、改走他处取图）对上层本来不可见，
+/// 映射结束后一次性亮出计数。回落是设计内行为、不算异常，所以用 INFO；
+/// 但量级异常时（如整包目录缺失）这条就是「这批脸为什么看着不对」的第一手线索。
+fn report_rule_stats(rule: &dyn PickRule, logger: &impl LogSink) {
+    let parts: Vec<String> = rule
+        .stats()
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(k, n)| format!("{} {n} 名", stat_label(k)))
         .collect();
-    let tail = if skipped.len() > SKIP_LOG_MAX {
-        format!(" 等 {} 名", skipped.len())
-    } else {
-        String::new()
-    };
-    logger.warn(
-        "facemap",
-        format!(
-            "{} 名球员没抽到图（目标种族目录缺图或图片池已耗尽），已跳过：{}{}",
-            skipped.len(),
-            head.join("、"),
-            tail
-        ),
-    );
+    if !parts.is_empty() {
+        logger.info("facemap", format!("抽图回落统计：{}", parts.join("，")));
+    }
+}
+
+/// stats 事件名 → 中文短语（未知键原样透出：新规则忘了登记也不至于丢信息）。
+fn stat_label(key: &str) -> &str {
+    match key {
+        "target_dir_fallback" => "目标目录不可用、改从全池取图",
+        "owner_fallback" => "候选目录不可用、改从本国基础池取图",
+        "pool_fallback" => "候选与本国目录均不可用、经全池兜底取图",
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -783,6 +860,43 @@ mod tests {
         assert_eq!(skip.level, "WARNING");
         assert_eq!(skip.module, "facemap");
         assert!(skip.message.contains("2 名球员"), "{:?}", skip.message);
+        // P4：样例必须带姓名与国籍/种族码，不是裸 UID。
+        assert!(
+            skip.message.contains("r-407 T（ESP/1）"),
+            "样例格式应为 UID 姓名（国籍/码）：{:?}",
+            skip.message
+        );
+    }
+
+    #[test]
+    fn fallback_stats_are_logged_after_full_run() {
+        // 标准二子集包只建 SpanMed（判 fixable）：NGA 码 3 的目标目录不可用，
+        // 回落到全池取图；跑完全程后日志必须有一行回落统计（此前回落完全无声）。
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().to_string_lossy().to_string();
+        let d = dir.path().join("SpanMed");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("s0.png"), b"png").unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
+        let (logger, log_rx) = ChannelLogger::channel();
+        let cancel = AtomicBool::new(false);
+        let mapping = mapper
+            .generate_mapping(
+                &[player("r-1", "NGA", "3")],
+                Mode::Generate,
+                true,
+                &cancel,
+                &mut |_, _, _| {},
+                &logger,
+            )
+            .unwrap();
+        assert_eq!(mapping.len(), 1, "缺目录不再跳过，应回落出图：{mapping:?}");
+        let logs: Vec<LogLine> = log_rx.try_iter().collect();
+        assert!(
+            logs.iter().any(|l| l.message.contains("抽图回落统计")
+                && l.message.contains("目标目录不可用、改从全池取图 1 名")),
+            "回落统计应落日志：{logs:?}"
+        );
     }
 
     #[test]

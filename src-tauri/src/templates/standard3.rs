@@ -6,7 +6,9 @@
 //! 规则块的键有三类：国籍三字码（国家级块）、目录名（族群/群组块）、`_DEFAULT_`（全局块）。
 //! 每条规则有四种形态：`"default"`（归属者自己的目录）、`directly`（单一目录）、
 //! `random`（等概率多选一）、`randomWithWeight`（按权重多选一）。
-use super::{pick_from_pools_flat, sorted_unique, PickRule, PickedImage, Pools, RuleFile, SkipReason};
+use super::{
+    pick_from_dirs, refill_into, sorted_unique, PickRule, PickedImage, Pools, RuleFile, SkipReason,
+};
 use crate::json_store;
 use crate::rtf_scanner::PlayerRecord;
 use crate::xml_parser::record_from;
@@ -26,9 +28,17 @@ const DEFAULT_BLOCK: &str = "_DEFAULT_";
 #[serde(rename_all = "PascalCase")]
 pub struct Standard3Config {
     #[serde(default)]
-    pub folder_list: Vec<String>,                 // "FolderList"：图像池目录清单（判定 + 池过滤基准）
+    pub folder_list: Vec<String>,                 // "FolderList"：图像池目录清单（判定 + 池过滤基准；含 `WF/x`、`Staff/r/male` 多级条目）
     #[serde(default)]
     pub ethnics: BTreeMap<String, String>,        // "Ethnics"：国籍三字码 → 本国基础池目录
+    // ↓ 三张「目录族映射表」：把男球员族裔目录换成本族目录。数据由 NG 四套出厂配置
+    //   （base_config{,_female,_staff,_staff_female}.json）逐国对齐后生成，可选键、前端不可见。
+    #[serde(default)]
+    pub folder_mapping_female: BTreeMap<String, Vec<String>>, // 男族裔目录 → 女球员目录（WF/<ethnic>）
+    #[serde(default)]
+    pub folder_mapping_staff: BTreeMap<String, Vec<String>>,  // 男族裔目录 → 职员区域（Staff/<region>）
+    #[serde(default)]
+    pub folder_mapping_staff_female: BTreeMap<String, String>, // 男职员区域 → 女职员区域（仅 4 条覆盖）
     #[serde(default)]
     pub default_codes: BTreeMap<String, Vec<u8>>, // "DefaultCodes"：国籍 → 种族码候选（透传，抽图不使用，见 resolve 文档）
     #[serde(default)]
@@ -180,15 +190,26 @@ pub struct Resolution {
 }
 
 impl Standard3Config {
-    /// 选规则块，优先级从高到低：① 国籍块 ② 族群块 ③ 全局默认块。
+    /// 三级链条的键序：① 国籍块 ② 族群块 ③ 全局默认块。
     /// 【为什么②不需要判断"是否属于某族群"】族群块的键就是目录名，而国籍块的键是三字码，
     /// 两者不可能相撞，所以直接拿 `Ethnics[国籍]` 去查表即可：命中就是族群块，没命中自然落到③。
-    fn rules_block(&self, nat: &str) -> Option<&BTreeMap<String, MappingRule>> {
-        if let Some(b) = self.ethnicity_mapping_rules.get(nat) { return Some(b); }
-        if let Some(base) = self.ethnics.get(nat) {
-            if let Some(b) = self.ethnicity_mapping_rules.get(base) { return Some(b); }
+    /// 【返回整条链而不是首个存在的块】缺码要能穿透，必须让调用方逐级试码；
+    /// `_DEFAULT_` 块缺失由 `validate()` 拦下，故③恒存在。
+    /// 【非数字码】如 NG 的 `_country_specific_default_`：查找时不消费（见 `skipped_codes`）。
+    fn rules_chain(&self, nat: &str) -> Vec<&BTreeMap<String, MappingRule>> {
+        let mut chain: Vec<&BTreeMap<String, MappingRule>> = Vec::new();
+        if let Some(b) = self.ethnicity_mapping_rules.get(nat) {
+            chain.push(b);
         }
-        self.ethnicity_mapping_rules.get(DEFAULT_BLOCK)
+        if let Some(base) = self.ethnics.get(nat) {
+            if let Some(b) = self.ethnicity_mapping_rules.get(base) {
+                chain.push(b);
+            }
+        }
+        if let Some(b) = self.ethnicity_mapping_rules.get(DEFAULT_BLOCK) {
+            chain.push(b);
+        }
+        chain
     }
 
     /// 解析 (国籍, 种族码) → 候选目录 + 归属者目录。
@@ -196,14 +217,22 @@ impl Standard3Config {
     /// `DefaultCodes` 是"该国 regen 可能落到哪些码"的清单，只在配置校验里用来对照，不做路由。
     pub fn resolve(&self, nat: &str, code: &str) -> Resolution {
         let owner_folder = self.ethnics.get(nat).cloned();
-        let candidates = self.rules_block(nat)
-            .and_then(|block| block.get(code))
-            .and_then(|rule| to_candidates(rule, owner_folder.as_deref()));
+        // 三级查找按「块 × 码」一起匹配：**块存在但缺该码 = 未命中，继续往下一级**。
+        // 【为什么不能先选定块再取码】NG 的真实规则表 33/50 个块缺码（`Rules[788]` 缺 9），
+        // 先定块会让这些行停在第一级、退回归属者目录，而对手语义是穿透到 `_DEFAULT_["9"]`。
+        let candidates = self.rules_chain(nat).into_iter().find_map(|block| {
+            block
+                .get(code)
+                .and_then(|rule| to_candidates(rule, owner_folder.as_deref()))
+        });
         Resolution { candidates, owner_folder }
     }
 
     /// 纯函数：按权重取候选下标（r ∈ [0,1)）。Σ 归一在函数内做，
-    /// 因此权重和是 99 还是 100 都不影响分布（实测配置里两种和都存在）。
+    /// 因此权重和是 99 还是 100 都不影响分布（本仓库内置 json 里两种和都存在：99×4、100×7）。
+    /// 【"99 或 100"只对内置 json 成立】NG 真实配置里 6 条加权规则的权重和是
+    /// 1 / 3 / 8 / 9 / 10 五种（如 `Rules[373] = {Mestizo:9, NorthernSA:1}` 和为 10）。
+    /// Σ 归一这条结论不受影响——它本来就不要求权重和等于任何定值。
     fn weighted_index(weights: &[f64], r: f64) -> usize {
         let sum: f64 = weights.iter().sum();
         if sum <= 0.0 || weights.is_empty() {
@@ -217,6 +246,51 @@ impl Standard3Config {
             rest -= *w;
         }
         weights.len() - 1 // 浮点累加误差兜底：落到最后一项
+    }
+
+    /// 规则表里那些**不是 `"0"`–`"10"` 的种族码**（NG 会写 `_country_specific_default_`）。
+    /// 它们不参与三级查找；单列出来是为了让 `validate()` 的 WARN 可测试。
+    pub(crate) fn skipped_codes(&self) -> Vec<(&String, &String)> {
+        self.ethnicity_mapping_rules
+            .iter()
+            .flat_map(|(key, block)| block.keys().map(move |code| (key, code)))
+            .filter(|(_, code)| !code.parse::<u8>().is_ok_and(|c| c <= 10))
+            .collect()
+    }
+
+    /// 把「男球员族裔目录」换成指定族的目标目录列表；映射表里没有 ⇒ 该族无对应目录。
+    /// 多值（如 `PacificIslanders` → `WF/Melanesia` / `WF/Polynesia` / `WF/African`）保留全部，
+    /// 由 `Candidates::Uniform` 等概率选一 —— 与 NG 的 `random` 动作同构。
+    /// 【女职员不跨性别取图】目标 `Staff/<region>/female` 缺失或为空时不回落男目录，
+    /// 该球员宁可走兜底，也不拿异性头像充数。
+    fn family_dirs(&self, male_dir: Option<&str>, family: FolderFamily) -> Vec<String> {
+        let Some(base) = male_dir else {
+            return Vec::new();
+        };
+        let regions = match family {
+            FolderFamily::PlayerFemale => {
+                return self.folder_mapping_female.get(base).cloned().unwrap_or_default()
+            }
+            // 男球员族由三级规则链自己决定，不走映射表。
+            FolderFamily::PlayerMale => return Vec::new(),
+            _ => match self.folder_mapping_staff.get(base) {
+                Some(v) => v,
+                None => return Vec::new(),
+            },
+        };
+        let female = family == FolderFamily::StaffFemale;
+        regions
+            .iter()
+            .map(|r| {
+                // 女职员区 ⊂ 男职员区（实测 14 ⊂ 18），少数区域要换区，其余沿用男区。
+                let region = if female {
+                    self.folder_mapping_staff_female.get(r).cloned().unwrap_or_else(|| r.clone())
+                } else {
+                    r.clone()
+                };
+                format!("{region}/{}", if female { "female" } else { "male" })
+            })
+            .collect()
     }
 
     /// 结构校验（配置不变量的守卫）。`RuleConfig::load` 与保存规则文件共用这一个入口。
@@ -248,21 +322,50 @@ impl Standard3Config {
         if !self.ethnicity_mapping_rules.contains_key(DEFAULT_BLOCK) {
             return Err(format!("缺少 {DEFAULT_BLOCK} 全局默认块：没有它的国籍将无法解析"));
         }
+        // 目录族映射表的值必须落在 FolderList 内：映射出去的目录若不在白名单里，
+        // `usable()` 会恒为假、路由静默退化成兜底 —— 这种错配在配置期就能查出来。
+        //
+        // FolderMappingFemale 另需一道目录族形态校验：`family_dirs` 对女球员原样返回映射值、
+        // 不按目录形态过滤，所以目标指到男球员目录时照样能抽图 —— 男族裔目录也在 FolderList 内，
+        // 上一条查不出来。后果是女球员拿到男脸却仍计入 wf_family，日志报「进了女球员族」而实际没有。
+        // 职员映射不需要这道关：下面把 `/male`、`/female` 拼进路径再查，后缀已被强制。
+        for (src, dsts) in &self.folder_mapping_female {
+            for d in dsts {
+                let where_ = format!("FolderMappingFemale[{src}]");
+                check_folder(&folders, d, &where_)?;
+                if !d.starts_with("WF/") {
+                    return Err(format!("{where_} = {d:?} 必须指向 WF/ 目录"));
+                }
+            }
+        }
+        for (src, regions) in &self.folder_mapping_staff {
+            for r in regions {
+                check_folder(&folders, &format!("{r}/male"), &format!("FolderMappingStaff[{src}]"))?;
+            }
+        }
+        for (src, dst) in &self.folder_mapping_staff_female {
+            let where_ = format!("FolderMappingStaffFemale[{src}]");
+            let male_ok = self.folder_mapping_staff.values().flatten().any(|r| r == src);
+            let female_ok = self.folder_mapping_staff.values().flatten().any(|r| r == dst);
+            if !male_ok || !female_ok {
+                return Err(format!("{where_} = {dst:?}：`{src}` 或 `{dst}` 不是 FolderMappingStaff 里出现过的职员区域"));
+            }
+        }
+        // 非数字种族码（最典型的是 NG 的 `_country_specific_default_`）：跳过 + 告警，不报错。
+        // 【为什么不报错】① 它挂在 UI 侧文案（`ruleActionUseDefault` / `ruleOptionUseCountryDefault`）下，
+        // 不在 `reasoningApplyRule*` 那四种动作里（§8.4）；② 扰动⑥「先取它再穿透」在 123,447 行新产物上
+        // 池覆盖 97.90%，反而**低于**同口径基线 99.69% —— 若引擎真会先取它，覆盖率应上升而非下降。
+        // ⇒ 只告警、查找顺序不变；这些键取不到值，等价于"该码在这块里未命中"。
+        for (key, code) in self.skipped_codes() {
+            log::warn!(target: "facemap",
+                "规则块 {key:?} 含非数字种族码 {code:?}，已跳过（不参与三级查找）");
+        }
         for (key, block) in &self.ethnicity_mapping_rules {
             // 块键合法域：国籍三字码 / FolderList 里的目录名（族群块）/ _DEFAULT_。
             if key != DEFAULT_BLOCK && !self.ethnics.contains_key(key) && !folders.contains(key.as_str()) {
                 return Err(format!("未知规则块键 {key:?}：既不是 Ethnics 里的国籍码，也不是 FolderList 里的目录名"));
             }
-            for code in 0..=10u8 {
-                if !block.contains_key(&code.to_string()) {
-                    return Err(format!("规则块 {key:?} 缺少种族码 {code}（每个块必须 0-10 全枚举）"));
-                }
-            }
-            for code in block.keys() {
-                if !code.parse::<u8>().is_ok_and(|c| c <= 10) {
-                    return Err(format!("规则块 {key:?} 含非法种族码 {code:?}（应为 \"0\"-\"10\"）"));
-                }
-            }
+            // 块内缺某个种族码是**合法**的：缺码 = 未命中，继续往下一级（NG 出厂配置 50 块里 33 块缺码）。
             for (code, rule) in block {
                 let where_ = format!("规则块 {key:?} 码 {code}");
                 match rule {
@@ -311,6 +414,82 @@ fn check_folder(folders: &BTreeSet<&str>, dir: &str, where_: &str) -> Result<(),
     }
 }
 
+/// Preserve 剔除：按 from 全路径精确匹配清掉已占用项（不跨目录误伤同名图）。
+/// 剩牌与已发牌两份都走这里 —— Deck 重洗会把已发牌洗回来，漏一份就是重复发图。
+fn retain_unused(pools: &mut BTreeMap<String, Vec<String>>, used: &BTreeSet<String>) {
+    for (dir, pool) in pools.iter_mut() {
+        pool.retain(|s| !used.contains(&record_from(dir, s)));
+    }
+}
+
+/// 目录族：由 **FolderList 条目的形态**推导（S-4），不新增字段——
+/// 族是形态的派生量，加字段就多一份要与 FolderList 手工同步的状态。
+///   `Spain`            → 男球员族裔目录（62 条，无 `/`）
+///   `WF/China`         → 女球员目录（32 条）
+///   `Staff/African/male`   → 男职员目录（18 条）
+///   `Staff/African/female` → 女职员目录（14 条）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FolderFamily {
+    PlayerMale,
+    PlayerFemale,
+    StaffMale,
+    StaffFemale,
+}
+
+impl FolderFamily {
+    /// `fallback_dirs` 的下标（枚举顺序即下标，新增族时此处与数组长度一起改）。
+    fn index(self) -> usize {
+        match self {
+            FolderFamily::PlayerMale => 0,
+            FolderFamily::PlayerFemale => 1,
+            FolderFamily::StaffMale => 2,
+            FolderFamily::StaffFemale => 3,
+        }
+    }
+}
+
+/// 目录属于哪一族：只由 FolderList 条目的形态决定（无 `/` 名 / `WF/` / `Staff/…/male|female`）。
+/// 与 `family_of`（看人）互为两侧：两侧口径必须一致，否则兜底会把球员送进另一族的目录。
+fn family_of_dir(dir: &str) -> FolderFamily {
+    if dir.starts_with("WF/") {
+        FolderFamily::PlayerFemale
+    } else if dir.starts_with("Staff/") {
+        if dir.ends_with("/female") {
+            FolderFamily::StaffFemale
+        } else {
+            FolderFamily::StaffMale
+        }
+    } else {
+        FolderFamily::PlayerMale
+    }
+}
+
+/// 按球员身份定族（S-3，唯一口径）。
+/// 判据与 `image_ai` 的职员/女性判定同源（`is_female` 直接复用，不另抄一份）。
+/// 【为什么 `detailed.is_none()` 走男球员路径】基础名单（18 列）没有性别与「偏好工作」列，
+/// 现状也一直是全男球员假设；若按"族不限"放它去抽 `WF/`，现有 62 个目录的语义就被改坏了。
+fn family_of(player: &PlayerRecord) -> FolderFamily {
+    let Some(d) = player.detailed.as_ref() else {
+        return FolderFamily::PlayerMale;
+    };
+    let female = crate::image_ai::is_female(&d.gender);
+    match (!d.preferred_job.is_empty(), female) {
+        (true, true) => FolderFamily::StaffFemale,
+        (true, false) => FolderFamily::StaffMale,
+        (false, true) => FolderFamily::PlayerFemale,
+        (false, false) => FolderFamily::PlayerMale,
+    }
+}
+
+/// 把目录列表折成候选形态：0 → 无候选；1 → Single；多个 → Uniform（等概率选一）。
+fn shape_of(mut dirs: Vec<String>) -> Option<Candidates> {
+    match dirs.len() {
+        0 => None,
+        1 => dirs.pop().map(Candidates::Single),
+        _ => Some(Candidates::Uniform(dirs)),
+    }
+}
+
 /// 把一条规则解析成候选目录形态；`owner` 是归属者目录（`"default"` 用它）。
 fn to_candidates(rule: &MappingRule, owner: Option<&str>) -> Option<Candidates> {
     match rule {
@@ -354,62 +533,91 @@ fn save_file(path: &Path, content: &str) -> Result<(), String> {
 /// 也得回头从主池摘。现在只有**一份全池**，规则与兜底都从它取图 —— 摘一次即两边同时生效，
 /// 同步问题在结构上就不存在了；顺带省掉构造时的整份克隆（28 万词条，约几十 MB）。
 pub struct Standard3Rule {
-    /// 唯一的图片存储：目录路径 → 词干池（含清单内、清单外与根 ""）。
+    /// 唯一的图片存储：目录路径 → 该目录**剩余未发**的牌（建池时洗好，含清单内、清单外与根 ""）。
     pools: Pools,
-    /// 清单内（FolderList）、且构造时非空的目录名 —— 规则候选目录只有这些算「可用」。
-    /// 只存目录名不存图，所以包外目录（Scandinavian / Staff/WF 之类）天然进不了规则池，
-    /// 但它们的图仍在 `pools` 里，供 `Fallback::Random` 兜底。
+    /// 与 `pools` 互补：目录 → 本轮**已发出**的牌。
+    /// 【为什么要两份】Deck 一轮发完要原地重洗，洗的素材就是这里；摘一张只需动一处
+    /// （`pools` 弹出 + `dealt` 入），于是 28 万词条的整份克隆全省掉了。
+    /// 不变量：`pools[d]` ∪ `dealt[d]` 恒等于建池时 `d` 的全集，且两集合不相交。
+    dealt: BTreeMap<String, Vec<String>>,
+    /// 清单内（FolderList）、且构造时非空的目录 —— 规则候选目录只有这些算「可用」。
+    /// 只存目录名不存图，所以包外目录（Scandinavian 等）天然进不了规则池。
+    /// 多级条目（`WF/x`、`Staff/r/male`）由递归池判空，与一级目录名同口径。
     rule_dirs: BTreeSet<String>,
+    /// `rule_dirs` 按族预分（索引 = `FolderFamily::index`）：兜底只在本族的清单内目录里抽。
+    /// 【为什么必须分族】全量 `rule_dirs` 含 `WF/*` 与 `Staff/*`，男球员的兜底会抽到
+    /// 女足/女职员头像；NG 实测 172,494 条映射里 0 条越过本族（`WF` 一张都没用到）。
+    fallback_dirs: [BTreeSet<String>; 4],
     cfg: Standard3Config, // 构造时只拿自己这份配置
     fallback: Fallback,
-    /// 构造时的全池图数：区分「池本来就空」与「禁重复下被摘干」两种 None 成因。
-    initial_total: usize,
     /// 最近一次 None 的成因（只在 pick 返回 None 后被读，初始值无意义）。
     last_skip: SkipReason,
     /// 候选目录不可用、改从本国基础池取图的次数（stats 键 "owner_fallback"）。
     owner_fallbacks: usize,
-    /// 候选与本国目录都不可用、经全池兜底取图的次数（stats 键 "pool_fallback"）。
+    /// 候选与本国目录都不可用、经同族清单内目录兜底取图的次数（stats 键 "pool_fallback"）。
     pool_fallbacks: usize,
+    /// 成功出图、且族为**女球员（WF）**的记录数（stats 键 "wf_family"）。
+    /// 【只统计成功出图】失败/跳过的人没进过任何目录，计入会把「多少人真的用上 WF 包」污染成
+    /// 「多少人被判定为女球员」。男球员族是默认族、不计数（否则每批汇总都多一行噪音）。
+    wf_hits: usize,
+    /// 成功出图、且族为**职员（Staff，男女合并）**的记录数（stats 键 "staff_family"）。
+    /// 口径与 `wf_hits` 一致：只算成功出图，失败/跳过不计。
+    staff_hits: usize,
 }
 
 impl Standard3Rule {
     /// 构造规则：以 `recursive_pools`（递归全池，含包外目录与根）为**唯一存储**，
-    /// 按 `cfg.folder_list` 过滤出「规则可用目录」的名字集合；`cfg.fallback` 决定第二级兜底策略。
-    /// 【faces_map 只用来判名】扫描侧保证 `faces_map[dir]` 与 `recursive_pools[dir]` 逐字同键同值
-    /// （主池直接取自递归池），所以拿哪一份判断「该目录非空」都等价；这里只为判定，不再复制图。
+    /// 按 `cfg.folder_list` 过滤出「规则可用目录」的集合；`cfg.fallback` 决定第二级兜底策略。
+    /// 【为什么查递归池而不是一级目录名】FolderList 里有 `WF/x` 与 `Staff/r/male`
+    /// 这类**多级**条目，一级目录名里根本没有它们；递归池的键就是完整相对路径，
+    /// 与一级目录名同口径（一级目录在递归池里的键就是它自己）。
     pub fn new(
-        faces_map: &BTreeMap<String, BTreeSet<String>>,
         recursive_pools: &BTreeMap<String, BTreeSet<String>>,
         cfg: &Standard3Config,
     ) -> Self {
         let mut pools: Pools = recursive_pools
             .iter()
             .map(|(dir, stems)| (dir.clone(), sorted_unique(stems.iter().cloned())))
-            .collect();
+        .collect();
         // 根键兜底：扫描侧恒会写入 "" 键（无根图时为空集），这里补一次是为了不依赖该前提。
         pools.entry(String::new()).or_default();
-        let initial_total = pools.values().map(|s| s.len()).sum();
+        // 建池即洗牌：一轮内按此顺序发，取牌走 `pop()`（等价伪代码里的 `cursor++`）。
+        for pool in pools.values_mut() {
+            rand::seq::SliceRandom::shuffle(&mut pool[..], &mut rand::rng());
+        }
         let rule_dirs: BTreeSet<String> = cfg
             .folder_list
             .iter()
-            .filter(|d| faces_map.get(*d).is_some_and(|s| !s.is_empty()))
+            .filter(|d| recursive_pools.get(*d).is_some_and(|s| !s.is_empty()))
             .cloned()
             .collect();
+        // 兜底池按族预分：族的判据只看目录形态，与球员侧的 `family_of` 同口径。
+        let mut fallback_dirs: [BTreeSet<String>; 4] = std::array::from_fn(|_| BTreeSet::new());
+        for d in &rule_dirs {
+            fallback_dirs[family_of_dir(d).index()].insert(d.clone());
+        }
         Self {
             pools,
+            dealt: BTreeMap::new(),
             rule_dirs,
+            fallback_dirs,
             fallback: cfg.fallback,
             cfg: cfg.clone(),
-            initial_total,
             last_skip: SkipReason::EmptyPack,
             owner_fallbacks: 0,
             pool_fallbacks: 0,
+            wf_hits: 0,
+            staff_hits: 0,
         }
     }
 
-    /// 目录是否「可用」：在清单内、且池里还有图。规则只允许从这样的目录取图。
+    /// 目录是否「可用」：在清单内，且**还有剩余牌 或 有已发牌可洗回**。
+    /// 【为什么剩余牌空了仍算可用】Deck 一轮发完会把已发的牌洗回再发，所以「暂时没剩余」
+    /// 不等于「给不出图」—— 判成不可用会让本轮后面的人白白丢脸。
     fn usable(&self, d: &str) -> bool {
-        self.rule_dirs.contains(d) && self.pools.get(d).is_some_and(|p| !p.is_empty())
+        self.rule_dirs.contains(d)
+            && (self.pools.get(d).is_some_and(|p| !p.is_empty())
+                || self.dealt.get(d).is_some_and(|p| !p.is_empty()))
     }
 
     /// 按候选形态挑一个「包内存在且非空」的目录；加权形态会先裁掉不可用项再归一。
@@ -443,68 +651,106 @@ impl Standard3Rule {
         }
     }
 
-    /// 从指定目录池随机取一张图；禁重复时把它从池中移除。目录不可用返回 None。
+    /// 从指定目录池取一张图；目录不可用返回 None。
+    ///
+    /// 【两种取样模型，按 `duplicates` 分】
+    ///   - `duplicates == true`：有放回独立均匀，池内容不变（保持既有行为）。
+    ///   - `duplicates == false`：**Deck** —— 建池时洗好，从尾部 `pop()` 顺序发；
+    ///     发完把 `dealt` 洗回再发。于是同池内每张图的使用次数最多差 1，
+    ///     且**永不因"池抽干"丢人**（NG 实测 172,494 行产物：94 个池无一例外）。
+    /// 【为什么不引入 cursor 字段】`pop()` 从尾部取，剩牌堆本身就是游标；
+    /// 多存一个下标就多一份要与池长度同步的状态。
     fn take_from(&mut self, dir: &str, duplicates: bool) -> Option<PickedImage> {
         // 清单外目录不得被规则取图（可用性判定与 choose_dir 同一处，owner_folder 路径也走这里）。
         if !self.usable(dir) {
             return None;
         }
+        if duplicates {
+            let pool = self.pools.get(dir)?;
+            if pool.is_empty() {
+                return None; // Preserve 剔除可能把目录清空，此时无图可发
+            }
+            let idx = rand::rng().random_range(0..pool.len());
+            return Some(PickedImage { dir: dir.to_string(), stem: pool[idx].clone() });
+        }
         let pool = self.pools.get_mut(dir)?;
-        let idx = rand::rng().random_range(0..pool.len());
-        // 下标直取 O(1)；禁重复就地 swap_remove 摘除。
-        let stem = if duplicates {
-            pool[idx].clone()
-        } else {
-            pool.swap_remove(idx)
-        };
+        if pool.is_empty() {
+            refill_into(pool, self.dealt.remove(dir).unwrap_or_default());
+        }
+        let stem = pool.pop()?;
+        self.dealt.entry(dir.to_string()).or_default().push(stem.clone());
         Some(PickedImage {
             dir: dir.to_string(),
             stem,
         })
+    }
+
+    /// 按族记一次「成功出图」（三个成功返回点各调一次，None 分支不调）。
+    /// 男球员是默认族、不计数；职员男女合并成一项 —— 汇总里关心的是"有没有走对族"，
+    /// 而不是再拆一层性别。
+    fn note_family(&mut self, family: FolderFamily) {
+        match family {
+            FolderFamily::PlayerFemale => self.wf_hits += 1,
+            FolderFamily::StaffMale | FolderFamily::StaffFemale => self.staff_hits += 1,
+            FolderFamily::PlayerMale => {}
+        }
     }
 }
 
 impl PickRule for Standard3Rule {
     fn exclude_used(&mut self, used: &BTreeSet<String>) {
         // 按 from 全路径精确匹配，不跨目录误伤同名图。
-        for (dir, pool) in self.pools.iter_mut() {
-            pool.retain(|s| !used.contains(&record_from(dir, s)));
-        }
+        // 【剩牌与已发牌两份都要清】只清一份的话，被占用的图会在重洗后被二次发出。
+        retain_unused(&mut self.pools, used);
+        retain_unused(&mut self.dealt, used);
     }
 
     fn pick(&mut self, player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
-        // 三级链条：规则解析出的候选目录 → 本国基础池 → Fallback。
         // 不使用第二国籍：标准三的每条规则已经把 (国籍, 种族码) 完全决定了目标目录。
         let res = self.cfg.resolve(&player.primary_nat, &player.ethnicity_code);
-        if let Some(candidates) = &res.candidates {
+        let family = family_of(player);
+        let (candidates, owner) = match family {
+            // 男球员：三级规则链照旧 —— 规则块本身就是男球员口径。
+            FolderFamily::PlayerMale => (res.candidates.clone(), res.owner_folder.clone()),
+            // 女球员 / 职员：规则块不适用，改走「男族裔目录 → 本族目录」的映射表。
+            // 只做换族与过滤：三级查找的**顺序与层数都不变**，也不新增兜底层。
+            family => {
+                let dirs = self.cfg.family_dirs(res.owner_folder.as_deref(), family);
+                (shape_of(dirs.clone()), dirs.into_iter().next())
+            }
+        };
+        if let Some(candidates) = &candidates {
             if let Some(dir) = self.choose_dir(candidates) {
                 if let Some(img) = self.take_from(&dir, duplicates) {
+                    self.note_family(family);
                     return Some(img);
                 }
             }
         }
-        if let Some(owner) = &res.owner_folder {
+        if let Some(owner) = &owner {
             if let Some(img) = self.take_from(owner, duplicates) {
-                // 走到这里说明候选目录没出图（缺失/为空/被抽空），属于第一级回落。
+                // 走到这里说明候选目录没出图（缺失/为空），属于第一级回落。
                 self.owner_fallbacks += 1;
+                self.note_family(family);
                 return Some(img);
             }
         }
         match self.fallback {
-            // 兜底从同一份全池抽：已摘除的图天然不会再发出，无需同步。
+            // 兜底仍只在 FolderList 内、且**只在本族目录**里抽：越过清单会抽到 `WF/*`（45,006 张）
+            // 与 `Staff/*`、`Scandinavian`、包根图，男球员可能拿到女职员/女足头像。抽不到 ⇒ 视同空包。
             Fallback::Random => {
-                let img = pick_from_pools_flat(&mut self.pools, duplicates);
-                match &img {
-                    Some(_) => self.pool_fallbacks += 1,
+                let allowed = &self.fallback_dirs[family.index()];
+                match pick_from_dirs(&mut self.pools, &mut self.dealt, allowed, duplicates) {
+                    Some(img) => {
+                        self.pool_fallbacks += 1;
+                        self.note_family(family);
+                        Some(img)
+                    }
                     None => {
-                        self.last_skip = if self.initial_total == 0 {
-                            SkipReason::EmptyPack
-                        } else {
-                            SkipReason::PoolExhausted
-                        };
+                        self.last_skip = SkipReason::EmptyPack;
+                        None
                     }
                 }
-                img
             }
             Fallback::Skip => {
                 self.last_skip = SkipReason::RuleSkip;
@@ -521,6 +767,8 @@ impl PickRule for Standard3Rule {
         vec![
             ("owner_fallback", self.owner_fallbacks),
             ("pool_fallback", self.pool_fallbacks),
+            ("wf_family", self.wf_hits),
+            ("staff_family", self.staff_hits),
         ]
     }
 }
@@ -543,6 +791,33 @@ mod tests {
         }
     }
 
+    /// 带拓展字段的记录（第 11 列性别 / 第 15 列偏好工作），用于女球员与职员路由。
+    fn detailed_player(
+        uid: &str,
+        nat: &str,
+        code: &str,
+        gender: &str,
+        preferred_job: &str,
+    ) -> PlayerRecord {
+        let mut p = player(uid, nat, code);
+        p.detailed = Some(crate::rtf_scanner::DetailedInfo {
+            skin_code: "1".into(),
+            avatar: String::new(),
+            is_newgan: String::new(),
+            gender: gender.into(),
+            age: String::new(),
+            height: String::new(),
+            club: String::new(),
+            based: String::new(),
+            preferred_job: preferred_job.into(),
+            ca: String::new(),
+            pa: String::new(),
+            rca: String::new(),
+            extra_fields: Vec::new(),
+        });
+        p
+    }
+
     fn sset(v: &[&str]) -> BTreeSet<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -561,9 +836,11 @@ mod tests {
     // ---------------- 解析（组 A） ----------------
 
     #[test]
-    fn resolve_prefers_country_block_over_group_block() {
+    fn resolve_covers_chain_defaults_and_unknown_nationality() {
+        // 主题：`resolve()` 的全部语义 —— 国家块优先 / 族群块 / 全局块 / 缺码穿透 /
+        // "default" 回归属者 / 全局码 9 / 未知国籍无归属者。
         let cfg = RuleConfig::builtin().standard3;
-        // COL 的 Ethnics 是 Mestizo（族群块存在），但 COL 自己也有国家级块 → 国家块优先。
+        // ① 国家块优先于族群块：COL 的 Ethnics=Mestizo（族群块存在），但 COL 自己也有国家级块。
         assert_eq!(cfg.ethnics["COL"], "Mestizo");
         assert!(cfg.ethnicity_mapping_rules.contains_key("COL"));
         let mestizo = &cfg.ethnicity_mapping_rules["Mestizo"]["0"];
@@ -571,57 +848,45 @@ mod tests {
         // 两块对码 0 的规则不同：COL 块是 random 三选一，Mestizo 块是 random 两选一。
         assert_ne!(&to_candidates(mestizo, Some("Mestizo")).unwrap(), col.candidates.as_ref().unwrap());
         assert_eq!(col.owner_folder.as_deref(), Some("Mestizo")); // 归属者仍是本国基础池
-    }
-
-    #[test]
-    fn resolve_falls_through_to_group_block_then_default_block() {
-        let cfg = RuleConfig::builtin().standard3;
         // ② 族群块：JAM 无国家块，Ethnics=Afrocaribbean → 用族群块。
         assert!(!cfg.ethnicity_mapping_rules.contains_key("JAM"));
         assert_eq!(cfg.ethnics["JAM"], "Afrocaribbean");
-        let jam = cfg.resolve("JAM", "7");
-        assert_eq!(jam.candidates, Some(Candidates::Single("IndigenousSA".into())));
+        assert_eq!(cfg.resolve("JAM", "7").candidates, Some(Candidates::Single("IndigenousSA".into())));
         // ③ 全局块：CHN 既无国家块、Ethnics=China 也不是族群块键 → 落到 _DEFAULT_。
         assert!(!cfg.ethnicity_mapping_rules.contains_key("CHN"));
         let chn = cfg.resolve("CHN", "10");
         assert_eq!(chn.candidates, Some(Candidates::Single("China".into()))); // "default" → Ethnics[CHN]
         assert_eq!(chn.owner_folder.as_deref(), Some("China"));
-    }
-
-    #[test]
-    fn resolve_default_means_owner_folder_in_every_block_kind() {
-        let cfg = RuleConfig::builtin().standard3;
-        // 国家块内的 "default"：ARM 码 1 → Ethnics[ARM]。
+        // ④ 块存在但缺该码：继续往下找 —— 对手 50 个块里 33 个缺码（`Rules[788]` 缺 9），
+        // 先定块再取码会把这些行截断在第一级、退回归属者目录。
+        let mut sparse = RuleConfig::builtin().standard3;
+        let only_code_one: BTreeMap<String, MappingRule> =
+            [("1".to_string(), MappingRule::Directly("Japan".into()))].into_iter().collect();
+        sparse.ethnicity_mapping_rules.insert("ESP".into(), only_code_one);
+        assert_eq!(sparse.resolve("ESP", "1").candidates, Some(Candidates::Single("Japan".into())));
+        assert_eq!(sparse.resolve("ESP", "9").candidates, Some(Candidates::Single("MixedRace".into())));
+        assert_eq!(sparse.resolve("ESP", "0").candidates, Some(Candidates::Single("Spain".into())));
+        // ⑤ "default" 在三种块里都回归属者目录：国家块（ARM 码 1）、族群块（SouthConeSA 的某个
+        // default 码）、全局块（CHN 码 0）。下面三条 `contains_key` / `ethnics[...]` 是**前置守卫**
+        //（断言内置数据与分支前提，不是 resolve 的输出）：规则本身必须是 Default，
+        // 否则"结果等于 owner"在 `directly → owner` 下同样成立，等于没测到 default 语义。
         assert!(cfg.ethnicity_mapping_rules.contains_key("ARM"));
-        let arm = cfg.resolve("ARM", "1");
-        assert_eq!(arm.candidates, Some(Candidates::Single(cfg.ethnics["ARM"].clone())));
-        // 族群块内的 "default"：SouthConeSA 块含 default → 归属该族群国家的 Ethnics。
-        let arg_nat = &cfg.ethnics["ARG"];
-        assert_eq!(arg_nat, "SouthConeSA");
-        let default_code = cfg.ethnicity_mapping_rules["SouthConeSA"].iter().find(|(_, r)| **r == MappingRule::Default).map(|(c, _)| c.clone()).unwrap();
-        let arg = cfg.resolve("ARG", &default_code);
-        assert_eq!(arg.candidates, Some(Candidates::Single("SouthConeSA".into())));
-        // 全局块内的 "default"：CHN 码 0 → Ethnics[CHN]。
+        assert_eq!(cfg.ethnicity_mapping_rules["ARM"]["1"], MappingRule::Default);
+        assert_eq!(cfg.resolve("ARM", "1").candidates, Some(Candidates::Single(cfg.ethnics["ARM"].clone())));
+        assert_eq!(&cfg.ethnics["ARG"], "SouthConeSA");
+        let default_code = cfg.ethnicity_mapping_rules["SouthConeSA"].iter()
+            .find(|(_, r)| **r == MappingRule::Default).map(|(c, _)| c.clone()).unwrap();
+        assert_eq!(cfg.resolve("ARG", &default_code).candidates, Some(Candidates::Single("SouthConeSA".into())));
+        assert_eq!(cfg.ethnicity_mapping_rules["_DEFAULT_"]["0"], MappingRule::Default);
         assert_eq!(cfg.resolve("CHN", "0").candidates, Some(Candidates::Single("China".into())));
-    }
-
-    #[test]
-    fn resolve_global_block_routes_code9_to_mixed_race() {
-        let cfg = RuleConfig::builtin().standard3;
-        // 全局块唯一的跨国家硬编码：码 9 恒为 MixedRace。
+        // ⑥ 全局块唯一的跨国家硬编码：码 9 恒为 MixedRace；其余码回本国基础池。
         assert_eq!(cfg.resolve("CHN", "9").candidates, Some(Candidates::Single("MixedRace".into())));
         assert_eq!(cfg.resolve("JPN", "9").candidates, Some(Candidates::Single("MixedRace".into())));
-        // 其余码回本国基础池。
         assert_eq!(cfg.resolve("JPN", "10").candidates, Some(Candidates::Single("Japan".into())));
-    }
-
-    #[test]
-    fn resolve_unknown_nationality_has_no_owner() {
-        let cfg = RuleConfig::builtin().standard3;
-        let r = cfg.resolve("ZZZ", "1");
-        assert_eq!(r.owner_folder, None);
-        // 仍能落到全局块（"default" 无归属者 → 候选为空）。
-        assert_eq!(r.candidates, None);
+        // ⑦ 未知国籍：没有归属者目录，全局块的 "default" 也解析不出候选。
+        let unknown = cfg.resolve("ZZZ", "1");
+        assert_eq!(unknown.owner_folder, None);
+        assert_eq!(unknown.candidates, None);
     }
 
     #[test]
@@ -682,11 +947,20 @@ mod tests {
         c.ethnicity_mapping_rules.insert("_country_specific_default_".into(), BTreeMap::new());
         let err = c.validate().unwrap_err();
         assert!(err.contains("_country_specific_default_"), "{err}");
-        // ③ 块缺码
+        // ③ 块缺码 ⇒ **放行**（缺码 = 未命中、继续下一级，与 NG 出厂配置同语义）。
         let mut c = base();
         c.ethnicity_mapping_rules.get_mut("ARM").unwrap().remove("5");
-        let err = c.validate().unwrap_err();
-        assert!(err.contains("ARM") && err.contains("种族码 5"), "{err}");
+        c.validate().unwrap();
+        // ③′ 非数字种族码（NG 的 `_country_specific_default_`）⇒ 跳过、不报错；三级查找顺序不变，
+        // 故该键不会出现在任何解析结果里。WARN 走 `log`，单测没装 logger，这里只能验到
+        // 「不报错 + `skipped_codes` 能列出该键」。
+        let mut c = base();
+        c.ethnicity_mapping_rules.get_mut("ARM").unwrap()
+            .insert("_country_specific_default_".into(),
+                    MappingRule::Directly("Anglosphere".into()));
+        c.validate().unwrap();
+        assert!(c.skipped_codes().iter()
+            .any(|(k, v)| *k == "ARM" && *v == "_country_specific_default_"));
         // ④ 规则指向清单外目录
         let mut c = base();
         c.ethnicity_mapping_rules.get_mut("ARM").unwrap()
@@ -718,6 +992,22 @@ mod tests {
         let mut c = base();
         c.folder_list.push(c.folder_list[0].clone());
         assert!(c.validate().unwrap_err().contains("重复"));
+        // ⑧ 目录族映射表：目标先查在册，再查目录族形态。`Spain` 是男球员族裔目录（在册），
+        // 却被指成女球员目标 —— 女球员会静默拿到男脸，必须在配置期拦下。
+        let mut c = base();
+        c.folder_mapping_female.insert("Spain".into(), vec!["NotAFolder".into()]);
+        let err = c.validate().unwrap_err();
+        assert!(
+            err.contains("FolderMappingFemale[Spain]") && err.contains("FolderList"),
+            "{err}"
+        );
+        let mut c = base();
+        c.folder_mapping_female.insert("Spain".into(), vec!["Spain".into()]);
+        let err = c.validate().unwrap_err();
+        assert!(
+            err.contains("FolderMappingFemale[Spain]") && err.contains("WF/"),
+            "{err}"
+        );
     }
 
     // ---------------- 抽图行为（组 B） ----------------
@@ -758,127 +1048,315 @@ mod tests {
                 } {
                     assert!(folders.contains(d.as_str()), "{nat}/{code} 指向清单外目录 {d}");
                 }
-                // 归属者目录恒等于 Ethnics[国籍]，且必在清单内。
-                assert_eq!(r.owner_folder.as_deref(), Some(cfg.ethnics[nat].as_str()));
             }
         }
         assert_eq!(total, 2563);
         assert_eq!(kinds["single"], 1833 + 591, "default 与 directly 都解析成单一目录");
         assert_eq!(kinds["uniform"], 128);
         assert_eq!(kinds["weighted"], 11);
-        // FolderList 里每个目录都至少被一条规则指到（无死目录）。
-        assert_eq!(targeted.len(), folders.len(), "存在从未被规则指向的目录");
+        // 每个**男球员族**目录都至少被一条规则指到（无死目录）。
+        // `WF/*` 与 `Staff/*/*` 不由规则指向——规则块是男球员口径，那两族走目录族映射表。
+        let male_dirs: BTreeSet<String> = cfg
+            .folder_list
+            .iter()
+            .filter(|d| !d.contains('/'))
+            .cloned()
+            .collect();
+        assert_eq!(targeted, male_dirs, "存在从未被规则指向的男球员目录");
     }
 
     #[test]
-    fn pick_falls_back_to_owner_folder_when_target_dir_missing() {
+    fn pick_walks_the_fallback_chain_then_skips() {
+        // 主题：回退链与跳过成因。空包 → 本国基础池 → 兜底池 → Skip；未知国籍没有归属者，
+        // 直接进兜底。stats 让每一级对上层可见。
         let mut cfg = RuleConfig::builtin().standard3;
-        // 人为把 ESP 码 1 指到包内不存在的目录，验证第一级回退用本国基础池。
+        // ① 空包（包里一张图都没有）+ Random ⇒ EmptyPack，不是"禁重复抽干"。
+        let empty: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut rule = Standard3Rule::new(&recursive(&empty), &cfg);
+        assert!(rule.pick(&player("r-0", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
+        // ② 第一级回落：目标目录缺失、本国有图 ⇒ 用 Ethnics[ESP]。
         cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default().insert("1".into(), MappingRule::Directly("NorthernSA".into()));
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
+        let owner_pool: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
             ("Spain".into(), sset(&["sp1"])),
             ("Anglosphere".into(), sset(&["an1"])),
         ]);
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
+        let mut rule = Standard3Rule::new(&recursive(&owner_pool), &cfg);
         let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
-        assert_eq!(img.dir, "Spain", "应回退到 Ethnics[ESP]");
-        assert_eq!(img.stem, "sp1");
-        // 第一级回落要对上层可见：stats 累计一次「候选目录不可用改走本国基础池」。
-        assert_eq!(rule.stats(), vec![("owner_fallback", 1), ("pool_fallback", 0)]);
-    }
-
-    #[test]
-    fn pick_second_level_fallback_random_and_skip() {
-        let mut cfg = RuleConfig::builtin().standard3;
-        // ESP 码 1 指向包内没有的目录，且本国基础池 Spain 也没建 → 只能走第二级。
-        cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default().insert("1".into(), MappingRule::Directly("NorthernSA".into()));
-        let faces_map: BTreeMap<String, BTreeSet<String>> =
+        assert_eq!((img.dir.as_str(), img.stem.as_str()), ("Spain", "sp1"), "应回退到 Ethnics[ESP]");
+        assert_eq!(rule.stats(), vec![
+            ("owner_fallback", 1), ("pool_fallback", 0), ("wf_family", 0), ("staff_family", 0)]);
+        // ③ 第二级兜底：本国基础池也没建 ⇒ 从兜底池抽（目录可以不是 Spain）。
+        let pool_only: BTreeMap<String, BTreeSet<String>> =
             BTreeMap::from([("Anglosphere".into(), sset(&["an1"]))]);
-        // random：从递归全池抽到图（目录可以不是 Spain）；stats 累计一次全池兜底。
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
+        let mut rule = Standard3Rule::new(&recursive(&pool_only), &cfg);
+        let img = rule.pick(&player("r-2", "ESP", "1"), true).unwrap();
         assert_eq!(img.dir, "Anglosphere");
-        assert_eq!(rule.stats(), vec![("owner_fallback", 0), ("pool_fallback", 1)]);
-        // skip：直接不给映射，成因 = 规则主动跳过。
+        assert_eq!(rule.stats(), vec![
+            ("owner_fallback", 0), ("pool_fallback", 1), ("wf_family", 0), ("staff_family", 0)]);
+        // ④ 未知国籍：归属者未知 → 全局块的 "default" 也解析不出候选 → 直接兜底。
+        let one: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("Spain".into(), sset(&["sp1"]))]);
+        let mut rule = Standard3Rule::new(&recursive(&one), &cfg);
+        assert_eq!(rule.pick(&player("r-3", "ZZZ", "1"), true).unwrap().dir, "Spain");
+        // ⑤ Fallback::Skip：候选失效与未知国籍都不产出映射，成因 = 规则主动跳过。
         cfg.fallback = Fallback::Skip;
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        assert!(rule.pick(&player("r-2", "ESP", "1"), true).is_none());
+        let mut rule = Standard3Rule::new(&recursive(&pool_only), &cfg);
+        assert!(rule.pick(&player("r-4", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::RuleSkip);
+        let mut rule = Standard3Rule::new(&recursive(&one), &cfg);
+        assert!(rule.pick(&player("r-5", "ZZZ", "1"), true).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::RuleSkip);
     }
 
     #[test]
-    fn standard3_skip_reasons_distinguish_empty_pack_from_exhausted() {
+    fn sampling_models_cover_deck_and_iid() {
+        // 主题：取样模型。`duplicates=false` 是 Deck（一轮不放回、全池用尽、发完原地重洗、
+        // 不越族/不越清单）；`duplicates=true` 与 Deck 无关，仍是有放回独立均匀。
         let cfg = RuleConfig::builtin().standard3;
-        // 全池本来就空（包里一张图都没有）→ EmptyPack。
-        let empty: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut rule = Standard3Rule::new(&empty, &recursive(&empty), &cfg);
-        assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
-        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
-        // 池有图但禁重复摘干：Spain 仅一张，抽走后候选与本国目录同池已空、全池也空 → PoolExhausted。
-        let faces_map: BTreeMap<String, BTreeSet<String>> =
-            BTreeMap::from([("Spain".into(), sset(&["sp1"]))]);
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        assert!(rule.pick(&player("r-2", "ESP", "1"), false).is_some());
-        assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
-        assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
-    }
-
-    #[test]
-    fn pick_unknown_nationality_goes_straight_to_fallback() {
-        let cfg = RuleConfig::builtin().standard3;
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([("Spain".into(), sset(&["sp1"])),]);
-        // ZZZ 不在 Ethnics：归属者目录未知 → 全局块的 "default" 也解析不出候选 → 兜底。
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        let img = rule.pick(&player("r-1", "ZZZ", "1"), true).unwrap();
-        assert_eq!(img.dir, "Spain"); // 递归全池里只有这一张
-        // skip 模式下同一球员不产出映射。
-        let mut cfg = cfg.clone();
-        cfg.fallback = Fallback::Skip;
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
-        assert!(rule.pick(&player("r-2", "ZZZ", "1"), true).is_none());
-    }
-
-    #[test]
-    fn pick_weighted_rule_only_uses_available_dirs() {
-        let cfg = RuleConfig::builtin().standard3;
-        // DOM 码 1 = 加权 {Mestizo:66, NorthernSA:33}；包内只建 Mestizo → 必然落 Mestizo。
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
-            ("Mestizo".into(), sset(&["m1", "m2"])),
-            ("Spain".into(), sset(&["sp1"])),
+        // 陪跑池：清单内异族（WF / Staff）与清单外（Scandinavian）各一张 —— 族口径失效就会被抽到。
+        let pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
+            ("Spain".into(), sset(&["sp1", "sp2", "sp3", "sp4"])),
+            ("WF/African".into(), sset(&["wf1"])),
+            ("Staff/China/male".into(), sset(&["st1"])),
+            ("Scandinavian".into(), sset(&["sc1"])),
         ]);
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
+        let mut rule = Standard3Rule::new(&recursive(&pools), &cfg);
+        // 一轮：四张全部用尽且互不重复（ESP 码 1 = "default" ⇒ 归属者目录 Spain）。
+        let mut round1 = Vec::new();
+        for i in 0..4 {
+            let img = rule.pick(&player(&format!("r-{i}"), "ESP", "1"), false).unwrap();
+            assert_eq!(img.dir, "Spain", "第 {i} 次越出本族/清单");
+            round1.push(img.stem);
+        }
+        round1.sort();
+        assert_eq!(round1, vec!["sp1", "sp2", "sp3", "sp4"], "一轮内不放回应恰好用尽全池");
+        // 第二轮：原地重洗后再发满一轮，仍互不重复 —— 重洗是重开整副牌，不是"随便重复"。
+        let mut round2 = Vec::new();
+        for i in 0..4 {
+            let img = rule
+                .pick(&player(&format!("q-{i}"), "ESP", "1"), false)
+                .unwrap_or_else(|| panic!("第 {i} 张应仍能发出"));
+            assert_eq!(img.dir, "Spain");
+            round2.push(img.stem);
+        }
+        round2.sort();
+        assert_eq!(round2, vec!["sp1", "sp2", "sp3", "sp4"], "第二轮应复用同一批图、且仍不重复");
+        // 第三轮第一张：仍来自第一轮那四张（重洗复用，永不因"池抽干"丢人）。
+        let tail = rule.pick(&player("t-0", "ESP", "1"), false).unwrap();
+        assert_eq!(tail.dir, "Spain");
+        assert!(round1.contains(&tail.stem), "第三轮开出了不在第一轮的新图：{}", tail.stem);
+        // duplicates=true：单图池连抽 8 次都拿到同一张（池内容不变）。
+        let one: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("Spain".into(), sset(&["only1"]))]);
+        let mut rule = Standard3Rule::new(&recursive(&one), &cfg);
         for i in 0..8 {
-            let img = rule.pick(&player(&format!("r-{i}"), "DOM", "1"), true).unwrap();
-            assert_eq!(img.dir, "Mestizo", "NorthernSA 不在包内，加权应只剩 Mestizo");
+            let img = rule.pick(&player(&format!("i-{i}"), "ESP", "1"), true).unwrap();
+            assert_eq!(img.stem, "only1");
         }
-        // 两个目录都在时，加权抽样必须落在候选集内（大样本覆盖两项）。
-        let faces_map2: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
-            ("Mestizo".into(), sset(&["m1"])),
-            ("NorthernSA".into(), sset(&["n1"])),
-        ]);
-        let mut rule = Standard3Rule::new(&faces_map2, &recursive(&faces_map2), &cfg);
-        let mut seen = BTreeSet::new();
-        for i in 0..60 {
-            seen.insert(rule.pick(&player(&format!("r-{i}"), "DOM", "1"), true).unwrap().dir);
-        }
-        assert_eq!(seen, sset(&["Mestizo", "NorthernSA"]));
-        assert!(matches!(cfg.ethnicity_mapping_rules["DOM"]["1"], MappingRule::Weighted { .. }));
     }
 
     #[test]
-    fn exclude_used_removes_occupied_images() {
-        // Preserve 禁重复：已占用的图按 from 全路径从全池剔除（池耗尽语义由真实包形态组覆盖）。
+    fn pool_state_covers_usable_and_exclude_used() {
+        // 主题：池状态。可用性同时看剩余牌与已发牌；Preserve 剔除按 from 全路径清两份。
         let cfg = RuleConfig::builtin().standard3;
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([("Spain".into(), sset(&["sp1", "sp2"]))]);
-        let mut rule = Standard3Rule::new(&faces_map, &recursive(&faces_map), &cfg);
+        let faces_map: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("Spain".into(), sset(&["sp1", "sp2"]))]);
+        // ① 建池后：剩余牌非空 ⇒ 可用；清单外目录恒不可用。
+        let mut rule = Standard3Rule::new(&recursive(&faces_map), &cfg);
+        assert!(rule.usable("Spain"));
+        assert!(!rule.usable("Scandinavian"), "清单外目录恒不可用");
+        // ② 抽走两张后：剩余牌空但已发牌非空 ⇒ **仍可用**（一轮发完原地重洗）。
+        assert!(rule.pick(&player("a", "ESP", "1"), false).is_some());
+        assert!(rule.pick(&player("b", "ESP", "1"), false).is_some());
+        assert!(rule.pools["Spain"].is_empty());
+        assert_eq!(rule.dealt["Spain"].len(), 2);
+        assert!(rule.usable("Spain"), "剩牌空但已发牌非空 ⇒ 仍可用");
+        // ③ Preserve 剔除必须清两份：把已发牌里的两张都判为占用 ⇒ 目录彻底不可用、抽不出图。
+        rule.exclude_used(&sset(&["Spain/sp1", "Spain/sp2"]));
+        assert!(rule.pools["Spain"].is_empty() && rule.dealt["Spain"].is_empty());
+        assert!(!rule.usable("Spain"));
+        assert!(rule.pick(&player("c", "ESP", "1"), false).is_none());
+        // ④ 只剔除一张（有放回 iid）：剩下一张被反复发出，被占用的那张永不出现。
+        let mut rule = Standard3Rule::new(&recursive(&faces_map), &cfg);
         rule.exclude_used(&sset(&["Spain/sp1"]));
         for _ in 0..5 {
             assert_eq!(rule.pick(&player("r-1", "ESP", "1"), true).unwrap().stem, "sp2");
         }
     }
 
-    // ---------------- 真实包形态（组 C）：62 目录超集包的完整链路 ----------------
-    // 形态取自实测的社区标准三包：62 个清单目录全在且各有几千张图，另多出三个包外目录——
+    #[test]
+    fn fallback_random_never_leaves_the_folder_list() {
+        // 主题：兜底边界。包里有清单外的图（WF / Staff / Scandinavian / 包根），
+        // 且规则目标目录缺失 ⇒ 兜底只能在 FolderList 内的目录里抽。
+        let mut cfg = RuleConfig::builtin().standard3;
+        cfg.ethnicity_mapping_rules.entry("ESP".into()).or_default()
+            .insert("1".into(), MappingRule::Directly("NorthernSA".into()));
+        // 归属者目录也失效，兜底才会真正被触发（否则第二级 owner 回落先接住，兜底永远测不到）。
+        cfg.ethnics.remove("ESP");
+        let mut pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        pools.insert("Spain".into(), sset(&["sp1"]));   // 清单内、男球员族
+        pools.insert("Japan".into(), sset(&["jp1"]));   // 清单内、男球员族
+        pools.insert("WF/African".into(), sset(&["wf1"]));       // 清单内、女球员族
+        pools.insert("Staff/China/male".into(), sset(&["st1"]));   // 清单内、男职员族
+        pools.insert("Scandinavian".into(), sset(&["sc1"]));      // 清单外
+        pools.insert(String::new(), sset(&["root1"]));          // 包根，清单外
+        let mut rule = Standard3Rule::new(&pools, &cfg);
+        let mut seen = BTreeSet::new();
+        for i in 0..80 {
+            let img = rule.pick(&player(&format!("r-{i}"), "ESP", "1"), true)
+                .unwrap_or_else(|| panic!("清单内还有图，不应跳过"));
+            seen.insert(img.dir);
+        }
+        // 男球员路径：兜底不得产出 WF/*、Staff/*、Scandinavian、包根图。
+        assert_eq!(seen, sset(&["Spain", "Japan"]), "兜底越过了 FolderList 的族口径");
+        assert_eq!(rule.stats(), vec![
+            ("owner_fallback", 0), ("pool_fallback", 80), ("wf_family", 0), ("staff_family", 0)]);
+        // ④ 清单内所有目录都空 ⇒ 一律 EmptyPack 跳过（Q4 裁定：与空包同处置）。
+        let mut drained: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        drained.insert("Spain".into(), BTreeSet::new());
+        drained.insert("Japan".into(), BTreeSet::new());
+        let mut rule = Standard3Rule::new(&drained, &cfg);
+        assert!(rule.pick(&player("z", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
+    }
+
+    #[test]
+    fn family_routing_covers_female_and_staff_dirs() {
+        // 主题：族路由 + 族命中计数。同一条 rule 连跑四族，最后核对计数口径：
+        // 男球员是默认族不计数，失败的 pick 也不计数。
+        let mut cfg = RuleConfig::builtin().standard3;
+        cfg.ethnics.insert("TST".into(), "Spain".into());
+        cfg.folder_mapping_female.insert("Spain".into(), vec!["WF/Spain".into()]);
+        // 职员区取 Armenian，好让④走到 FolderMappingStaffFemale 的覆盖表（Armenian → MiddleEast）。
+        cfg.folder_mapping_staff.insert("Spain".into(), vec!["Staff/Armenian".into()]);
+        cfg.validate().unwrap();
+
+        let mut pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        pools.insert("Spain".into(), sset(&["sp1"]));
+        pools.insert("WF/Spain".into(), sset(&["wf1"]));
+        pools.insert("Staff/Armenian/male".into(), sset(&["stm1"]));
+        pools.insert("Staff/MiddleEast/female".into(), sset(&["stf1"]));
+
+        let mut rule = Standard3Rule::new(&recursive(&pools), &cfg);
+        // ① 基础名单（detailed=None）与男球员 → 62 族裔族
+        assert_eq!(rule.pick(&player("m1", "TST", "1"), true).unwrap().dir, "Spain");
+        // ② 女球员 → WF 族（男目录 Spain 经映射换成 WF/Spain）
+        let img = rule.pick(&detailed_player("w1", "TST", "1", "女", ""), true).unwrap();
+        assert_eq!(img.dir, "WF/Spain");
+        // ③ 男职员 → Staff/<region>/male
+        let img = rule.pick(&detailed_player("s1", "TST", "1", "Male", "Coach"), true).unwrap();
+        assert_eq!(img.dir, "Staff/Armenian/male");
+        // ④ 女职员：区域先过 FolderMappingStaffFemale 覆盖表（Armenian → MiddleEast）
+        let img = rule.pick(&detailed_player("sf1", "TST", "1", "Female", "Scout"), true).unwrap();
+        assert_eq!(img.dir, "Staff/MiddleEast/female");
+        // 4 次 pick 里男球员那次不计入族计数 ⇒ 1 + 2 = 3，而不是 4。
+        assert_eq!(rule.stats(), vec![
+            ("owner_fallback", 0), ("pool_fallback", 0), ("wf_family", 1), ("staff_family", 2)]);
+        // ⑤ 失败/跳过不计数：空包下女球员拿不到图，族计数保持 0（口径是「成功出图」）。
+        let nothing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut rule = Standard3Rule::new(&recursive(&nothing), &cfg);
+        assert!(rule.pick(&detailed_player("w9", "TST", "1", "女", ""), true).is_none());
+        assert_eq!(rule.stats(), vec![
+            ("owner_fallback", 0), ("pool_fallback", 0), ("wf_family", 0), ("staff_family", 0)]);
+    }
+
+    #[test]
+    fn staff_roster_from_real_rtf_lands_in_its_own_family() {
+        // 端到端：真实职员名单（18 列）→ rtf_scanner 解析 → 标准三选图。
+        // 这条链路只靠两个字段串起来：`detailed.preferred_job`（非空 ⇒ 职员）与
+        // `detailed.gender`（第 11 列原文）。列映射或族判据任一改错，这里立刻红 ——
+        // 手搓 `detailed_player` 的用例测不到"真名单解析出来到底长什么样"。
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/testing_data/ext_staff_long_chn.rtf");
+        let (logger, _log_rx) = crate::logger::ChannelLogger::channel();
+        // 两步与生产同序：先识别格式（表头决定 Basic/ExtPlayer/ExtStaff），再解析行。
+        let mut scanner = crate::rtf_scanner::RtfScanner::new();
+        scanner.detect_format(&path, &logger).expect("职员样本的格式识别应通过");
+        let roster = scanner
+            .parse_roster(&path, false, &logger)
+            .expect("职员样本应能解析");
+        assert!(!roster.is_empty(), "样本不应解析出 0 行");
+        // 前置守卫：这批记录必须都带 detailed 与职位，否则下面测的其实是球员路径。
+        assert!(
+            roster
+                .iter()
+                .all(|p| p.detailed.as_ref().is_some_and(|d| !d.preferred_job.is_empty())),
+            "职员名单的解析结果必须逐行带 preferred_job"
+        );
+        // 126 个清单目录各给一张图：任何一族都能出图，断言才只反映族口径。
+        let cfg = RuleConfig::builtin().standard3;
+        let mut pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for d in &cfg.folder_list {
+            pools.insert(d.clone(), sset(&["only"]));
+        }
+        let mut rule = Standard3Rule::new(&recursive(&pools), &cfg);
+        let mut females = 0usize;
+        for p in &roster {
+            let d = p.detailed.as_ref().unwrap();
+            let female = crate::image_ai::is_female(&d.gender);
+            let img = rule
+                .pick(p, true)
+                .unwrap_or_else(|| panic!("{}（{}）没抽到图", p.name, d.preferred_job));
+            let want = if female { "/female" } else { "/male" };
+            assert!(
+                img.dir.starts_with("Staff/") && img.dir.ends_with(want),
+                "{}（性别 {:?}）应进 Staff/*{}，实际 {}",
+                p.name,
+                d.gender,
+                want,
+                img.dir
+            );
+            if female {
+                females += 1;
+            }
+        }
+        // 性别分叉必须真的被踩到：样本里 394 男 / 4 女，全是女职员就不会走到 /female 分支。
+        assert!(females > 0, "样本里应有女职员，否则性别分叉没被覆盖");
+    }
+
+    #[test]
+    fn pick_weighted_rule_only_uses_available_dirs() {
+        let cfg = RuleConfig::builtin().standard3;
+        // 前置：DOM 码 1 必须确实是加权规则，否则下面的分布断言没有意义。
+        assert!(matches!(cfg.ethnicity_mapping_rules["DOM"]["1"], MappingRule::Weighted { .. }));
+        // DOM 码 1 = 加权 {Mestizo:66, NorthernSA:33}；包内只建 Mestizo → 必然落 Mestizo。
+        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
+            ("Mestizo".into(), sset(&["m1", "m2"])),
+            ("Spain".into(), sset(&["sp1"])),
+        ]);
+        let mut rule = Standard3Rule::new(&recursive(&faces_map), &cfg);
+        for i in 0..8 {
+            let img = rule.pick(&player(&format!("r-{i}"), "DOM", "1"), true).unwrap();
+            assert_eq!(img.dir, "Mestizo", "NorthernSA 不在包内，加权应只剩 Mestizo");
+        }
+        // 两个目录都在时：两项都要可达，且占比必须贴近 66:33 —— 只断言"都出现过"的话，
+        // 等概率实现照样能过，等于没测加权。400 次抽样下 0.55~0.78 的误报率约 1e-6。
+        let faces_map2: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
+            ("Mestizo".into(), sset(&["m1"])),
+            ("NorthernSA".into(), sset(&["n1"])),
+        ]);
+        let mut rule = Standard3Rule::new(&recursive(&faces_map2), &cfg);
+        let mut seen = BTreeSet::new();
+        let draws = 400usize;
+        let mut mestizo = 0usize;
+        for i in 0..draws {
+            let dir = rule.pick(&player(&format!("r-{i}"), "DOM", "1"), true).unwrap().dir;
+            if dir == "Mestizo" {
+                mestizo += 1;
+            }
+            seen.insert(dir);
+        }
+        assert_eq!(seen, sset(&["Mestizo", "NorthernSA"]));
+        let share = mestizo as f64 / draws as f64;
+        assert!(
+            (0.55..=0.78).contains(&share),
+            "加权 66:33 的实测占比应接近 2/3，实际 {share:.3}（{mestizo}/{draws}）"
+        );
+    }
+
+    // ---------------- 真实包形态（组 C）：126 目录超集包的完整链路 ----------------
+    // 形态取自实测的社区标准三包：清单目录全在且各有几千张图，另多出三个包外目录——
     // Scandinavian（老头像包平铺残留）与 Staff/WF（嵌套子树）。专门覆盖手搓 faces_map 测不到的
     // 「扫描 → 判定 → 建池 → 抽图」全程，尤其是包外目录与递归池的关系。
 
@@ -892,8 +1370,11 @@ mod tests {
         for d in &cfg.folder_list {
             let dir = root.join(d);
             std::fs::create_dir_all(&dir)?;
+            // FolderList 里有多级条目（`WF/China`、`Staff/African/male`），文件名只能取末段，
+            // 否则会把 "/" 写进文件名、新建出多余的子目录。
+            let label = d.rsplit('/').next().unwrap_or(d);
             for i in 0..imgs_per_dir {
-                std::fs::write(dir.join(format!("{d}_{i}.png")), b"png")?;
+                std::fs::write(dir.join(format!("{label}_{i}.png")), b"png")?;
                 files += 1;
             }
         }
@@ -913,41 +1394,34 @@ mod tests {
     }
 
     #[test]
-    fn real_shape_pack_classifies_standard3_and_isolates_extras() {
-        let rcfg = RuleConfig::builtin();
-        let cfg = &rcfg.standard3;
-        let dir = tempfile::tempdir().unwrap();
-        build_real_shape_pack(dir.path(), cfg, 1).unwrap();
-        let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
-        // 一级目录 65 个：62 清单 + 3 包外（真实包同款）。
-        assert_eq!(scan.faces_map.len(), cfg.folder_list.len() + 3);
-        let refs: Vec<_> = rcfg.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
-        let layout = crate::facepack_scanner::classify(
-            &scan.faces_map.keys().cloned().collect::<BTreeSet<_>>(), false, &refs);
-        // 清单 62 目录全在 → 判标准三完整包；多出的 Staff/WF/Scandinavian 不影响判定。
-        assert_eq!(layout, crate::facepack_scanner::PackLayout::Standard { standard: 3, complete: true });
-        let rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
-        // 规则可用目录只收清单内且非空的：包外目录不进规则池（含与清单目录同在一级的 Scandinavian）。
-        assert_eq!(rule.rule_dirs.len(), cfg.folder_list.len());
-        assert!(["Scandinavian", "Staff", "WF"].iter().all(|d| !rule.rule_dirs.contains(*d)));
-        // 唯一的全池仍收录包外目录与嵌套子树（Fallback::Random 的兜底来源），根池键恒存在。
-        assert!(rule.pools.contains_key("Scandinavian"));
-        assert!(rule.pools.contains_key("Staff/African"));
-        assert!(rule.pools.contains_key("WF/BrazilMixed"));
-        assert!(rule.pools.contains_key(""));
-    }
-
-    #[test]
-    fn real_shape_full_coverage_pick_hits_candidate_dirs_and_real_files() {
-        // 真实跑法第一道回归：扫描真实形态的包后，233 国 × 11 码 = 2563 组全量抽图。
-        // 62 个目录全部非空 → 每次都必须直中规则解析出的候选目录（不碰回退链），
-        // 且抽中的必须是包里真实存在的文件（from 不带扩展名，逐个试图片扩展名）。
+    fn real_shape_pack_scans_classifies_and_picks_without_leaving_the_list() {
+        // 主题：真实包形态的端到端链路 —— 扫描 → 判定 → 建池 → 233 国 × 11 码全量抽图。
+        // 只有真实形态才暴露的关系：包外目录（Scandinavian）、嵌套子树（Staff/WF）、
+        // 清单多级条目与一级目录名的不一致。
         let rcfg = RuleConfig::builtin();
         let cfg = &rcfg.standard3;
         let dir = tempfile::tempdir().unwrap();
         build_real_shape_pack(dir.path(), cfg, 2).unwrap();
         let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
-        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
+        // ① 一级目录 65 个：62 个男球员族裔目录 + Staff + WF + Scandinavian（真实包同款）。
+        // 清单里的 `WF/*` 与 `Staff/*/*` 是一级目录的**子/孙**目录，不出现在一级目录名里。
+        assert_eq!(scan.faces_map.len(), 65);
+        let refs: Vec<_> = rcfg.folder_lists().iter().map(|(t, f)| (*t, *f)).collect();
+        let layout = crate::facepack_scanner::classify_scan(&scan, &refs);
+        // 清单 126 条（62 男球员 + 32 WF + 18 男职员 + 14 女职员）全在 → 判标准三完整包；
+        // 多出的 Scandinavian 不在任何清单里，不影响判定。
+        assert_eq!(layout, crate::facepack_scanner::PackLayout::Standard { standard: 3, complete: true });
+        let mut rule = Standard3Rule::new(&scan.recursive_pools, cfg);
+        // ② 规则可用目录只收清单内且非空的；包外目录不进规则池。
+        assert_eq!(rule.rule_dirs.len(), cfg.folder_list.len());
+        assert!(!rule.rule_dirs.contains("Scandinavian"));
+        // ③ 唯一的全池仍收录包外目录与嵌套子树（Unknown 布局的抽样来源），根池键恒存在。
+        assert!(rule.pools.contains_key("Scandinavian"));
+        assert!(rule.pools.contains_key("Staff/African"));
+        assert!(rule.pools.contains_key("WF/BrazilMixed"));
+        assert!(rule.pools.contains_key(""));
+        // ④ 233 国 × 11 码 = 2563 组全量抽图：清单内目录全非空 ⇒ 每次都直中候选目录
+        //（不碰回退链），且抽中的必须是包里真实存在的文件（from 不带扩展名，逐个试扩展名）。
         let folders: BTreeSet<&str> = cfg.folder_list.iter().map(String::as_str).collect();
         for nat in cfg.ethnics.keys() {
             for code in 0..=10u8 {
@@ -970,33 +1444,6 @@ mod tests {
     }
 
     #[test]
-    fn real_shape_no_duplicates_exhausts_every_image_once() {
-        // 每目录 1 张 + Scandinavian 2 张 + 两棵嵌套子树各 1 张。
-        // 禁重复持续抽：规则候选抽空 → 归属者目录（同池，也空）→ 递归兜底收尾包外目录的图，
-        // 必须恰好抽完全部图片、无一张重复，耗尽后稳定返回 None。
-        let rcfg = RuleConfig::builtin();
-        let cfg = &rcfg.standard3;
-        let dir = tempfile::tempdir().unwrap();
-        let total = build_real_shape_pack(dir.path(), cfg, 1).unwrap();
-        let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
-        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, cfg);
-        let nats: Vec<&String> = cfg.ethnics.keys().collect();
-        let mut issued = BTreeSet::new();
-        for i in 0..total + 10 {
-            let nat = nats[i % nats.len()];
-            let code = ((i / nats.len()) % 11).to_string();
-            match rule.pick(&player(&format!("p-{i}"), nat, &code), false) {
-                Some(img) => assert!(issued.insert(record_from(&img.dir, &img.stem)),
-                    "第 {i} 次抽到重复图 {img:?}"),
-                None => break,
-            }
-        }
-        assert_eq!(issued.len(), total, "禁重复应恰好抽完全部 {total} 张图（含包外目录）");
-        // 耗尽后继续抽仍为 None（不 panic、不复活已抽走的图）。
-        assert!(rule.pick(&player("tail", "ESP", "1"), false).is_none());
-    }
-
-    #[test]
     fn dotted_filename_has_single_identity_in_the_pool() {
         // 含点号文件名（"sp.1.png"）的词干是 "sp.1" 而非 "sp"：from 必须能定位到真实文件，
         // 且规则与兜底共用同一份池，同一张图不得被发出两次。
@@ -1005,18 +1452,21 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("Spain")).unwrap();
         std::fs::write(dir.path().join("Spain").join("sp.1.png"), b"png").unwrap();
         let scan = crate::facepack_scanner::scan_pack(dir.path().to_str().unwrap()).unwrap();
-        // ① 禁重复连抽两次：第一次拿走 "sp.1"，第二次池已摘空 → None。
-        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, &rcfg.standard3);
+        // ① 禁重复 = Deck：一轮内不放回，池里只有这一张，所以第二轮重洗后仍发它（不丢人）。
+        let mut rule = Standard3Rule::new(&scan.recursive_pools, &rcfg.standard3);
         let img = rule.pick(&player("r-1", "ESP", "1"), false).unwrap();
         assert_eq!((img.dir.as_str(), img.stem.as_str()), ("Spain", "sp.1"));
-        assert!(
-            rule.pick(&player("r-2", "ESP", "1"), false).is_none(),
-            "同一张图不得被第二次发出"
+        let again = rule.pick(&player("r-2", "ESP", "1"), false).unwrap();
+        assert_eq!(
+            (again.dir.as_str(), again.stem.as_str()),
+            ("Spain", "sp.1"),
+            "单图池重洗后仍是同一张，词干必须带点号才能定位真实文件"
         );
-        // ② Preserve 剔除：from "Spain/sp.1" 命中池中剩余的唯一一项，抽不出第二张。
-        let mut rule = Standard3Rule::new(&scan.faces_map, &scan.recursive_pools, &rcfg.standard3);
+        // ② Preserve 剔除：from "Spain/sp.1" 同时从剩余牌与已发牌里摘掉，抽不出第二张。
+        let mut rule = Standard3Rule::new(&scan.recursive_pools, &rcfg.standard3);
         rule.exclude_used(&sset(&["Spain/sp.1"]));
         assert!(rule.pick(&player("r-3", "ESP", "1"), true).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
     }
 
     #[test]

@@ -1006,15 +1006,448 @@
     "SouthConeSA",
     "SouthernAfrica",
     "Spain",
+    "Staff/African/female",
+    "Staff/African/male",
+    "Staff/Armenian/male",
+    "Staff/Brazil/female",
+    "Staff/Brazil/male",
+    "Staff/CaucasianNA/female",
+    "Staff/CaucasianNA/male",
+    "Staff/CentralAfrica/male",
+    "Staff/China/female",
+    "Staff/China/male",
+    "Staff/EasternEurope/female",
+    "Staff/EasternEurope/male",
+    "Staff/Japan/female",
+    "Staff/Japan/male",
+    "Staff/Korea/female",
+    "Staff/Korea/male",
+    "Staff/LatinAmerica/female",
+    "Staff/LatinAmerica/male",
+    "Staff/Maghreb/male",
+    "Staff/MiddleEast/female",
+    "Staff/MiddleEast/male",
+    "Staff/NorthCentralEurope/female",
+    "Staff/NorthCentralEurope/male",
+    "Staff/NorthWestEurope/female",
+    "Staff/NorthWestEurope/male",
+    "Staff/SEA/female",
+    "Staff/SEA/male",
+    "Staff/Scandinavian/male",
+    "Staff/SouthEurope/female",
+    "Staff/SouthEurope/male",
+    "Staff/SouthWestEurope/female",
+    "Staff/SouthWestEurope/male",
     "Sweden",
     "Tajikistan",
     "Turkish",
     "Uzbekistan",
     "Vietnam",
+    "WF/African",
+    "WF/Andean",
+    "WF/Australia",
+    "WF/BrazilMixed",
+    "WF/CaucasianNA",
+    "WF/China",
+    "WF/Denmark",
+    "WF/EastSlavic",
+    "WF/England",
+    "WF/France",
+    "WF/Germany",
+    "WF/Italy",
+    "WF/Japan",
+    "WF/Kazakhstan",
+    "WF/Korea",
+    "WF/Maghreb",
+    "WF/Melanesia",
+    "WF/Mexico",
+    "WF/Middle-East",
+    "WF/Norway",
+    "WF/Philippines",
+    "WF/Poland",
+    "WF/Polynesia",
+    "WF/Portugal",
+    "WF/Serbia",
+    "WF/SouthAsia",
+    "WF/SouthConeSA",
+    "WF/Spain",
+    "WF/Sweden",
+    "WF/Thailand",
+    "WF/Uzbekistan",
+    "WF/WestSlavic",
     "WestAfrica",
     "WestBalkan",
     "WestSlavic"
   ],
+  "FolderMappingFemale": {
+    "Afrocaribbean": [
+      "WF/African"
+    ],
+    "Albania": [
+      "WF/Italy",
+      "WF/Mexico"
+    ],
+    "AlbanianGreek": [
+      "WF/Italy"
+    ],
+    "Anglosphere": [
+      "WF/England",
+      "WF/African",
+      "WF/Australia"
+    ],
+    "ArabGulf": [
+      "WF/Middle-East"
+    ],
+    "Armenian": [
+      "WF/Italy"
+    ],
+    "Azerbaijan": [
+      "WF/Maghreb"
+    ],
+    "Baltics": [
+      "WF/WestSlavic"
+    ],
+    "BrazilMixed": [
+      "WF/BrazilMixed"
+    ],
+    "CaucasianNA": [
+      "WF/CaucasianNA"
+    ],
+    "Caucasus": [
+      "WF/Italy"
+    ],
+    "CentralAfrica": [
+      "WF/African"
+    ],
+    "CentralAsian": [
+      "WF/Kazakhstan"
+    ],
+    "CentralEurope": [
+      "WF/Germany",
+      "WF/France"
+    ],
+    "China": [
+      "WF/China"
+    ],
+    "Denmark": [
+      "WF/Denmark"
+    ],
+    "EastAfrica": [
+      "WF/African"
+    ],
+    "EastBalkan": [
+      "WF/Serbia"
+    ],
+    "EastSlavic": [
+      "WF/EastSlavic"
+    ],
+    "Filipino": [
+      "WF/Philippines"
+    ],
+    "Finstonia": [
+      "WF/Sweden",
+      "WF/WestSlavic"
+    ],
+    "France": [
+      "WF/France"
+    ],
+    "HornOfAfrica": [
+      "WF/African"
+    ],
+    "Hungary": [
+      "WF/WestSlavic"
+    ],
+    "Iceland": [
+      "WF/Norway"
+    ],
+    "Indonesia": [
+      "WF/Philippines"
+    ],
+    "Iran": [
+      "WF/Middle-East"
+    ],
+    "Ireland": [
+      "WF/England"
+    ],
+    "Israel": [
+      "WF/Italy"
+    ],
+    "Italia": [
+      "WF/Italy"
+    ],
+    "Japan": [
+      "WF/Japan"
+    ],
+    "Korea": [
+      "WF/Korea"
+    ],
+    "Maghreb": [
+      "WF/Maghreb"
+    ],
+    "MainlandSEA": [
+      "WF/Thailand"
+    ],
+    "Malaysia": [
+      "WF/China",
+      "WF/Philippines"
+    ],
+    "Mashriq": [
+      "WF/Maghreb",
+      "WF/Middle-East"
+    ],
+    "Mestizo": [
+      "WF/Mexico"
+    ],
+    "Mongolia": [
+      "WF/Kazakhstan"
+    ],
+    "Netherlands": [
+      "WF/Germany"
+    ],
+    "Norway": [
+      "WF/Norway"
+    ],
+    "PacificIslanders": [
+      "WF/Melanesia",
+      "WF/Polynesia",
+      "WF/African"
+    ],
+    "Poland": [
+      "WF/Poland"
+    ],
+    "Portugal": [
+      "WF/Portugal"
+    ],
+    "Romania": [
+      "WF/Italy"
+    ],
+    "SahelianAfrica": [
+      "WF/African"
+    ],
+    "Singapore": [
+      "WF/Philippines"
+    ],
+    "SouthAsia": [
+      "WF/SouthAsia"
+    ],
+    "SouthConeSA": [
+      "WF/SouthConeSA"
+    ],
+    "SouthernAfrica": [
+      "WF/African"
+    ],
+    "Spain": [
+      "WF/Spain"
+    ],
+    "Sweden": [
+      "WF/Sweden"
+    ],
+    "Tajikistan": [
+      "WF/Uzbekistan"
+    ],
+    "Turkish": [
+      "WF/Maghreb"
+    ],
+    "Uzbekistan": [
+      "WF/Uzbekistan"
+    ],
+    "Vietnam": [
+      "WF/Thailand"
+    ],
+    "WestAfrica": [
+      "WF/African"
+    ],
+    "WestBalkan": [
+      "WF/Serbia"
+    ],
+    "WestSlavic": [
+      "WF/WestSlavic"
+    ]
+  },
+  "FolderMappingStaff": {
+    "Afrocaribbean": [
+      "Staff/African"
+    ],
+    "Albania": [
+      "Staff/LatinAmerica",
+      "Staff/SouthEurope"
+    ],
+    "AlbanianGreek": [
+      "Staff/SouthEurope"
+    ],
+    "Anglosphere": [
+      "Staff/NorthWestEurope"
+    ],
+    "ArabGulf": [
+      "Staff/MiddleEast"
+    ],
+    "Armenian": [
+      "Staff/Armenian"
+    ],
+    "Azerbaijan": [
+      "Staff/MiddleEast"
+    ],
+    "Baltics": [
+      "Staff/EasternEurope"
+    ],
+    "BrazilMixed": [
+      "Staff/Brazil"
+    ],
+    "CaucasianNA": [
+      "Staff/CaucasianNA"
+    ],
+    "Caucasus": [
+      "Staff/MiddleEast"
+    ],
+    "CentralAfrica": [
+      "Staff/CentralAfrica",
+      "Staff/African"
+    ],
+    "CentralAsian": [
+      "Staff/China"
+    ],
+    "CentralEurope": [
+      "Staff/NorthCentralEurope"
+    ],
+    "China": [
+      "Staff/China"
+    ],
+    "Denmark": [
+      "Staff/Scandinavian"
+    ],
+    "EastAfrica": [
+      "Staff/African"
+    ],
+    "EastBalkan": [
+      "Staff/SouthEurope"
+    ],
+    "EastSlavic": [
+      "Staff/EasternEurope"
+    ],
+    "Filipino": [
+      "Staff/SEA"
+    ],
+    "Finstonia": [
+      "Staff/NorthWestEurope"
+    ],
+    "France": [
+      "Staff/NorthWestEurope"
+    ],
+    "HornOfAfrica": [
+      "Staff/African"
+    ],
+    "Hungary": [
+      "Staff/NorthCentralEurope"
+    ],
+    "Iceland": [
+      "Staff/NorthWestEurope"
+    ],
+    "Indonesia": [
+      "Staff/SEA"
+    ],
+    "Iran": [
+      "Staff/MiddleEast"
+    ],
+    "Ireland": [
+      "Staff/NorthWestEurope"
+    ],
+    "Israel": [
+      "Staff/MiddleEast"
+    ],
+    "Italia": [
+      "Staff/SouthEurope"
+    ],
+    "Japan": [
+      "Staff/Japan"
+    ],
+    "Korea": [
+      "Staff/Korea"
+    ],
+    "Maghreb": [
+      "Staff/Maghreb"
+    ],
+    "MainlandSEA": [
+      "Staff/SEA"
+    ],
+    "Malaysia": [
+      "Staff/SEA"
+    ],
+    "Mashriq": [
+      "Staff/MiddleEast"
+    ],
+    "Mestizo": [
+      "Staff/LatinAmerica"
+    ],
+    "Mongolia": [
+      "Staff/China"
+    ],
+    "Netherlands": [
+      "Staff/NorthWestEurope"
+    ],
+    "Norway": [
+      "Staff/Scandinavian"
+    ],
+    "PacificIslanders": [
+      "Staff/African"
+    ],
+    "Poland": [
+      "Staff/NorthCentralEurope"
+    ],
+    "Portugal": [
+      "Staff/SouthWestEurope"
+    ],
+    "Romania": [
+      "Staff/SouthEurope"
+    ],
+    "SahelianAfrica": [
+      "Staff/African"
+    ],
+    "Singapore": [
+      "Staff/SEA"
+    ],
+    "SouthAsia": [
+      "Staff/SEA"
+    ],
+    "SouthConeSA": [
+      "Staff/LatinAmerica"
+    ],
+    "SouthernAfrica": [
+      "Staff/African"
+    ],
+    "Spain": [
+      "Staff/SouthWestEurope"
+    ],
+    "Sweden": [
+      "Staff/Scandinavian"
+    ],
+    "Tajikistan": [
+      "Staff/MiddleEast"
+    ],
+    "Turkish": [
+      "Staff/MiddleEast"
+    ],
+    "Uzbekistan": [
+      "Staff/MiddleEast"
+    ],
+    "Vietnam": [
+      "Staff/SEA"
+    ],
+    "WestAfrica": [
+      "Staff/African"
+    ],
+    "WestBalkan": [
+      "Staff/SouthEurope"
+    ],
+    "WestSlavic": [
+      "Staff/NorthCentralEurope"
+    ]
+  },
+  "FolderMappingStaffFemale": {
+    "Staff/Armenian": "Staff/MiddleEast",
+    "Staff/CentralAfrica": "Staff/African",
+    "Staff/Maghreb": "Staff/African",
+    "Staff/Scandinavian": "Staff/NorthWestEurope"
+  },
   "EthnicityMappingRules": {
     "Afrocaribbean": {
       "0": {

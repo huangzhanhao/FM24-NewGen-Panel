@@ -288,67 +288,61 @@ mod tests {
     }
 
     #[test]
-    fn standard2_uses_config_mapping_and_filters_pools() {
-        // 池构造：FolderList 过滤——多余目录（Extra）与空目录不进抽图池。
+    fn standard2_maps_by_ethnic_and_reports_skip_reasons() {
+        // 主题：标准二的映射与跳过成因。池过滤 / 命中 / 国籍无映射 / 目标目录缺失回落 /
+        // 同名目录优先 / 空包 / 禁重复抽干，一条链走完。
         let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
             ("SpanMed".into(), sset(&["s1", "s2"])),
             ("Caucasian".into(), sset(&["c1"])),
             ("Extra".into(), sset(&["x1"])),   // json 未配置 → 不进池
             ("Empty".into(), BTreeSet::new()), // 空目录 → 不进池
         ]);
+        // ① 池构造：FolderList 过滤 —— 多余目录与空目录都不进抽图池。
         let mut rule = Standard2Rule::new(&faces_map, &RuleConfig::builtin().standard2);
         assert!(!rule.pools.contains_key("Extra"));
         assert!(!rule.pools.contains_key("Empty"));
-        // ESP 经内置 Ethnics → SpanMed，种族码 1 → SpanMed，随机取池内图。
+        // ② ESP 经内置 Ethnics → SpanMed，种族码 1 → SpanMed，随机取池内图。
         let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
         assert_eq!(img.dir, "SpanMed");
         assert!(["s1", "s2"].contains(&img.stem.as_str()));
-        // 未配置国籍（内置表查不到）→ 球员跳过，成因 = 国籍无映射。
+        // ③ 未配置国籍（内置表查不到）→ 球员跳过，成因 = 国籍无映射。
         assert!(rule.pick(&player("r-2", "ZZZ", "1"), true).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::NoNationRule);
-        // 目标目录缺失（African 未建）→ 回落到池内其余目录，不再静默跳过该球员。
+        // ④ 目标目录缺失（African 未建）→ 回落到池内其余目录，且对上层可见。
         let img = rule.pick(&player("r-3", "NGA", "3"), true).unwrap();
         assert!(
             ["SpanMed", "Caucasian"].contains(&img.dir.as_str()),
             "回落抽到了池外目录 {img:?}"
         );
-        // 回落要对上层可见：stats 累计一次「目标目录不可用改走全池」。
         assert_eq!(rule.stats(), vec![("target_dir_fallback", 1)]);
-    }
-
-    #[test]
-    fn standard2_skip_reasons_distinguish_empty_pack_from_exhausted() {
-        // 池本来就空（清单内目录都没建/全空）→ EmptyPack。
-        let faces_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut rule = Standard2Rule::new(&faces_map, &RuleConfig::builtin().standard2);
+        // ⑤ 包里还有与国籍同名的目录并写进 FolderList → 取图优先走它，from 必须记它。
+        let mut cfg_same = RuleConfig::builtin().standard2;
+        cfg_same.folder_list.push("ESP".into());
+        let faces_same = BTreeMap::from([
+            ("ESP".into(), sset(&["n1", "n2"])),
+            ("SpanMed".into(), sset(&["s1"])),
+        ]);
+        let mut rule = Standard2Rule::new(&faces_same, &cfg_same);
+        let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
+        assert_eq!(img.dir, "ESP");
+        assert!(["n1", "n2"].contains(&img.stem.as_str()));
+        // ⑥ 池本来就空（清单内目录都没建/全空）→ EmptyPack。
+        let empty: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut rule = Standard2Rule::new(&empty, &RuleConfig::builtin().standard2);
         assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);
-        // 池有图但禁重复摘干：SpanMed 仅一张，第二次目标目录已空、全池也空 → PoolExhausted。
-        let faces_map: BTreeMap<String, BTreeSet<String>> =
+        // ⑦ 池有图但禁重复摘干：SpanMed 仅一张，第二次目标目录已空、全池也空 → PoolExhausted。
+        let only_one: BTreeMap<String, BTreeSet<String>> =
             BTreeMap::from([("SpanMed".into(), sset(&["s1"]))]);
-        let mut rule = Standard2Rule::new(&faces_map, &RuleConfig::builtin().standard2);
+        let mut rule = Standard2Rule::new(&only_one, &RuleConfig::builtin().standard2);
         assert!(rule.pick(&player("r-2", "ESP", "1"), false).is_some());
         assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
     }
 
     #[test]
-    fn standard2_records_the_dir_it_drew_from() {
-        // 包里有与国籍同名的目录并写进 FolderList → 取图优先走它，from 就必须记它。
-        let mut cfg = RuleConfig::builtin().standard2;
-        cfg.folder_list.push("ESP".into());
-        let faces_map = BTreeMap::from([
-            ("ESP".into(), sset(&["n1", "n2"])),
-            ("SpanMed".into(), sset(&["s1"])),
-        ]);
-        let mut rule = Standard2Rule::new(&faces_map, &cfg);
-        let img = rule.pick(&player("r-1", "ESP", "1"), true).unwrap();
-        assert_eq!(img.dir, "ESP");
-        assert!(["n1", "n2"].contains(&img.stem.as_str()));
-    }
-
-    #[test]
-    fn standard2_validate_rejects_dirs_outside_folder_list() {
+    fn standard2_config_validation_and_rule_file() {
+        // 主题：标准二配置的校验与规则文件读写 —— 校验失败一律不写盘。
         // 出厂配置自身必须通过校验（否则每次替换都会在 load 处炸掉）。
         RuleConfig::builtin().standard2.validate().unwrap();
         // Ethnics 指向清单外目录 → 报错指名字段与值。
@@ -380,21 +374,12 @@ mod tests {
         let bad = "{\"FolderList\":[\"African\"],\"Ethnics\":{\"XXX\":\"Spain\"}}";
         assert!(save_file(&p, bad).is_err());
         assert!(!p.exists(), "校验失败不得写盘");
-    }
-
-    #[test]
-    fn standard2_rule_file_registration() {
-        // 登记表项：name 与路径遵循 standardN.json 主轴；save 拒绝非法 json 且不写盘。
+        // 登记表项：name 与路径遵循 standardN.json 主轴。
+        // save 的「拒绝坏 json / 不写盘 / 合法内容回读」由 standard3_rule_file_registration 覆盖 ——
+        // 两个标准共用同一张函数指针表，重复测一遍只是复制同一段机制。
         let rf = rule_file();
         assert_eq!(rf.name, "standard2");
         let data = tempfile::tempdir().unwrap();
         assert_eq!((rf.path)(data.path()).file_name().unwrap(), "standard2.json");
-        let p = (rf.path)(data.path());
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap(); // 真实流程里 rules/ 由 ensure_user_files 先建好
-        assert!((rf.save)(&p, "{ broken").is_err());
-        assert!(!p.exists(), "解析失败不得写盘");
-        (rf.save)(&p, "{\"FolderList\":[\"African\"],\"Ethnics\":{\"XXX\":\"African\"}}").unwrap();
-        let back: Standard2Config = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-        assert_eq!(back.folder_list, vec!["African".to_string()]);
     }
 }

@@ -1241,7 +1241,7 @@ fn pick<T: AsRef<str>>(pool: &[T]) -> &str {
 
 /// 性别原文是否表示女性：FM 性别列是导出语言原文（男/女、Male/Female），判据走中英双语
 ///（与第 15 列表头识别同口径）；双语之外不识别，胡须照常随机。
-fn is_female(gender: &str) -> bool {
+pub(crate) fn is_female(gender: &str) -> bool {
     let g = gender.trim();
     g == "女" || g.eq_ignore_ascii_case("female")
 }

@@ -42,7 +42,35 @@ impl PackLayout {
     pub fn is_flat(&self) -> bool { matches!(self, PackLayout::Flat) }
 }
 
+/// 判定与「检查完整性」共用的目录口径：包内**实际存在**的目录集合。
+///
+/// 输入是「一级子目录名」与「多级相对路径」（递归池的键，或浅层遍历得到的路径）。
+/// 输出扣掉两类条目：
+///   ① 包根 `""` —— 它不是目录名，放进白名单比对只会制造假 Unknown；
+///   ② **纯容器目录**（`WF` / `Staff` / `Staff/African`：自身只是给子树提供路径前缀）
+///      —— 不扣的话，带 `WF/<ethnic>` 子树的包会因多出一个 `WF` 名字而在子集轮里落空。
+///      判定「是容器」只用一条规则：存在别的键以它为前缀（`k + "/"`）。
+///
+/// 【为什么不看有没有图】`classify` 的输入本来就只有名字；把「有没有图」也纳入判定口径，
+/// 会让「目录建了但还空着」的包在两种口径间来回跳。
+fn effective_dirs<'a>(
+    subdirs: &'a BTreeSet<String>,
+    pool_keys: &'a BTreeSet<String>,
+) -> BTreeSet<&'a str> {
+    let containers: BTreeSet<&str> = pool_keys
+        .iter()
+        .flat_map(|k| k.match_indices('/').map(move |(i, _)| &k[..i]))
+        .collect();
+    pool_keys
+        .iter()
+        .map(String::as_str)
+        .chain(subdirs.iter().map(String::as_str))
+        .filter(|n| !n.is_empty() && !containers.contains(*n))
+        .collect()
+}
+
 /// 唯一的标准判定入口（纯函数，不读盘）。
+/// subdirs：包内**一级**子目录名；pool_keys：递归全池的键（含 ""、一级名、多级路径）。
 /// folder_lists：各标准的 (标准号, FolderList)，来自 templates（用户可配置），按登记顺序传入。
 /// 判定顺序：**超集优先**（S ⊇ F → 归属该标准），其次**子集**（S ⊂ F → 就近归属，标 fixable）。
 /// `complete` 的口径是「该标准配置的目录**都在**包内」，**允许包外还有别的目录**（超集 → true）：
@@ -50,15 +78,18 @@ impl PackLayout {
 /// 交叉/未知名 → Unknown。
 /// 【为什么先命中先赢是安全的】`templates::validate_registry` 保证任意两份清单交集为 0，
 /// 于是一个包的目录集不可能同时是两份清单的超集；子集轮里多个标准命中同一包的情况也被同一守卫排除。
+/// 【为什么要 pool_keys】FolderList 里可以有 `WF/x`、`Staff/r/male` 这类**多级**条目，
+/// 它们在一级目录名里根本不存在；判定要沿递归池的相对路径比对，否则带子树的包会被误判 Unknown。
 pub fn classify(
     subdirs: &BTreeSet<String>,
+    pool_keys: &BTreeSet<String>,
     has_root_images: bool,
     folder_lists: &[(u8, &Vec<String>)],
 ) -> PackLayout {
     if subdirs.is_empty() {
         return if has_root_images { PackLayout::Flat } else { PackLayout::Empty };
     }
-    let names: BTreeSet<&str> = subdirs.iter().map(String::as_str).collect();
+    let names = effective_dirs(subdirs, pool_keys);
     // 第一轮：超集判定（包含某标准全部目录 → 归属且视为完整；超集之间互斥——两份清单交集为 0）。
     // complete = 标准配置的全部目录都在包内（S 可以多出 extra 目录，由调用方按 FolderList 排除）。
     for (n, folders) in folder_lists {
@@ -423,7 +454,10 @@ pub fn classify_scan(scan: &PackScan, folder_lists: &[(u8, &Vec<String>)]) -> Pa
         .filter(|n| !is_junk_dir(n))
         .cloned()
         .collect();
-    classify(&subdirs, !scan.root_images.is_empty(), folder_lists)
+    // 判定要看到多级目录（`WF/x`、`Staff/r/male`），所以把递归池的键一起喂进去 ——
+    // 只给一级目录名的话，带子树的包会被判成 Unknown。
+    let pool_keys: BTreeSet<String> = scan.recursive_pools.keys().cloned().collect();
+    classify(&subdirs, &pool_keys, !scan.root_images.is_empty(), folder_lists)
 }
 
 /// 「扫描头像」核心（纯函数）：重扫描头像包，返回 (图片总数, 标准号, 完整扫描结果)。
@@ -480,11 +514,33 @@ pub fn check_integrity_progress(
 
     // 第二趟：逐条核对，每核对一条上报一次进度。
     let mut subdirs: BTreeSet<String> = BTreeSet::new();
+    let mut pool_keys: BTreeSet<String> = BTreeSet::new();
     let mut has_images = false;
     for (i, (is_dir, fname)) in entries.iter().enumerate() {
         if *is_dir {
             if !is_junk_dir(fname) {
                 subdirs.insert(fname.clone());
+                pool_keys.insert(fname.clone());
+                // 再下沉两层：覆盖 `WF/<ethnic>` 与 `Staff/<region>/{male,female}`。
+                // 只做浅层遍历、不递归全树 —— 「检查完整性」必须比全量扫盘快一个数量级。
+                if let Ok(rd) = std::fs::read_dir(Path::new(img_dir).join(fname)) {
+                    for sub in rd.flatten() {
+                        let subname = sub.file_name().to_string_lossy().to_string();
+                        if !entry_is_dir(&sub) || is_junk_dir(&subname) {
+                            continue;
+                        }
+                        let two = format!("{fname}/{subname}");
+                        pool_keys.insert(two.clone());
+                        if let Ok(rd2) = std::fs::read_dir(Path::new(img_dir).join(&two)) {
+                            for leaf in rd2.flatten() {
+                                let leafname = leaf.file_name().to_string_lossy().to_string();
+                                if entry_is_dir(&leaf) && !is_junk_dir(&leafname) {
+                                    pool_keys.insert(format!("{two}/{leafname}"));
+                                }
+                            }
+                        }
+                    }
+                }
             } // 跳过 __MACOSX 等
         } else {
             has_images = true; // 走到这里的一定是非隐藏图片文件（隐藏文件上一步已被滤掉）
@@ -492,7 +548,7 @@ pub fn check_integrity_progress(
         progress(i + 1, total);
     }
 
-    let layout = classify(&subdirs, has_images, folder_lists);
+    let layout = classify(&subdirs, &pool_keys, has_images, folder_lists);
     let standard = layout.standard();
     let status = match layout {
         PackLayout::Flat => "complete",
@@ -502,6 +558,8 @@ pub fn check_integrity_progress(
     };
     // missing / extra / expected_total 按归属标准的 FolderList 计算：
     // missing = FolderList 中尚未出现的目录（可一键补全）；extra = 包内多出的未配置目录（不进抽图池）。
+    // 【必须按 `pool_keys` 判存在】清单含 `WF/x`、`Staff/r/male` 这类多级条目，只看一级目录名
+    // 会把 64 条全部报成"缺失"，让完美包在 UI 上显示为需要补全。
     let (missing, extra, expected_total) = match &layout {
         PackLayout::Standard { standard: n, .. } => {
             let folders = folder_lists
@@ -509,22 +567,34 @@ pub fn check_integrity_progress(
                 .find(|(t, _)| t == n)
                 .map(|(_, f)| (*f).clone())
                 .unwrap_or_default();
-            let missing = folders
+            let missing: Vec<String> = folders
                 .iter()
-                .filter(|d| !subdirs.contains(*d))
+                .filter(|d| !pool_keys.contains(*d))
                 .cloned()
+                .collect();
+            // 纯容器目录（`WF` / `Staff`）只是多级条目的路径前缀，不算多余目录。
+            let containers: BTreeSet<&str> = folders
+                .iter()
+                .flat_map(|d| d.match_indices('/').map(move |(i, _)| &d[..i]))
                 .collect();
             let extra: Vec<String> = subdirs
                 .iter()
-                .filter(|d| !folders.contains(*d))
+                .filter(|d| !folders.contains(*d) && !containers.contains(d.as_str()))
                 .cloned()
                 .collect();
             (missing, extra, folders.len())
         }
         _ => (Vec::new(), Vec::new(), 0),
     };
-    // 标准一/无法识别的 found 与现状一致：标准一记 0，其余记命中的子目录数。
-    let found = if standard == 1 { 0 } else { subdirs.len() };
+    // 标准一/无法识别的 found 与现状一致：标准一记 0，其余记命中的子目录数；
+    // 有归属标准时记**已就位的必需目录数**（= expected_total − missing），与 missing 同口径。
+    let found = if standard == 1 {
+        0
+    } else if expected_total > 0 {
+        expected_total - missing.len()
+    } else {
+        subdirs.len()
+    };
     IntegrityResult {
         standard,
         status: status.into(),
@@ -550,66 +620,68 @@ mod tests {
         ]
     }
 
+    /// 单参版：把一级目录名同时当作「递归池的键」（无嵌套子树的包就是这种形态）。
     fn classify_with(subdirs: &[&str], has_root: bool) -> PackLayout {
-        let s = names(subdirs);
         let fl = folder_lists();
         let refs: Vec<(u8, &Vec<String>)> = fl.iter().map(|(t, f)| (*t, f)).collect();
-        classify(&s, has_root, &refs)
+        classify(&names(subdirs), &names(subdirs), has_root, &refs)
+    }
+
+    /// 带多级递归池键的版本：`extra` 是包里除一级目录外的相对路径（如 `WF/China`）。
+    fn classify_with_pools(subdirs: &[&str], extra: &[&str], has_root: bool) -> PackLayout {
+        let fl = folder_lists();
+        let refs: Vec<(u8, &Vec<String>)> = fl.iter().map(|(t, f)| (*t, f)).collect();
+        let mut keys = names(extra);
+        keys.extend(names(subdirs));
+        classify(&names(subdirs), &keys, has_root, &refs)
     }
 
     #[test]
-    fn classify_flat_and_empty() {
+    fn classify_covers_all_layouts() {
+        // 主题：布局判定矩阵 —— 平铺/空包、两套标准的恰好/子集/超集、女性包、未知名与跨套混用。
+        // ① 平铺与空包。
         assert_eq!(classify_with(&[], true), PackLayout::Flat);
         assert_eq!(classify_with(&[], false), PackLayout::Empty);
-    }
-
-    #[test]
-    fn classify_standard2_exact_subset_and_superset() {
-        // 恰好 14 个 → complete
+        // ② 标准二：恰好 14 个 → complete；缺 1 个 → fixable；超集（甚至含他标准目录名）→
+        // 仍归标准二、complete，多余目录由规则构造时按 FolderList 过滤、不进抽图池。
         let all: Vec<&str> = FACEPACK_DIRS.to_vec();
         assert_eq!(classify_with(&all, false),
                    PackLayout::Standard { standard: 2, complete: true });
-        // 子集（缺 1 个）→ fixable
         assert_eq!(classify_with(&all[..13], false),
                    PackLayout::Standard { standard: 2, complete: false });
-        // 超集（14 全在 + 多出目录，甚至含其他标准的目录名）→ 仍归标准二、complete，
-        // 多余目录由规则构造时按 FolderList 过滤、不进抽图池。
-        let mut superset: Vec<&str> = FACEPACK_DIRS.to_vec();
-        superset.push("Spain");
-        superset.push("Extra1");
-        assert_eq!(classify_with(&superset, false),
+        let mut superset2: Vec<&str> = FACEPACK_DIRS.to_vec();
+        superset2.push("Spain");
+        superset2.push("Extra1");
+        assert_eq!(classify_with(&superset2, false),
                    PackLayout::Standard { standard: 2, complete: true });
-    }
-
-    #[test]
-    fn classify_standard3_exact_and_superset() {
+        // ③ 标准三：恰好全量 → complete；子集 → fixable；超集 → complete。
         let cfg = crate::templates::RuleConfig::builtin();
         let f3: Vec<&str> = cfg.standard3.folder_list.iter().map(String::as_str).collect();
         assert_eq!(classify_with(&f3, false),
                    PackLayout::Standard { standard: 3, complete: true });
-        // 子集
         assert_eq!(classify_with(&["China", "Japan", "Korea"], false),
                    PackLayout::Standard { standard: 3, complete: false });
-        // 超集：62 清单全在 + 多出清单外的目录（用户包里常见的未使用目录）→ 仍归标准三
-        let mut superset = f3.clone();
-        superset.push("Scandinavian");
-        superset.push("SomeUnusedDir");
-        assert_eq!(classify_with(&superset, false),
+        let mut superset3 = f3.clone();
+        superset3.push("Scandinavian");
+        superset3.push("SomeUnusedDir");
+        assert_eq!(classify_with(&superset3, false),
                    PackLayout::Standard { standard: 3, complete: true });
-    }
-
-    #[test]
-    fn classify_unknown_and_scandinavian_priority() {
+        // ④ 只有 `WF` 一级目录 + 其子树的女性包：容器名不算白名单条目，按子集判 → 标准三、不完整。
+        let wf_count = cfg.standard3.folder_list.iter().filter(|d| d.starts_with("WF/")).count();
+        assert_eq!(wf_count, 32, "内置清单里应有 32 条 WF 目录");
+        assert_eq!(classify_with_pools(&["WF"], &["WF/African", "WF/China"], false),
+                   PackLayout::Standard { standard: 3, complete: false });
+        // ⑤ 未知名/跨套混用 → Unknown；仅 Scandinavian（只属标准二）→ 标准二子集。
         assert_eq!(classify_with(&["African", "NotARealRace"], false), PackLayout::Unknown);
-        // 跨两套混用（非超集、非任何子集）→ Unknown
         assert_eq!(classify_with(&["African", "China"], false), PackLayout::Unknown);
-        // 仅 Scandinavian（只属于标准二清单）→ 子集判定归标准二、目录不全。
         assert_eq!(classify_with(&["Scandinavian"], false),
                    PackLayout::Standard { standard: 2, complete: false });
     }
 
     #[test]
-    fn scan_pack_flat_with_junk_and_hidden_files() {
+    fn scan_pack_covers_flat_standard2_and_nesting() {
+        // 主题：扫盘的三种形态 —— 平铺（含垃圾/隐藏/辅助文件）、标准二 14 目录、多层嵌套。
+        // ① 平铺：根图只收非隐藏图片，垃圾目录与辅助文件不入池。
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.png"), b"png").unwrap();
         std::fs::write(dir.path().join("b.1.png"), b"png").unwrap();
@@ -629,25 +701,38 @@ mod tests {
         assert_eq!(scan.recursive_pools.get(""), Some(&scan.root_images));
         assert!(!scan.recursive_pools.contains_key("__MACOSX"));
         assert!(!scan.recursive_pools.contains_key(".git"));
-    }
-
-    #[test]
-    fn scan_pack_standard2() {
-        let dir = tempfile::tempdir().unwrap();
+        // ② 标准二 14 目录：每个目录 2 张（e1 png + e2 jpg，词干唯一口径），根池空。
+        let dir2 = tempfile::tempdir().unwrap();
         for eth in FACEPACK_DIRS {
-            let d = dir.path().join(eth);
+            let d = dir2.path().join(eth);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("e1.png"), b"png").unwrap();
             std::fs::write(d.join("e2.jpg"), b"jpg").unwrap();
         }
-        let scan = scan_pack(dir.path().to_str().unwrap()).unwrap();
-        assert_eq!(scan.faces_map.len(), 14);
-        assert!(scan.faces_map.values().all(|s| s.len() == 2)); // e1 + e2（image_stem 唯一口径）
-        assert!(scan.root_images.is_empty());
+        let scan2 = scan_pack(dir2.path().to_str().unwrap()).unwrap();
+        assert_eq!(scan2.faces_map.len(), 14);
+        assert!(scan2.faces_map.values().all(|s| s.len() == 2));
+        assert!(scan2.root_images.is_empty());
         // 递归池 = 根池（空集，键恒存在）+ 14 个种族目录。
-        assert_eq!(scan.recursive_pools.len(), 15);
-        assert!(scan.recursive_pools.get("").unwrap().is_empty());
-        assert!(scan.recursive_pools.values().skip(1).all(|s| s.len() == 2));
+        assert_eq!(scan2.recursive_pools.len(), 15);
+        assert!(scan2.recursive_pools.get("").unwrap().is_empty());
+        assert!(scan2.recursive_pools.values().skip(1).all(|s| s.len() == 2));
+        // ③ 多层嵌套：子/孙目录全部图片进入递归池，键为 "/" 分隔的相对路径；垃圾子树跳过。
+        let dir3 = tempfile::tempdir().unwrap();
+        let p = dir3.path();
+        std::fs::create_dir_all(p.join("weirdA/sub")).unwrap();
+        std::fs::create_dir_all(p.join("weirdA/__MACOSX")).unwrap();
+        std::fs::write(p.join("weirdA/i.png"), b"png").unwrap();
+        std::fs::write(p.join("weirdA/sub/j.1.png"), b"png").unwrap();
+        std::fs::write(p.join("weirdA/__MACOSX/x.png"), b"png").unwrap();
+        let scan3 = scan_pack(p.to_str().unwrap()).unwrap();
+        let pools = &scan3.recursive_pools;
+        assert_eq!(pools.get("").map(|s| s.len()), Some(0)); // 根无图 → 空集（键存在）
+        assert_eq!(pools.get("weirdA").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+                   Some(vec!["i".to_string()]));
+        assert_eq!(pools.get("weirdA/sub").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+                   Some(vec!["j.1".to_string()]));
+        assert!(!pools.contains_key("weirdA/__MACOSX")); // 垃圾目录整棵跳过
     }
 
     #[test]
@@ -668,26 +753,6 @@ mod tests {
         for (k, v) in &scan.faces_map {
             assert_eq!(scan.recursive_pools.get(k), Some(v), "目录 {k} 的图集在两份索引中应完全一致");
         }
-    }
-
-    #[test]
-    fn scan_pack_recursive_deep_nesting() {
-        // 子/孙目录全部图片进入递归池，键为 "/" 分隔的相对路径；垃圾子树跳过。
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        std::fs::create_dir_all(p.join("weirdA/sub")).unwrap();
-        std::fs::create_dir_all(p.join("weirdA/__MACOSX")).unwrap();
-        std::fs::write(p.join("weirdA/i.png"), b"png").unwrap();
-        std::fs::write(p.join("weirdA/sub/j.1.png"), b"png").unwrap();
-        std::fs::write(p.join("weirdA/__MACOSX/x.png"), b"png").unwrap();
-        let scan = scan_pack(p.to_str().unwrap()).unwrap();
-        let pools = &scan.recursive_pools;
-        assert_eq!(pools.get("").map(|s| s.len()), Some(0)); // 根无图 → 空集（键存在）
-        assert_eq!(pools.get("weirdA").map(|s| s.iter().cloned().collect::<Vec<_>>()),
-                   Some(vec!["i".to_string()]));
-        assert_eq!(pools.get("weirdA/sub").map(|s| s.iter().cloned().collect::<Vec<_>>()),
-                   Some(vec!["j.1".to_string()]));
-        assert!(!pools.contains_key("weirdA/__MACOSX")); // 垃圾目录整棵跳过
     }
 
     /// 等到目录签名稳定后再取值。
@@ -753,7 +818,8 @@ mod tests {
     }
 
     #[test]
-    fn parallel_scan_merges_identically_to_sequential() {
+    fn parallel_scan_merges_identically_and_gates_thread_count() {
+        // 主题：并行扫盘。① 合并结果与顺序遍历逐字相同；② 线程数按目录量闸门。
         // 并行只改「遍历的调度」，不得改变任何池内容。这里直接调并行实现（不依赖测试机的 CPU 数），
         // 与顺序遍历逐字对比——覆盖垃圾子树跳过、dot 文件排除、孙目录独立成键三个易错点。
         let dir = tempfile::tempdir().unwrap();
@@ -807,6 +873,15 @@ mod tests {
         assert_eq!(par.get("EECA").map(|s| s.iter().cloned().collect::<Vec<_>>()),
                    Some(vec!["f0".to_string()]));
         assert_eq!(par.get("African").map(|s| s.len()), Some(3));
+        // ② 线程数闸门：目录太少（空包 0 个、小包不足 PARALLEL_SCAN_MIN_DIRS）不起线程 ——
+        // 起线程与合并的开销摊不平；多核机器上目录够多则并行且不超过上限，单核恒为 1。
+        assert_eq!(scan_threads(0), 1);
+        assert_eq!(scan_threads(PARALLEL_SCAN_MIN_DIRS - 1), 1);
+        let many = scan_threads(62);
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 2 {
+            assert!(many >= 2, "多核机器上 62 个目录应并行");
+        }
+        assert!(many <= PARALLEL_SCAN_MAX_THREADS);
     }
 
     #[test]
@@ -816,7 +891,9 @@ mod tests {
         // 半途的索引尤其不能当结果返回——残缺的目录集会把包判成另一个标准。
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        for d in ["African", "Asian", "Caucasian"] {
+        // 目录数要够多：取消检查点若被改成"每 N 个目录一次"，只建 3 个目录会直接扫完 →
+        // expect_err 假失败，看起来像取消功能坏了。
+        for d in ["African", "Asian", "Caucasian", "EECA", "Italmed", "MENA", "MESA", "SAMed"] {
             std::fs::create_dir_all(p.join(d)).unwrap();
             std::fs::write(p.join(d).join("f0.png"), b"png").unwrap();
         }
@@ -832,19 +909,6 @@ mod tests {
         )
         .expect_err("取消后必须报错，而不是返回残缺索引");
         assert!(err.contains("取消"), "{err}");
-    }
-
-    #[test]
-    fn scan_threads_only_parallelizes_when_worth_it() {
-        // 目录太少（空包 0 个、小包 3 个以下）不起线程：起线程与合并的开销摊不平。
-        assert_eq!(scan_threads(0), 1);
-        assert_eq!(scan_threads(PARALLEL_SCAN_MIN_DIRS - 1), 1);
-        // 多核机器上目录够多则并行，且不超过上限；单核机器恒为 1（退化为顺序遍历）。
-        let many = scan_threads(62);
-        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 2 {
-            assert!(many >= 2, "多核机器上 62 个目录应并行");
-        }
-        assert!(many <= PARALLEL_SCAN_MAX_THREADS);
     }
 
     /// 【为什么只在 Unix 上跑这个用例】两个原因，都不是「懒得写」：
@@ -915,7 +979,7 @@ mod tests {
     /// 子集（missing 可一键补全，found + missing = expected_total）、未知名/跨套混用 → Unknown、
     /// 垃圾目录不参与判定。missing/extra 按归属标准的 FolderList 原顺序计算。
     #[test]
-    fn integrity_layout_matrix() {
+    fn integrity_covers_layout_matrix_and_aux_files() {
         let cfg = crate::templates::RuleConfig::builtin();
         let f3: Vec<&str> = cfg.standard3.folder_list.iter().map(String::as_str).collect();
         let mut shuffled: Vec<&str> = FACEPACK_DIRS.to_vec();
@@ -923,7 +987,7 @@ mod tests {
         let mut superset3 = f3.clone();
         superset3.push("Scandinavian"); // 清单外（标准二的目录）
         superset3.push("SomeUnusedDir"); // 清单外
-        // 标准三子集的缺失 = 62 清单按原顺序去掉已建 3 目录。
+        // 标准三子集的缺失 = 126 清单按原顺序去掉已建 3 目录。
         let subset3_missing: Vec<String> = cfg
             .standard3
             .folder_list
@@ -936,14 +1000,15 @@ mod tests {
             ("平铺单图", vec![], vec!["face.png"], (1, "complete", 0, 0), vec![], vec![]),
             ("空目录", vec![], vec![], (1, "unknown", 0, 0), vec![], vec![]),
             ("标准二乱序全量", shuffled, vec![], (2, "complete", 14, 14), vec![], vec![]),
-            ("标准三恰好全量", f3.clone(), vec![], (3, "complete", 62, 62), vec![], vec![]),
-            // 超集仍 complete；found 报包内全部（非垃圾）目录数，含 extra。
-            ("标准三超集", superset3, vec![], (3, "complete", 64, 62), vec![],
+            // found 记已就位的必需目录数（与 missing 同口径）：126 条里 64 条多级条目也真实存在。
+            ("标准三恰好全量", f3.clone(), vec![], (3, "complete", 126, 126), vec![], vec![]),
+            // 超集仍 complete；extra 只列一级目录里未配置且非容器的项。
+            ("标准三超集", superset3, vec![], (3, "complete", 126, 126), vec![],
              vec!["Scandinavian".into(), "SomeUnusedDir".into()]),
             // 子集 fixable：缺失目录可一键补全。
             ("标准二缺一", FACEPACK_DIRS[..13].to_vec(), vec![], (2, "fixable", 13, 14),
              vec!["YugoGreek".into()], vec![]),
-            ("标准三子集", vec!["China", "Japan", "Korea"], vec![], (3, "fixable", 3, 62),
+            ("标准三子集", vec!["China", "Japan", "Korea"], vec![], (3, "fixable", 3, 126),
              subset3_missing, vec![]),
             ("未知名", vec!["African", "Asian", "NotARealRace"], vec![], (0, "unknown", 3, 0), vec![], vec![]),
             // African 属标准二（14 目录清单）、China 属标准三（62 目录清单），跨套混用无法识别。
@@ -966,18 +1031,16 @@ mod tests {
             assert_eq!(r.missing, missing, "用例 {name} 的缺失目录");
             assert_eq!(r.extra, extra, "用例 {name} 的多余目录");
         }
-    }
-
-    /// 包内常见辅助文件（config.xml / README / 备注.txt）不得把判定带偏：三种布局各验一份。
-    #[test]
-    fn aux_files_never_affect_judgement() {
+        // 辅助文件（config.xml / README / 备注.txt）不得把判定带偏：三种布局各验一份。
         // (说明, 建包子目录, 根图, (standard, status, missing 数, expected_total))
-        let cases: Vec<(&str, Vec<&str>, bool, (u8, &str, usize, usize))> = vec![
-            ("标准二全量", FACEPACK_DIRS.to_vec(), false, (2, "complete", 0, 14)),
-            ("标准三子集", vec!["China", "Japan", "Korea"], false, (3, "fixable", 59, 62)),
+        // 只留两例：标准二全量的期望与矩阵里那条完全同参（aux 文件是非图片，扫盘本就不收），
+        // 重跑同一组数字没有新信息。留下的是"最容易被根级非图片文件带偏"的两例：
+        // 子集包（缺 123 个目录、fixable）与平铺包（根级 aux 不得把它判成 Unknown）。
+        let aux_cases: Vec<(&str, Vec<&str>, bool, (u8, &str, usize, usize))> = vec![
+            ("标准三子集", vec!["China", "Japan", "Korea"], false, (3, "fixable", 123, 126)),
             ("标准一平铺", vec![], true, (1, "complete", 0, 0)),
         ];
-        for (name, dirs, with_root_image, expected) in cases {
+        for (name, dirs, with_root_image, expected) in aux_cases {
             let tmp = tempfile::tempdir().unwrap();
             mk_dirs(tmp.path(), &dirs);
             drop_aux_files(tmp.path());
@@ -988,7 +1051,7 @@ mod tests {
             assert_eq!(
                 (r.standard, r.status.as_str(), r.missing.len(), r.expected_total),
                 expected,
-                "用例 {name}"
+                "辅助文件用例 {name}"
             );
         }
     }

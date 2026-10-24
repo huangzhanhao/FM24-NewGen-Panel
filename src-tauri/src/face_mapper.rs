@@ -427,9 +427,12 @@ fn report_skipped(skipped: &[SkippedPlayer], logger: &impl LogSink) {
                  （目标目录在头像包内不可用；把规则 Fallback 改为 random 可改为全池取图）：{samples}",
                 group.len()
             ),
+            // 标准三里这个成因只剩「FolderList 内所有目录的牌都发完、且已发牌也空」
+            // 这一种（Deck 一轮发完会原地重洗，不会真的抽干），等价于空包；
+            // 标准一/标准二/Unknown 仍可能在禁重复下真的抽干，所以文案两义都留着。
             SkipReason::PoolExhausted => format!(
-                "{} 名球员没抽到图：禁重复模式下图片池已抽干\
-                 （大名单下的常规结局；需要全覆盖可勾选「允许复用」）：{samples}",
+                "{} 名球员没抽到图：可用目录里已无剩余图片\
+                 （空包或禁重复下已发完；需要全覆盖可勾选「允许复用」或换头像包）：{samples}",
                 group.len()
             ),
             SkipReason::EmptyPack => format!(
@@ -441,9 +444,9 @@ fn report_skipped(skipped: &[SkippedPlayer], logger: &impl LogSink) {
     }
 }
 
-/// 抽图回落汇总：选图规则内部的回落（首选目录不可用、改走他处取图）对上层本来不可见，
-/// 映射结束后一次性亮出计数。回落是设计内行为、不算异常，所以用 INFO；
-/// 但量级异常时（如整包目录缺失）这条就是「这批脸为什么看着不对」的第一手线索。
+/// 抽图统计：选图规则内部的回落（首选目录不可用、改走他处取图）与族命中数对上层本来不可见，
+/// 映射结束后一次性亮出计数。两类都是设计内行为、不算异常，所以用 INFO；
+/// 但量级异常时（如整包目录缺失、进去的全是 WF）这条就是「这批脸为什么看着不对」的第一手线索。
 fn report_rule_stats(rule: &dyn PickRule, logger: &impl LogSink) {
     let parts: Vec<String> = rule
         .stats()
@@ -452,7 +455,7 @@ fn report_rule_stats(rule: &dyn PickRule, logger: &impl LogSink) {
         .map(|(k, n)| format!("{} {n} 名", stat_label(k)))
         .collect();
     if !parts.is_empty() {
-        logger.info("facemap", format!("抽图回落统计：{}", parts.join("，")));
+        logger.info("facemap", format!("抽图统计：{}", parts.join("，")));
     }
 }
 
@@ -461,7 +464,9 @@ fn stat_label(key: &str) -> &str {
     match key {
         "target_dir_fallback" => "目标目录不可用、改从全池取图",
         "owner_fallback" => "候选目录不可用、改从本国基础池取图",
-        "pool_fallback" => "候选与本国目录均不可用、经全池兜底取图",
+        "pool_fallback" => "候选与本国目录均不可用、改从 FolderList 内的其他目录取图",
+        "wf_family" => "进女球员族（WF）",
+        "staff_family" => "进职员族（Staff）",
         other => other,
     }
 }
@@ -524,47 +529,80 @@ mod tests {
     }
 
     #[test]
-    fn no_duplicates_exhausts_pool() {
-        let dir = tempfile::tempdir().unwrap();
-        // {ESP, SpanMed} 混合目录包：ESP 不在标准二 FolderList → 判 Unknown → 递归全池规则。
-        // 禁重复 + 6 张图、3 名球员：断言 3 条互不重复的映射（无重复语义与标准无关）。
-        let nat_dir = dir.path().join("ESP");
-        std::fs::create_dir_all(&nat_dir).unwrap();
-        for i in 0..3 {
-            std::fs::write(nat_dir.join(format!("e{i}.png")), b"png").unwrap();
+    fn unknown_layout_uses_recursive_pool() {
+        // 主题：Unknown 布局（递归全池全随机）。① 部分抽取不重复；② 池恰好用尽时三层级全可达；
+        // ③ 映射的 ethnicity 为相对目录路径（可多级），from/resolve 全程用相对路径口径。
+        // ① 禁重复 + 6 张图、3 名球员：3 条映射互不重复（无重复语义与标准无关）。
+        let mixed = tempfile::tempdir().unwrap();
+        for d in ["ESP", "SpanMed"] {
+            let dir = mixed.path().join(d);
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..3 {
+                std::fs::write(dir.join(format!("e{i}.png")), b"png").unwrap();
+            }
         }
-        let eth_dir = dir.path().join("SpanMed");
-        std::fs::create_dir_all(&eth_dir).unwrap();
-        for i in 0..3 {
-            std::fs::write(eth_dir.join(format!("s{i}.png")), b"png").unwrap();
-        }
-        let img = dir.path().to_string_lossy().to_string();
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        let data: Vec<PlayerRecord> = (0..3)
-            .map(|i| player(&format!("r-30{i}"), "ESP", "1"))
-            .collect();
+        let mixed_img = mixed.path().to_string_lossy().to_string();
+        let mut mapper = FaceMapper::new(&mixed_img, &config(), &mut |_, _| {}).unwrap();
+        assert_eq!(mapper.layout, PackLayout::Unknown);
+        let data: Vec<PlayerRecord> = (0..3).map(|i| player(&format!("r-30{i}"), "ESP", "1")).collect();
         let cancel = AtomicBool::new(false);
         let logger = sink();
         let mapping = mapper
-            .generate_mapping(
-                &data,
-                Mode::Generate,
-                false,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &mut |_, _, _| {}, &logger)
             .unwrap();
         assert_eq!(mapping.len(), 3);
-        let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
+        // 【按 from 全路径比，不能只比词干】两个目录的词干集相同（e0..e2），
+        // 只看 `m.image` 会把 ESP/e0 与 SpanMed/e0 当成同一张图，断言随时假失败。
+        let images: BTreeSet<_> = mapping
+            .iter()
+            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image))
+            .collect();
         assert_eq!(images.len(), 3); // 无重复
+        // ② 无法识别的包（含孙目录）→ 递归全池：池恰好 3 张、球员 3 名 ⇒ 必然抽完全部图片
+        //（确定性断言，不依赖随机）。
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().to_string_lossy().to_string();
+        std::fs::create_dir_all(dir.path().join("weirdA/sub")).unwrap();
+        std::fs::write(dir.path().join("weirdA/i.png"), b"png").unwrap();
+        std::fs::write(dir.path().join("weirdA/sub/j.png"), b"png").unwrap();
+        std::fs::write(dir.path().join("root.png"), b"png").unwrap();
+        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
+        assert_eq!(mapper.layout, PackLayout::Unknown);
+        let data: Vec<PlayerRecord> = (0..3).map(|i| player(&format!("r-50{i}"), "ZZZ", "1")).collect();
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &mut |_, _, _| {}, &logger)
+            .unwrap();
+        assert_eq!(mapping.len(), 3);
+        let froms: BTreeSet<String> = mapping
+            .iter()
+            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image))
+            .collect();
+        // 根、子、孙三个层级的图片全部进入抽图结果。
+        assert_eq!(
+            froms,
+            BTreeSet::from([
+                "root".to_string(),
+                "weirdA/i".to_string(),
+                "weirdA/sub/j".to_string()
+            ])
+        );
+        // ③ 相对路径口径：resolve 用同一 ethnicity 字符串即可命中真实文件。
+        for m in &mapping {
+            assert!(
+                xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some()
+            );
+        }
     }
 
     #[test]
-    fn preserve_keeps_xml_and_skips_existing_uids() {
+    fn preserve_keeps_existing_entries_and_excludes_occupied_images() {
+        // 主题：Preserve。① 已有映射原样保留、只补新球员；② 未勾选「允许复用」时 config.xml
+        // 已占用的图先按 from 全路径从池中剔除（旧映射本身不重抽）。
+        let cancel = AtomicBool::new(false);
+        let logger = sink();
+        // ① 现有 config.xml 已有 r-2001（African/old）：保留旧值，r-2002 新建。
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
-        // 现有 config.xml 已有 r-2001
         crate::xml_parser::write_xml(
             &[MappingEntry {
                 uid: "r-2001".into(),
@@ -577,22 +615,38 @@ mod tests {
         .unwrap();
         let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "ESP", "1")];
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
         let mapping = mapper
-            .generate_mapping(
-                &data,
-                Mode::Preserve,
-                true,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
+            .generate_mapping(&data, Mode::Preserve, true, &cancel, &mut |_, _, _| {}, &logger)
             .unwrap();
-        // r-2001 保留旧映射，r-2002 新建
-        let e = mapping.iter().find(|m| m.uid == "r-2001").unwrap();
-        assert_eq!((e.ethnicity.as_str(), e.image.as_str()), ("African", "old"));
+        let kept = mapping.iter().find(|m| m.uid == "r-2001").unwrap();
+        assert_eq!((kept.ethnicity.as_str(), kept.image.as_str()), ("African", "old"));
         assert!(mapping.iter().any(|m| m.uid == "r-2002"));
+        // ② 另一份包：SpanMed 的 e0/e1 已被旧映射占用（该目录 3 张图），禁重复下新球员只能拿 e2。
+        let dir2 = tempfile::tempdir().unwrap();
+        let img2 = facepack(&dir2);
+        crate::xml_parser::write_xml(
+            &[
+                MappingEntry { uid: "r-2001".into(), ethnicity: "SpanMed".into(), image: "e0".into() },
+                MappingEntry { uid: "r-2002".into(), ethnicity: "SpanMed".into(), image: "e1".into() },
+            ],
+            Path::new(&img2),
+            false,
+        )
+        .unwrap();
+        let mut mapper = FaceMapper::new(&img2, &config(), &mut |_, _| {}).unwrap();
+        let data = vec![player("r-2001", "ESP", "1"), player("r-2003", "ESP", "1")];
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Preserve, false, &cancel, &mut |_, _, _| {}, &logger)
+            .unwrap();
+        let new = mapping.iter().find(|m| m.uid == "r-2003").unwrap();
+        assert_eq!(
+            (new.ethnicity.as_str(), new.image.as_str()),
+            ("SpanMed", "e2"),
+            "旧映射占用的 e0/e1 不得再发给新球员"
+        );
+        let old: Vec<_> = mapping.iter().filter(|m| m.uid == "r-2001").collect();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].image, "e0");
     }
 
     #[test]
@@ -649,59 +703,6 @@ mod tests {
     }
 
     #[test]
-    fn preserve_with_no_duplicates_excludes_images_occupied_by_xml() {
-        // Preserve + 未勾选「允许复用」：config.xml 已占用的图先按 from 全路径从池中剔除。
-        // facepack() 每个种族目录 3 张图，SpanMed 被旧映射占掉 e0/e1 → 新球员只能拿到 e2（确定性断言）。
-        let dir = tempfile::tempdir().unwrap();
-        let img = facepack(&dir);
-        crate::xml_parser::write_xml(
-            &[
-                MappingEntry {
-                    uid: "r-2001".into(),
-                    ethnicity: "SpanMed".into(),
-                    image: "e0".into(),
-                },
-                MappingEntry {
-                    uid: "r-2002".into(),
-                    ethnicity: "SpanMed".into(),
-                    image: "e1".into(),
-                },
-            ],
-            Path::new(&img),
-            false,
-        )
-        .unwrap();
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        let data = vec![player("r-2001", "ESP", "1"), player("r-2003", "ESP", "1")];
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
-        let mapping = mapper
-            .generate_mapping(
-                &data,
-                Mode::Preserve,
-                false,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
-            .unwrap();
-        // 新球员拿到池里仅剩的那张，不会复用旧映射已占用的图。
-        let new = mapping.iter().find(|m| m.uid == "r-2003").unwrap();
-        assert_eq!(
-            (new.ethnicity.as_str(), new.image.as_str()),
-            ("SpanMed", "e2"),
-            "旧映射占用的 e0/e1 不得再发给新球员"
-        );
-        // 旧映射原样保留（Preserve 不重抽）。
-        let old = mapping
-            .iter()
-            .filter(|m| m.uid == "r-2001")
-            .collect::<Vec<_>>();
-        assert_eq!(old.len(), 1);
-        assert_eq!(old[0].image, "e0");
-    }
-
-    #[test]
     fn cancel_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
@@ -731,8 +732,12 @@ mod tests {
     }
 
     #[test]
-    fn standard2_pack_classified_and_maps_by_ethnic() {
-        // facepack() 恰为 14 个合法种族目录 → 按内置 FolderList 判标准二且走种族匹配规则。
+    fn standard2_pack_maps_by_ethnic_and_keeps_dotted_stem() {
+        // 主题：标准二映射。① 判定 + correct_ethnic 进种族目录 + 每条 from 能定位真实文件；
+        // ② 含点号词干（x.1）按 file_stem 唯一口径写出，from 仍能定位到真实文件。
+        let cancel = AtomicBool::new(false);
+        let logger = sink();
+        // ① facepack() 恰为 14 个合法种族目录 → 按内置 FolderList 判标准二且走种族匹配规则。
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
         let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
@@ -744,17 +749,8 @@ mod tests {
             }
         );
         let data = vec![player("r-2001", "ESP", "1"), player("r-2002", "USA", "0")];
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
         let mapping = mapper
-            .generate_mapping(
-                &data,
-                Mode::Generate,
-                true,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
+            .generate_mapping(&data, Mode::Generate, true, &cancel, &mut |_, _, _| {}, &logger)
             .unwrap();
         assert_eq!(mapping.len(), 2);
         assert_eq!(mapping[0].ethnicity, "SpanMed"); // 按 correct_ethnic 进种族目录
@@ -764,22 +760,15 @@ mod tests {
                 xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some()
             );
         }
-    }
-
-    #[test]
-    fn standard2_dotted_filename_stem_resolves_to_real_file() {
-        // 含点号文件名（"x.1.png"）：写出的 from 必须是 "SpanMed/x.1" 才能定位到真实文件
-        //（词干走 file_stem 唯一口径，扫描池与 xml_parser 的解析/回填同规则）。
-        let dir = tempfile::tempdir().unwrap();
-        let img = facepack(&dir);
-        let spanmed = dir.path().join("SpanMed");
+        // ② 另一份包：SpanMed 池只剩 x.1.png ⇒ from 必须是 "SpanMed/x.1"。
+        let dir2 = tempfile::tempdir().unwrap();
+        let img2 = facepack(&dir2);
+        let spanmed = dir2.path().join("SpanMed");
         for i in 0..3 {
             std::fs::remove_file(spanmed.join(format!("e{i}.png"))).unwrap();
         }
-        std::fs::write(spanmed.join("x.1.png"), b"png").unwrap(); // SpanMed 池只剩这一张
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
+        std::fs::write(spanmed.join("x.1.png"), b"png").unwrap();
+        let mut mapper = FaceMapper::new(&img2, &config(), &mut |_, _| {}).unwrap();
         let mapping = mapper
             .generate_mapping(
                 &[player("r-2001", "ESP", "1")],
@@ -795,21 +784,23 @@ mod tests {
             ("SpanMed", "x.1")
         );
         assert!(
-            xml_parser::resolve_image_file(Path::new(&img), "SpanMed", "x.1").is_some(),
+            xml_parser::resolve_image_file(Path::new(&img2), "SpanMed", "x.1").is_some(),
             "from 应能定位到真实文件 SpanMed/x.1.png"
         );
     }
 
     #[test]
-    fn flat_generate_maps_everyone_randomly() {
+    fn flat_pack_covers_generate_exhaust_and_preserve() {
+        // 主题：标准一平铺包。① Generate 忽略国籍/种族码；② 禁重复抽干后跳过并留日志；
+        // ③ Preserve 保留旧平铺条目、只补新球员。
+        let cancel = AtomicBool::new(false);
+        let logger = sink();
+        // ① Generate：未知国籍同样被映射，ethnicity 恒为空串，图名能在包根命中真实文件。
         let dir = tempfile::tempdir().unwrap();
         let img = flatpack(&dir);
         let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
         assert_eq!(mapper.layout, PackLayout::Flat);
-        // ZZZ 不在标准映射：平铺必须忽略国籍/种族码，未知国籍球员同样被映射。
         let data = vec![player("r-3001", "ZZZ", "1"), player("r-3002", "ESP", "9")];
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
         let mapping = mapper
             .generate_mapping(
                 &data,
@@ -826,32 +817,21 @@ mod tests {
             // 每条映射的图名都能在包根命中真实文件（file_stem 贯通写入/解析/定位）。
             assert!(xml_parser::resolve_image_file(Path::new(&img), "", &m.image).is_some());
         }
-    }
-
-    #[test]
-    fn flat_no_duplicates_exhausts_pool() {
-        let dir = tempfile::tempdir().unwrap();
-        let img = flatpack(&dir); // 池共 6 张
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
+        // ② 禁重复：池共 6 张、8 名球员 → 只映射 6 条、全不重复；跳过 2 人留 WARNING 带样例。
+        let dir2 = tempfile::tempdir().unwrap();
+        let img2 = flatpack(&dir2);
+        let mut mapper = FaceMapper::new(&img2, &config(), &mut |_, _| {}).unwrap();
         let data: Vec<PlayerRecord> = (0..8)
             .map(|i| player(&format!("r-40{i}"), "ESP", "1"))
             .collect();
-        let cancel = AtomicBool::new(false);
-        let (logger, log_rx) = ChannelLogger::channel();
+        let (logger2, log_rx) = ChannelLogger::channel();
         let mapping = mapper
-            .generate_mapping(
-                &data,
-                Mode::Generate,
-                false,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
+            .generate_mapping(&data, Mode::Generate, false, &cancel, &mut |_, _, _| {}, &logger2)
             .unwrap();
         assert_eq!(mapping.len(), 6); // 池耗尽后其余球员被跳过
         let images: BTreeSet<_> = mapping.iter().map(|m| m.image.clone()).collect();
         assert_eq!(images.len(), 6); // 全不重复
-                                     // 【日志可见性】「谁没被抽到图」只有本模块知道：这两名球员在前台只会表现为「还是原脸」。
+        // 【日志可见性】「谁没被抽到图」只有本模块知道：这两名球员在前台只会表现为「还是原脸」。
         let logs: Vec<LogLine> = log_rx.try_iter().collect();
         let skip = logs
             .iter()
@@ -860,26 +840,53 @@ mod tests {
         assert_eq!(skip.level, "WARNING");
         assert_eq!(skip.module, "facemap");
         assert!(skip.message.contains("2 名球员"), "{:?}", skip.message);
-        // P4：样例必须带姓名与国籍/种族码，不是裸 UID。
+        // 样例必须带姓名与国籍/种族码，不是裸 UID。这里不钉"第几个人"——把 SKIP_LOG_MAX
+        // 与样例取值顺序一起焊进断言，改日志上限就会红得和"日志功能坏了"分不清。
         assert!(
-            skip.message.contains("r-407 T（ESP/1）"),
+            skip.message.contains("T（ESP/1）"),
             "样例格式应为 UID 姓名（国籍/码）：{:?}",
             skip.message
         );
+        // ③ Preserve：config.xml 已有平铺条目 from="face0"，保留旧值并只补新球员。
+        let dir3 = tempfile::tempdir().unwrap();
+        let img3 = flatpack(&dir3);
+        crate::xml_parser::write_xml(
+            &[MappingEntry {
+                uid: "r-3001".into(),
+                ethnicity: "".into(),
+                image: "face0".into(),
+            }],
+            Path::new(&img3),
+            false,
+        )
+        .unwrap();
+        let mut mapper = FaceMapper::new(&img3, &config(), &mut |_, _| {}).unwrap();
+        let data = vec![player("r-3001", "ESP", "1"), player("r-3002", "ESP", "1")];
+        let mapping = mapper
+            .generate_mapping(&data, Mode::Preserve, true, &cancel, &mut |_, _, _| {}, &logger)
+            .unwrap();
+        // r-3001 保留旧平铺映射；r-3002 新建且种族为空。
+        let kept = mapping.iter().find(|m| m.uid == "r-3001").unwrap();
+        assert_eq!((kept.ethnicity.as_str(), kept.image.as_str()), ("", "face0"));
+        assert!(mapping
+            .iter()
+            .any(|m| m.uid == "r-3002" && m.ethnicity.is_empty()));
     }
 
     #[test]
-    fn fallback_stats_are_logged_after_full_run() {
-        // 标准二子集包只建 SpanMed（判 fixable）：NGA 码 3 的目标目录不可用，
-        // 回落到全池取图；跑完全程后日志必须有一行回落统计（此前回落完全无声）。
+    fn logs_report_fallback_stats_read_counts_and_mode_effects() {
+        // 主题：日志可见性 —— 跑完全程后，只有本模块知道的几件事都要留下记录：
+        // ① 抽图统计；② 快照读不出来时的 WARN；③ 正常读取条数与 Preserve 补人数；
+        // ④ Generate 明确写出「现有映射不作判据、名单外条目会被丢弃」。
+        let cancel = AtomicBool::new(false);
+        let (logger, log_rx) = ChannelLogger::channel();
+        // ① 标准二子集包只建 SpanMed（判 fixable）：NGA 码 3 的目标目录不可用 → 回落到全池取图。
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().to_string_lossy().to_string();
         let d = dir.path().join("SpanMed");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("s0.png"), b"png").unwrap();
         let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        let (logger, log_rx) = ChannelLogger::channel();
-        let cancel = AtomicBool::new(false);
         let mapping = mapper
             .generate_mapping(
                 &[player("r-1", "NGA", "3")],
@@ -891,36 +898,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mapping.len(), 1, "缺目录不再跳过，应回落出图：{mapping:?}");
-        let logs: Vec<LogLine> = log_rx.try_iter().collect();
-        assert!(
-            logs.iter().any(|l| l.message.contains("抽图回落统计")
-                && l.message.contains("目标目录不可用、改从全池取图 1 名")),
-            "回落统计应落日志：{logs:?}"
-        );
-    }
-
-    #[test]
-    fn flat_preserve_keeps_existing_flat_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let img = flatpack(&dir);
-        // 现有 config.xml 已有平铺条目 from="face0"（解析回 ("", "face0")）。
-        crate::xml_parser::write_xml(
-            &[MappingEntry {
-                uid: "r-3001".into(),
-                ethnicity: "".into(),
-                image: "face0".into(),
-            }],
-            Path::new(&img),
-            false,
-        )
-        .unwrap();
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        let data = vec![player("r-3001", "ESP", "1"), player("r-3002", "ESP", "1")];
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
+        // ② 快照存在但读不出来（非 UTF-8）→ WARN + 按空表继续（球员仍被正常映射）。
+        let dir2 = tempfile::tempdir().unwrap();
+        let img2 = facepack(&dir2);
+        let scan = crate::facepack_scanner::scan_pack(&img2).unwrap();
+        let broken = dir2.path().join("broken.xml");
+        std::fs::write(&broken, [0xff, 0xfe, 0x00]).unwrap();
+        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(broken)).unwrap();
         let mapping = mapper
             .generate_mapping(
-                &data,
+                &[player("r-2001", "ESP", "1")],
                 Mode::Preserve,
                 true,
                 &cancel,
@@ -928,62 +915,62 @@ mod tests {
                 &logger,
             )
             .unwrap();
-        // r-3001 保留旧平铺映射；r-3002 新建且种族为空。
-        let e = mapping.iter().find(|m| m.uid == "r-3001").unwrap();
-        assert_eq!((e.ethnicity.as_str(), e.image.as_str()), ("", "face0"));
-        assert!(mapping
-            .iter()
-            .any(|m| m.uid == "r-3002" && m.ethnicity.is_empty()));
-    }
-
-    #[test]
-    fn unknown_layout_uses_recursive_pool() {
-        // 无法识别的包（含孙目录）→ 递归全池全随机：子/孙目录图片都会被抽到，
-        // 映射的 ethnicity 为相对目录路径（可多级），from/resolve 全程用相对路径口径。
-        let dir = tempfile::tempdir().unwrap();
-        let img = dir.path().to_string_lossy().to_string();
-        std::fs::create_dir_all(dir.path().join("weirdA/sub")).unwrap();
-        std::fs::write(dir.path().join("weirdA/i.png"), b"png").unwrap();
-        std::fs::write(dir.path().join("weirdA/sub/j.png"), b"png").unwrap();
-        std::fs::write(dir.path().join("root.png"), b"png").unwrap();
-        let mut mapper = FaceMapper::new(&img, &config(), &mut |_, _| {}).unwrap();
-        assert_eq!(mapper.layout, PackLayout::Unknown);
-        // 禁重复 + 池恰好 3 张、球员 3 名 → 必然抽完全部图片（确定性断言，不依赖随机）。
-        let data: Vec<PlayerRecord> = (0..3)
-            .map(|i| player(&format!("r-50{i}"), "ZZZ", "1"))
-            .collect();
-        let cancel = AtomicBool::new(false);
-        let logger = sink();
+        assert_eq!(mapping.len(), 1, "读出失败也应按空表继续：{mapping:?}");
+        // ③ 正常快照 → INFO 记条数，Preserve 再报一次「已有映射多少、本次补多少」。
+        let snap = dir2.path().join("group.xml");
+        std::fs::write(&snap, config_xml_text(&[("r-2001", "SpanMed/e0")])).unwrap();
+        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
         let mapping = mapper
             .generate_mapping(
-                &data,
-                Mode::Generate,
-                false,
+                &[player("r-2001", "ESP", "1")],
+                Mode::Preserve,
+                true,
                 &cancel,
                 &mut |_, _, _| {},
                 &logger,
             )
             .unwrap();
-        assert_eq!(mapping.len(), 3);
-        let froms: BTreeSet<String> = mapping
-            .iter()
-            .map(|m| xml_parser::record_from(&m.ethnicity, &m.image))
-            .collect();
-        // 根、子、孙三个层级的图片全部进入抽图结果。
         assert_eq!(
-            froms,
-            BTreeSet::from([
-                "root".to_string(),
-                "weirdA/i".to_string(),
-                "weirdA/sub/j".to_string()
-            ])
+            (mapping[0].ethnicity.as_str(), mapping[0].image.as_str()),
+            ("SpanMed", "e0")
         );
-        // 相对路径口径：resolve 用同一 ethnicity 字符串即可命中真实文件。
-        for m in &mapping {
-            assert!(
-                xml_parser::resolve_image_file(Path::new(&img), &m.ethnicity, &m.image).is_some()
-            );
-        }
+        // ④ Generate：同一份快照，但明确不作判据（只重抽名单内的，其余条目会被抛弃）。
+        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
+        let mapping = mapper
+            .generate_mapping(
+                &[player("r-2001", "ESP", "1")],
+                Mode::Generate,
+                true,
+                &cancel,
+                &mut |_, _, _| {},
+                &logger,
+            )
+            .unwrap();
+        assert_eq!(mapping.len(), 1);
+
+        // 汇总断言：四段的日志都落在 facemap 模块下。
+        let logs: Vec<LogLine> = log_rx.try_iter().collect();
+        assert!(logs.iter().all(|l| l.module == "facemap"), "{logs:?}");
+        let find =
+            |needle: &str, level: &str| logs.iter().any(|l| l.level == level && l.message.contains(needle));
+        assert!(
+            logs.iter().any(|l| l.message.contains("抽图统计")
+                && l.message.contains("目标目录不可用、改从全池取图 1 名")),
+            "回落统计应落日志：{logs:?}"
+        );
+        assert!(find("读取现有映射失败", "WARNING"), "损坏的快照必须留下 WARN：{logs:?}");
+        assert!(find("现有映射：读取 1 条", "INFO"), "正常读取要记条数：{logs:?}");
+        assert!(find("本次补 0 名", "INFO"), "Preserve 要报本次实际补的人数：{logs:?}");
+        assert!(
+            find("生成模式：名单 1 名全部重抽", "INFO"),
+            "Generate 要报名单规模：{logs:?}"
+        );
+        assert!(
+            find("不作判据且其名单外条目将被丢弃", "INFO"),
+            "Generate 要写明会丢弃现有映射的名单外条目：{logs:?}"
+        );
+        // 反面：这几轮都没有球员被跳过，不该出现「没抽到图」的告警。
+        assert!(!logs.iter().any(|l| l.message.contains("没抽到图")), "{logs:?}");
     }
 
     /// 手写一份 config.xml 文本：快照文件不在头像包目录里，用不了 `write_xml`（它只会写
@@ -1094,99 +1081,6 @@ mod tests {
         assert!(
             wrong.iter().any(|m| m.uid == "r-8001"),
             "老口径（读 live）本应带进别档映射，说明本用例没有真正区分两个来源：{wrong:?}"
-        );
-    }
-
-    #[test]
-    fn read_result_and_mode_counts_are_logged() {
-        // 【日志可见性】三个分支各有一条「只有本模块知道」的信息：
-        //   ① 保留/覆写的判据读不出来时，以前被 `unwrap_or_default()` 一把抹平（Preserve 把所有人当
-        //      新球员重抽、Overwrite 丢掉名单外旧映射，用户只看见「头像全变了」）→ 现在必须留 WARN；
-        //   ② 正常读取要记清条数与 Preserve 的「本次补几名」；
-        //   ③ Generate 要明确写出「现有映射不作判据、其名单外条目会被丢弃」这条副作用。
-        let dir = tempfile::tempdir().unwrap();
-        let img = facepack(&dir);
-        let scan = crate::facepack_scanner::scan_pack(&img).unwrap();
-        let cancel = AtomicBool::new(false);
-        let (logger, log_rx) = ChannelLogger::channel();
-        // ① 快照存在但读不出来（非 UTF-8）→ WARN + 按空表继续（球员仍被正常映射）。
-        let broken = dir.path().join("broken.xml");
-        std::fs::write(&broken, [0xff, 0xfe, 0x00]).unwrap();
-        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(broken)).unwrap();
-        let mapping = mapper
-            .generate_mapping(
-                &[player("r-2001", "ESP", "1")],
-                Mode::Preserve,
-                true,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
-            .unwrap();
-        assert_eq!(mapping.len(), 1, "读出失败也应按空表继续：{mapping:?}");
-        // ② 正常快照 → INFO 记条数，Preserve 再报一次「已有映射多少、本次补多少」。
-        let snap = dir.path().join("group.xml");
-        std::fs::write(&snap, config_xml_text(&[("r-2001", "SpanMed/e0")])).unwrap();
-        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
-        let mapping = mapper
-            .generate_mapping(
-                &[player("r-2001", "ESP", "1")],
-                Mode::Preserve,
-                true,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
-            .unwrap();
-        assert_eq!(mapping.len(), 1);
-        assert_eq!(
-            (mapping[0].ethnicity.as_str(), mapping[0].image.as_str()),
-            ("SpanMed", "e0")
-        );
-        // ③ Generate：同一份快照，但明确不作判据（ Gen 只重抽名单内的，其余条目会被抛弃）。
-        let mut mapper = FaceMapper::from_scan(&scan, &config(), Some(snap.clone())).unwrap();
-        let mapping = mapper
-            .generate_mapping(
-                &[player("r-2001", "ESP", "1")],
-                Mode::Generate,
-                true,
-                &cancel,
-                &mut |_, _, _| {},
-                &logger,
-            )
-            .unwrap();
-        assert_eq!(mapping.len(), 1);
-
-        let logs: Vec<LogLine> = log_rx.try_iter().collect();
-        assert!(logs.iter().all(|l| l.module == "facemap"), "{logs:?}");
-        let find = |needle: &str, level: &str| {
-            logs.iter()
-                .any(|l| l.level == level && l.message.contains(needle))
-        };
-        assert!(
-            find("读取现有映射失败", "WARNING"),
-            "损坏的快照必须留下 WARN：{logs:?}"
-        );
-        assert!(
-            find("现有映射：读取 1 条", "INFO"),
-            "正常读取要记条数：{logs:?}"
-        );
-        assert!(
-            find("本次补 0 名", "INFO"),
-            "Preserve 要报本次实际补的人数：{logs:?}"
-        );
-        assert!(
-            find("生成模式：名单 1 名全部重抽", "INFO"),
-            "Generate 要报名单规模：{logs:?}"
-        );
-        assert!(
-            find("不作判据且其名单外条目将被丢弃", "INFO"),
-            "Generate 要写明会丢弃现有映射的名单外条目：{logs:?}"
-        );
-        // 反面：这三轮都没有球员被跳过，不该出现「没抽到图」的告警。
-        assert!(
-            !logs.iter().any(|l| l.message.contains("没抽到图")),
-            "{logs:?}"
         );
     }
 }

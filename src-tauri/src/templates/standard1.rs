@@ -85,7 +85,8 @@ mod tests {
     }
 
     #[test]
-    fn standard1_picks_from_root_and_excludes_used() {
+    fn standard1_covers_pick_exclude_and_skip_reasons() {
+        // 主题：标准一（包根平铺单池）。随机取图、按词干剔除、两种跳过成因。
         let mut rule = Standard1Rule::new(&sset(&["a", "b", "c"]));
         // 全随机：多次抽取都应落在池内，且 dir 为空串。
         for _ in 0..10 {
@@ -99,11 +100,7 @@ mod tests {
             let img = rule.pick(&player("r-1", "ZZZ", "1"), true).unwrap();
             assert_ne!(img.stem, "b");
         }
-    }
-
-    #[test]
-    fn standard1_skip_reasons_distinguish_empty_pack_from_exhausted() {
-        // 池本来就空（包根无图）→ EmptyPack。
+        // 池本来就空（包根无图）→ EmptyPack；duplicates 两种取值成因一致。
         let mut rule = Standard1Rule::new(&BTreeSet::new());
         assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);

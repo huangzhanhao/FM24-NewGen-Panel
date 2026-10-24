@@ -5,7 +5,7 @@
 //!   1. `PickRule` trait 与 `PickedImage`：统一接口与返回值；
 //!   2. `for_layout`：唯一分发入口（按扫描出的布局挑规则）；
 //!   3. `RuleConfig`：规则聚合与加载（内置默认 + 用户可编辑 json）；
-//!   4. `filter_pools` / `pick_from_pools_flat` / `sorted_unique`：纯机械工具；
+//!   4. `filter_pools` / `pick_from_dirs` / `pick_from_pools_flat` / `sorted_unique`：纯机械工具；
 //!   5. `validate_registry`：标准间登记冲突守卫。
 //!
 //! 布局判定在 `facepack_scanner::classify`，本模块不重复实现 —— 判定与分发各只有一处真源。
@@ -212,7 +212,6 @@ pub fn for_layout(layout: PackLayout, scan: &PackScan, config: &RuleConfig) -> B
                 &config.standard2,
             )),
             3 => Box::new(standard3::Standard3Rule::new(
-                &scan.faces_map,
                 &scan.recursive_pools,
                 &config.standard3,
             )),
@@ -263,8 +262,70 @@ fn filter_pools(faces_map: &BTreeMap<String, BTreeSet<String>>, folder_list: &[S
         .collect()
 }
 
+/// Deck 的「发完原地重洗」：把某目录已发的牌洗回剩余牌堆。
+/// 【为什么不整份克隆一副 deck】剩余牌与已发牌互补，两者总量恒等于建池全集；
+/// 摘一张只需动一处，于是建池时那 28 万词条的整份复制（约几十 MB）可以全省掉。
+/// 洗回时用 `SliceRandom::shuffle`，与 NG 侧 `random` 动作同构（§8.5）。
+fn refill_into(pool: &mut Vec<String>, dealt: Vec<String>) {
+    let mut back = dealt;
+    rand::seq::SliceRandom::shuffle(&mut back[..], &mut rand::rng());
+    pool.extend(back);
+}
+
+/// 与 `pick_from_pools_flat` 同口径（展平计数按下标取），但**只在 `allowed` 里的目录之间抽**。
+/// 【为什么不能复用 flat】flat 会越过 FolderList 抽到 `WF/*`（45,006 张）与 `Staff/*`、
+/// `Scandinavian`、包根图 —— 男球员可能拿到女职员/女足头像。NG 实测 172,494 条映射
+/// **从不越过 FolderList**：94 个池的使用次数全部落在 `{q, q+1}`，越过清单的映射 0 条。
+/// `allowed` 内一张不剩（含"只剩已发牌但该目录不在 allowed 内"）⇒ None。
+fn pick_from_dirs(
+    pools: &mut Pools,
+    dealt: &mut BTreeMap<String, Vec<String>>,
+    allowed: &BTreeSet<String>,
+    duplicates: bool,
+) -> Option<PickedImage> {
+    if !duplicates {
+        // 先把 allowed 内已发完的目录洗回来，否则这一轮它们一张都贡献不了。
+        for (dir, pool) in pools.iter_mut() {
+            if pool.is_empty() && allowed.contains(dir) {
+                refill_into(pool, dealt.remove(dir).unwrap_or_default());
+            }
+        }
+    }
+    let total: usize = pools
+        .iter()
+        .filter(|(d, _)| allowed.contains(*d))
+        .map(|(_, p)| p.len())
+        .sum();
+    if total == 0 {
+        return None;
+    }
+    let idx = rand::rng().random_range(0..total);
+    let mut passed = 0usize;
+    for (dir, pool) in pools.iter_mut() {
+        if !allowed.contains(dir) {
+            continue;
+        }
+        if idx < passed + pool.len() {
+            let i = idx - passed;
+            // 下标直取 O(1)；禁重复就地 swap_remove 摘除，并记进已发牌堆。
+            let stem = if duplicates {
+                pool[i].clone()
+            } else {
+                pool.swap_remove(i)
+            };
+            if !duplicates {
+                dealt.entry(dir.clone()).or_default().push(stem.clone());
+            }
+            return Some(PickedImage { dir: dir.clone(), stem });
+        }
+        passed += pool.len();
+    }
+    None // total > 0 时上面必然 return，这里只为穷尽分支
+}
+
 /// 从多级池中全局随机取一张（展平计数按下标取，有序池保证可复现）。
-/// 禁重复时 swap_remove 就地摘除（O(1)）。标准三兜底与 Unknown 布局共用。
+/// 禁重复时 swap_remove 就地摘除（O(1)）。Unknown 布局的「全池全随机」专用；
+/// 标准三的兜底**不**走这里——它必须留在 FolderList 内（见 `pick_from_dirs`）。
 fn pick_from_pools_flat(pools: &mut Pools, duplicates: bool) -> Option<PickedImage> {
     let total: usize = pools.values().map(|s| s.len()).sum();
     if total == 0 {
@@ -333,25 +394,20 @@ mod tests {
             .iter()
             .map(|(t, f)| (*t, *f))
             .collect();
-        let subdirs: BTreeSet<String> = scan
-            .faces_map
-            .keys()
-            .filter(|n| !crate::facepack_scanner::is_junk_dir(n))
-            .cloned()
-            .collect();
-        let layout =
-            crate::facepack_scanner::classify(&subdirs, !scan.root_images.is_empty(), &refs);
+        let layout = crate::facepack_scanner::classify_scan(&scan, &refs);
         eprintln!("判定：{layout:?}");
         assert!(
             matches!(layout, PackLayout::Standard { standard: 3, .. }),
             "该包未被判为标准三：{layout:?}"
         );
         // 清单目录在包内的健康度：缺失 / 空目录列出来（对应「一键创建缺失目录」的语义）。
+        // 判据走递归池（键是完整相对路径）—— 清单里 64 条多级条目（`WF/x`、`Staff/r/male`）
+        // 在一级目录 map 里根本不存在，拿它判会把它们全报成缺失。
         let unhealthy: Vec<&String> = config
             .standard3
             .folder_list
             .iter()
-            .filter(|d| scan.faces_map.get(*d).is_none_or(|s| s.is_empty()))
+            .filter(|d| scan.recursive_pools.get(*d).is_none_or(|s| s.is_empty()))
             .collect();
         if !unhealthy.is_empty() {
             eprintln!(
@@ -455,8 +511,13 @@ mod tests {
         for code in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] {
             assert!(cfg.standard2.code_rules.contains_key(code), "缺码 {code}");
         }
-        // 标准三：62 目录清单 + Ethnics（233 国）+ 规则块（国家/族群/全局共 43 个）+ Version 4 + Random 兜底。
-        assert_eq!(cfg.standard3.folder_list.len(), 62);
+        // 标准三：126 目录清单（62 男球员族裔 + 32 女球员 + 32 职员）+ Ethnics（233 国）
+        // + 规则块（国家/族群/全局共 43 个）+ Version 4 + Random 兜底。
+        assert_eq!(cfg.standard3.folder_list.len(), 126);
+        // 目录族映射表：男族裔目录 → 女球员/职员目录（58 条，含多值），女职员换区仅 4 条。
+        assert_eq!(cfg.standard3.folder_mapping_female.len(), 58);
+        assert_eq!(cfg.standard3.folder_mapping_staff.len(), 58);
+        assert_eq!(cfg.standard3.folder_mapping_staff_female.len(), 4);
         assert!(cfg
             .standard3
             .folder_list
@@ -483,7 +544,6 @@ mod tests {
             rules["_DEFAULT_"]["9"],
             standard3::MappingRule::Directly("MixedRace".into())
         );
-        assert_eq!(rules["_DEFAULT_"]["0"], standard3::MappingRule::Default);
         assert_eq!(
             rules["Mestizo"]["7"],
             standard3::MappingRule::Directly("IndigenousSA".into())
@@ -506,7 +566,6 @@ mod tests {
         assert!(data.path().join("rules/standard3.json").is_file());
         let cfg = RuleConfig::load(data.path()).unwrap();
         assert_eq!(cfg.standard2.ethnics["ARG"], "SAMed");
-        assert_eq!(cfg.standard3.folder_list.len(), 62);
         // 二次 ensure：已存在不覆盖（写个标记内容验证不被冲掉）。
         let s2 = data.path().join("rules/standard2.json");
         std::fs::write(
@@ -543,25 +602,39 @@ mod tests {
                 .standard3
                 .folder_list
                 .len(),
-            62
+            126
         );
     }
 
     #[test]
-    fn folder_lists_registers_all_standards() {
+    fn registry_registers_all_standards_and_rejects_overlapping_lists() {
+        // 主题：标准登记表与冲突守卫。
         let cfg = RuleConfig::builtin();
         let lists = cfg.folder_lists();
+        // ① 登记顺序即判定优先级：标准二在前、标准三在后；两份清单都非空。
         assert_eq!(
             lists.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
             vec![2, 3]
         );
         assert!(lists.iter().all(|(_, f)| !f.is_empty()));
-    }
-
-    #[test]
-    fn validate_registry_rejects_overlapping_folder_lists() {
-        // 出厂两份清单交集为 0 → 通过（标准二 14 目录、标准三 62 目录，实测无一名重合）。
+        // ② 出厂两份清单交集为 0 → 通过（标准二 14 目录、标准三 126 目录，实测无一名重合）。
         validate_registry(&RuleConfig::builtin()).unwrap();
+        // ②′ 再单独钉一次「新增的 64 条多级目录与标准二 14 条交集为 0」——
+        // 这是 `classify` 先命中先赢的前提，也是这次扩清单最容易踩坏的地方。
+        let multi_level: BTreeSet<&str> = cfg
+            .standard3
+            .folder_list
+            .iter()
+            .filter(|d| d.contains('/'))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(multi_level.len(), 64, "应新增 32 条 WF/* + 18 男职员 + 14 女职员");
+        assert!(
+            multi_level
+                .iter()
+                .all(|d| !crate::facepack_scanner::FACEPACK_DIRS.contains(d)),
+            "新增的多级目录不得与标准二清单重合"
+        );
         // 包含关系（标准二清单 ⊂ 标准三清单）→ 报错并指名两个标准号。
         let mut cfg = RuleConfig::builtin();
         cfg.standard2.folder_list = vec!["China".into(), "Japan".into()];

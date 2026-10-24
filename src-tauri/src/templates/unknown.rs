@@ -93,7 +93,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_picks_everything_and_excludes_by_full_path() {
+    fn unknown_covers_full_pool_exclude_and_empty_pack() {
+        // 主题：Unknown 布局（递归全池全随机）。三层级可达、禁重复抽尽、按全路径剔除、空包跳过。
         // 池：根 {r1}、A {x1, x2}、A/sub {d1} —— 共 4 张。
         let mut rule = UnknownRule::new(&pools_fixture());
         // 禁重复抽满 4 次（池恰 4 张）→ 确定性断言：根、子、孙三个层级的图片全部可达。
@@ -111,11 +112,7 @@ mod tests {
         assert_eq!(rule.pools["A"], vset(&["x2"]));
         assert!(rule.pools["A/sub"].is_empty());
         assert_eq!(rule.pools.get("").unwrap(), &vset(&["r1"]));
-    }
-
-    /// 空包（Empty）走的是同一套规则：池为空 → 每个球员都跳过，成因 = 整包无图。
-    #[test]
-    fn unknown_empty_pack_skips_every_player() {
+        // 空包（Empty 布局）走同一套规则：池为空 → 每个球员都跳过，成因 = 整包无图。
         let mut rule = UnknownRule::new(&BTreeMap::from([(String::new(), BTreeSet::new())]));
         assert!(rule.pick(&player("r-1", "ESP", "1"), true).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::EmptyPack);

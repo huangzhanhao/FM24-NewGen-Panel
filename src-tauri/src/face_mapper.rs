@@ -444,7 +444,7 @@ fn report_skipped(skipped: &[SkippedPlayer], logger: &impl LogSink) {
     }
 }
 
-/// 抽图统计：选图规则内部的回落（首选目录不可用、改走他处取图）与族命中数对上层本来不可见，
+/// 抽图统计：选图规则内部的回落（首选目录不可用、改走他处取图）与类别命中数对上层本来不可见，
 /// 映射结束后一次性亮出计数。两类都是设计内行为、不算异常，所以用 INFO；
 /// 但量级异常时（如整包目录缺失、进去的全是 WF）这条就是「这批脸为什么看着不对」的第一手线索。
 fn report_rule_stats(rule: &dyn PickRule, logger: &impl LogSink) {
@@ -465,8 +465,8 @@ fn stat_label(key: &str) -> &str {
         "target_dir_fallback" => "目标目录不可用、改从全池取图",
         "owner_fallback" => "候选目录不可用、改从本国基础池取图",
         "pool_fallback" => "候选与本国目录均不可用、改从 FolderList 内的其他目录取图",
-        "wf_family" => "进女球员族（WF）",
-        "staff_family" => "进职员族（Staff）",
+        "wf_family" => "进女球员类别（WF）",
+        "staff_family" => "进职员类别（Staff）",
         other => other,
     }
 }
@@ -524,7 +524,7 @@ mod tests {
             hair_length: "1".into(),
             hair_color: "1".into(),
             ethnicity_code: code.into(),
-            detailed: None,
+            ..Default::default()
         }
     }
 

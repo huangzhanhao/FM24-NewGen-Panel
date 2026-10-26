@@ -16,10 +16,14 @@ export interface DetailedInfo {
   extraFields: string[]; // 用户自定义列原文（第 19 列起）
 }
 
+/** 数据源确定的人员类别；消费方不得从可空的拓展字段反推。 */
+export type PersonKind = 'playerMale' | 'playerFemale' | 'staffMale' | 'staffFemale';
+
 /** 一个球员（对应 Rust 的 PlayerRecord）。detailed 可选，仅拓展名单有值。 */
 export interface PlayerRecord {
   uid: string; primaryNat: string; secNat: string; name: string;
   hairLength: string; hairColor: string; ethnicityCode: string;
+  kind: PersonKind;
   detailed?: DetailedInfo;
 }
 

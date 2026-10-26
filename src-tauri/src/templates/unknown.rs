@@ -71,7 +71,7 @@ mod tests {
             hair_length: "1".into(),
             hair_color: "1".into(),
             ethnicity_code: code.into(),
-            detailed: None,
+            ..Default::default()
         }
     }
 

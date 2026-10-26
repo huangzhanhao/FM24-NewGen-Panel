@@ -10,7 +10,7 @@ use super::{
     pick_from_dirs, refill_into, sorted_unique, PickRule, PickedImage, Pools, RuleFile, SkipReason,
 };
 use crate::json_store;
-use crate::rtf_scanner::PlayerRecord;
+use crate::rtf_scanner::{PersonKind, PlayerRecord};
 use crate::xml_parser::record_from;
 use rand::Rng;
 use serde::de::{self, Deserializer};
@@ -31,7 +31,7 @@ pub struct Standard3Config {
     pub folder_list: Vec<String>,                 // "FolderList"：图像池目录清单（判定 + 池过滤基准；含 `WF/x`、`Staff/r/male` 多级条目）
     #[serde(default)]
     pub ethnics: BTreeMap<String, String>,        // "Ethnics"：国籍三字码 → 本国基础池目录
-    // ↓ 三张「目录族映射表」：把男球员族裔目录换成本族目录。数据由 NG 四套出厂配置
+    // ↓ 三张「目录类别映射表」：把男球员族裔目录换成本类目录。数据由 NG 四套出厂配置
     //   （base_config{,_female,_staff,_staff_female}.json）逐国对齐后生成，可选键、前端不可见。
     #[serde(default)]
     pub folder_mapping_female: BTreeMap<String, Vec<String>>, // 男族裔目录 → 女球员目录（WF/<ethnic>）
@@ -258,27 +258,27 @@ impl Standard3Config {
             .collect()
     }
 
-    /// 把「男球员族裔目录」换成指定族的目标目录列表；映射表里没有 ⇒ 该族无对应目录。
+    /// 把「男球员族裔目录」换成指定类别的目标目录列表；映射表里没有 ⇒ 该类别无对应目录。
     /// 多值（如 `PacificIslanders` → `WF/Melanesia` / `WF/Polynesia` / `WF/African`）保留全部，
     /// 由 `Candidates::Uniform` 等概率选一 —— 与 NG 的 `random` 动作同构。
     /// 【女职员不跨性别取图】目标 `Staff/<region>/female` 缺失或为空时不回落男目录，
     /// 该球员宁可走兜底，也不拿异性头像充数。
-    fn family_dirs(&self, male_dir: Option<&str>, family: FolderFamily) -> Vec<String> {
+    fn family_dirs(&self, male_dir: Option<&str>, family: PersonKind) -> Vec<String> {
         let Some(base) = male_dir else {
             return Vec::new();
         };
         let regions = match family {
-            FolderFamily::PlayerFemale => {
+            PersonKind::PlayerFemale => {
                 return self.folder_mapping_female.get(base).cloned().unwrap_or_default()
             }
-            // 男球员族由三级规则链自己决定，不走映射表。
-            FolderFamily::PlayerMale => return Vec::new(),
+            // 男球员类别由三级规则链自己决定，不走映射表。
+            PersonKind::PlayerMale => return Vec::new(),
             _ => match self.folder_mapping_staff.get(base) {
                 Some(v) => v,
                 None => return Vec::new(),
             },
         };
-        let female = family == FolderFamily::StaffFemale;
+        let female = family == PersonKind::StaffFemale;
         regions
             .iter()
             .map(|r| {
@@ -322,12 +322,12 @@ impl Standard3Config {
         if !self.ethnicity_mapping_rules.contains_key(DEFAULT_BLOCK) {
             return Err(format!("缺少 {DEFAULT_BLOCK} 全局默认块：没有它的国籍将无法解析"));
         }
-        // 目录族映射表的值必须落在 FolderList 内：映射出去的目录若不在白名单里，
+        // 目录类别映射表的值必须落在 FolderList 内：映射出去的目录若不在白名单里，
         // `usable()` 会恒为假、路由静默退化成兜底 —— 这种错配在配置期就能查出来。
         //
-        // FolderMappingFemale 另需一道目录族形态校验：`family_dirs` 对女球员原样返回映射值、
+        // FolderMappingFemale 另需一道目录类别形态校验：`family_dirs` 对女球员原样返回映射值、
         // 不按目录形态过滤，所以目标指到男球员目录时照样能抽图 —— 男族裔目录也在 FolderList 内，
-        // 上一条查不出来。后果是女球员拿到男脸却仍计入 wf_family，日志报「进了女球员族」而实际没有。
+        // 上一条查不出来。后果是女球员拿到男脸却仍计入 wf_family，日志报「进了女球员类别」而实际没有。
         // 职员映射不需要这道关：下面把 `/male`、`/female` 拼进路径再查，后缀已被强制。
         for (src, dsts) in &self.folder_mapping_female {
             for d in dsts {
@@ -422,62 +422,19 @@ fn retain_unused(pools: &mut BTreeMap<String, Vec<String>>, used: &BTreeSet<Stri
     }
 }
 
-/// 目录族：由 **FolderList 条目的形态**推导（S-4），不新增字段——
-/// 族是形态的派生量，加字段就多一份要与 FolderList 手工同步的状态。
-///   `Spain`            → 男球员族裔目录（62 条，无 `/`）
-///   `WF/China`         → 女球员目录（32 条）
-///   `Staff/African/male`   → 男职员目录（18 条）
-///   `Staff/African/female` → 女职员目录（14 条）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FolderFamily {
-    PlayerMale,
-    PlayerFemale,
-    StaffMale,
-    StaffFemale,
-}
-
-impl FolderFamily {
-    /// `fallback_dirs` 的下标（枚举顺序即下标，新增族时此处与数组长度一起改）。
-    fn index(self) -> usize {
-        match self {
-            FolderFamily::PlayerMale => 0,
-            FolderFamily::PlayerFemale => 1,
-            FolderFamily::StaffMale => 2,
-            FolderFamily::StaffFemale => 3,
-        }
-    }
-}
-
-/// 目录属于哪一族：只由 FolderList 条目的形态决定（无 `/` 名 / `WF/` / `Staff/…/male|female`）。
-/// 与 `family_of`（看人）互为两侧：两侧口径必须一致，否则兜底会把球员送进另一族的目录。
-fn family_of_dir(dir: &str) -> FolderFamily {
+/// 目录类别只由 FolderList 条目的形态决定（无 `/` 名 / `WF/` / `Staff/…/male|female`）。
+/// 返回记录共用的 `PersonKind`，避免兜底池和人员路由采用不同的类别集合。
+fn family_of_dir(dir: &str) -> PersonKind {
     if dir.starts_with("WF/") {
-        FolderFamily::PlayerFemale
+        PersonKind::PlayerFemale
     } else if dir.starts_with("Staff/") {
         if dir.ends_with("/female") {
-            FolderFamily::StaffFemale
+            PersonKind::StaffFemale
         } else {
-            FolderFamily::StaffMale
+            PersonKind::StaffMale
         }
     } else {
-        FolderFamily::PlayerMale
-    }
-}
-
-/// 按球员身份定族（S-3，唯一口径）。
-/// 判据与 `image_ai` 的职员/女性判定同源（`is_female` 直接复用，不另抄一份）。
-/// 【为什么 `detailed.is_none()` 走男球员路径】基础名单（18 列）没有性别与「偏好工作」列，
-/// 现状也一直是全男球员假设；若按"族不限"放它去抽 `WF/`，现有 62 个目录的语义就被改坏了。
-fn family_of(player: &PlayerRecord) -> FolderFamily {
-    let Some(d) = player.detailed.as_ref() else {
-        return FolderFamily::PlayerMale;
-    };
-    let female = crate::image_ai::is_female(&d.gender);
-    match (!d.preferred_job.is_empty(), female) {
-        (true, true) => FolderFamily::StaffFemale,
-        (true, false) => FolderFamily::StaffMale,
-        (false, true) => FolderFamily::PlayerFemale,
-        (false, false) => FolderFamily::PlayerMale,
+        PersonKind::PlayerMale
     }
 }
 
@@ -544,23 +501,23 @@ pub struct Standard3Rule {
     /// 只存目录名不存图，所以包外目录（Scandinavian 等）天然进不了规则池。
     /// 多级条目（`WF/x`、`Staff/r/male`）由递归池判空，与一级目录名同口径。
     rule_dirs: BTreeSet<String>,
-    /// `rule_dirs` 按族预分（索引 = `FolderFamily::index`）：兜底只在本族的清单内目录里抽。
-    /// 【为什么必须分族】全量 `rule_dirs` 含 `WF/*` 与 `Staff/*`，男球员的兜底会抽到
-    /// 女足/女职员头像；NG 实测 172,494 条映射里 0 条越过本族（`WF` 一张都没用到）。
-    fallback_dirs: [BTreeSet<String>; 4],
+    /// `rule_dirs` 按类别预分：兜底只在本类的清单内目录里抽。
+    /// 【为什么必须分类】全量 `rule_dirs` 含 `WF/*` 与 `Staff/*`，男球员的兜底会抽到
+    /// 女足/女职员头像；NG 实测 172,494 条映射里 0 条越过本类（`WF` 一张都没用到）。
+    fallback_dirs: BTreeMap<PersonKind, BTreeSet<String>>,
     cfg: Standard3Config, // 构造时只拿自己这份配置
     fallback: Fallback,
     /// 最近一次 None 的成因（只在 pick 返回 None 后被读，初始值无意义）。
     last_skip: SkipReason,
     /// 候选目录不可用、改从本国基础池取图的次数（stats 键 "owner_fallback"）。
     owner_fallbacks: usize,
-    /// 候选与本国目录都不可用、经同族清单内目录兜底取图的次数（stats 键 "pool_fallback"）。
+    /// 候选与本国目录都不可用、经同类清单内目录兜底取图的次数（stats 键 "pool_fallback"）。
     pool_fallbacks: usize,
-    /// 成功出图、且族为**女球员（WF）**的记录数（stats 键 "wf_family"）。
+    /// 成功出图、且类别为**女球员（WF）**的记录数（stats 键 "wf_family"）。
     /// 【只统计成功出图】失败/跳过的人没进过任何目录，计入会把「多少人真的用上 WF 包」污染成
-    /// 「多少人被判定为女球员」。男球员族是默认族、不计数（否则每批汇总都多一行噪音）。
+    /// 「多少人被判定为女球员」。男球员类别是默认类别、不计数（否则每批汇总都多一行噪音）。
     wf_hits: usize,
-    /// 成功出图、且族为**职员（Staff，男女合并）**的记录数（stats 键 "staff_family"）。
+    /// 成功出图、且类别为**职员（Staff，男女合并）**的记录数（stats 键 "staff_family"）。
     /// 口径与 `wf_hits` 一致：只算成功出图，失败/跳过不计。
     staff_hits: usize,
 }
@@ -591,10 +548,10 @@ impl Standard3Rule {
             .filter(|d| recursive_pools.get(*d).is_some_and(|s| !s.is_empty()))
             .cloned()
             .collect();
-        // 兜底池按族预分：族的判据只看目录形态，与球员侧的 `family_of` 同口径。
-        let mut fallback_dirs: [BTreeSet<String>; 4] = std::array::from_fn(|_| BTreeSet::new());
+        // 兜底池按类别预分，键与人员记录共享同一个枚举，避免两侧分类次序漂移。
+        let mut fallback_dirs: BTreeMap<PersonKind, BTreeSet<String>> = BTreeMap::new();
         for d in &rule_dirs {
-            fallback_dirs[family_of_dir(d).index()].insert(d.clone());
+            fallback_dirs.entry(family_of_dir(d)).or_default().insert(d.clone());
         }
         Self {
             pools,
@@ -685,14 +642,14 @@ impl Standard3Rule {
         })
     }
 
-    /// 按族记一次「成功出图」（三个成功返回点各调一次，None 分支不调）。
-    /// 男球员是默认族、不计数；职员男女合并成一项 —— 汇总里关心的是"有没有走对族"，
+    /// 按类别记一次「成功出图」（三个成功返回点各调一次，None 分支不调）。
+    /// 男球员是默认类别、不计数；职员男女合并成一项 —— 汇总里关心的是"有没有走对类别"，
     /// 而不是再拆一层性别。
-    fn note_family(&mut self, family: FolderFamily) {
+    fn note_family(&mut self, family: PersonKind) {
         match family {
-            FolderFamily::PlayerFemale => self.wf_hits += 1,
-            FolderFamily::StaffMale | FolderFamily::StaffFemale => self.staff_hits += 1,
-            FolderFamily::PlayerMale => {}
+            PersonKind::PlayerFemale => self.wf_hits += 1,
+            PersonKind::StaffMale | PersonKind::StaffFemale => self.staff_hits += 1,
+            PersonKind::PlayerMale => {}
         }
     }
 }
@@ -708,12 +665,12 @@ impl PickRule for Standard3Rule {
     fn pick(&mut self, player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
         // 不使用第二国籍：标准三的每条规则已经把 (国籍, 种族码) 完全决定了目标目录。
         let res = self.cfg.resolve(&player.primary_nat, &player.ethnicity_code);
-        let family = family_of(player);
+        let family = player.kind;
         let (candidates, owner) = match family {
             // 男球员：三级规则链照旧 —— 规则块本身就是男球员口径。
-            FolderFamily::PlayerMale => (res.candidates.clone(), res.owner_folder.clone()),
-            // 女球员 / 职员：规则块不适用，改走「男族裔目录 → 本族目录」的映射表。
-            // 只做换族与过滤：三级查找的**顺序与层数都不变**，也不新增兜底层。
+            PersonKind::PlayerMale => (res.candidates.clone(), res.owner_folder.clone()),
+            // 女球员 / 职员：规则块不适用，改走「男族裔目录 → 本类目录」的映射表。
+            // 只做换类与过滤：三级查找的**顺序与层数都不变**，也不新增兜底层。
             family => {
                 let dirs = self.cfg.family_dirs(res.owner_folder.as_deref(), family);
                 (shape_of(dirs.clone()), dirs.into_iter().next())
@@ -736,11 +693,13 @@ impl PickRule for Standard3Rule {
             }
         }
         match self.fallback {
-            // 兜底仍只在 FolderList 内、且**只在本族目录**里抽：越过清单会抽到 `WF/*`（45,006 张）
+            // 兜底仍只在 FolderList 内、且**只在本类目录**里抽：越过清单会抽到 `WF/*`（45,006 张）
             // 与 `Staff/*`、`Scandinavian`、包根图，男球员可能拿到女职员/女足头像。抽不到 ⇒ 视同空包。
             Fallback::Random => {
-                let allowed = &self.fallback_dirs[family.index()];
-                match pick_from_dirs(&mut self.pools, &mut self.dealt, allowed, duplicates) {
+                let picked = self.fallback_dirs.get(&family).and_then(|allowed| {
+                    pick_from_dirs(&mut self.pools, &mut self.dealt, allowed, duplicates)
+                });
+                match picked {
                     Some(img) => {
                         self.pool_fallbacks += 1;
                         self.note_family(family);
@@ -787,34 +746,15 @@ mod tests {
             hair_length: "1".into(),
             hair_color: "1".into(),
             ethnicity_code: code.into(),
-            detailed: None,
+            ..Default::default()
         }
     }
 
-    /// 带拓展字段的记录（第 11 列性别 / 第 15 列偏好工作），用于女球员与职员路由。
-    fn detailed_player(
-        uid: &str,
-        nat: &str,
-        code: &str,
-        gender: &str,
-        preferred_job: &str,
-    ) -> PlayerRecord {
+    /// 带数据源类别的拓展记录，用于验证女球员与职员路由。
+    fn detailed_player(uid: &str, nat: &str, code: &str, kind: PersonKind) -> PlayerRecord {
         let mut p = player(uid, nat, code);
-        p.detailed = Some(crate::rtf_scanner::DetailedInfo {
-            skin_code: "1".into(),
-            avatar: String::new(),
-            is_newgan: String::new(),
-            gender: gender.into(),
-            age: String::new(),
-            height: String::new(),
-            club: String::new(),
-            based: String::new(),
-            preferred_job: preferred_job.into(),
-            ca: String::new(),
-            pa: String::new(),
-            rca: String::new(),
-            extra_fields: Vec::new(),
-        });
+        p.kind = kind;
+        p.detailed = Some(crate::rtf_scanner::DetailedInfo::default());
         p
     }
 
@@ -992,7 +932,7 @@ mod tests {
         let mut c = base();
         c.folder_list.push(c.folder_list[0].clone());
         assert!(c.validate().unwrap_err().contains("重复"));
-        // ⑧ 目录族映射表：目标先查在册，再查目录族形态。`Spain` 是男球员族裔目录（在册），
+        // ⑧ 目录类别映射表：目标先查在册，再查目录类别形态。`Spain` 是男球员族裔目录（在册），
         // 却被指成女球员目标 —— 女球员会静默拿到男脸，必须在配置期拦下。
         let mut c = base();
         c.folder_mapping_female.insert("Spain".into(), vec!["NotAFolder".into()]);
@@ -1054,8 +994,8 @@ mod tests {
         assert_eq!(kinds["single"], 1833 + 591, "default 与 directly 都解析成单一目录");
         assert_eq!(kinds["uniform"], 128);
         assert_eq!(kinds["weighted"], 11);
-        // 每个**男球员族**目录都至少被一条规则指到（无死目录）。
-        // `WF/*` 与 `Staff/*/*` 不由规则指向——规则块是男球员口径，那两族走目录族映射表。
+        // 每个**男球员类别**目录都至少被一条规则指到（无死目录）。
+        // `WF/*` 与 `Staff/*/*` 不由规则指向——规则块是男球员口径，那两类走目录类别映射表。
         let male_dirs: BTreeSet<String> = cfg
             .folder_list
             .iter()
@@ -1112,9 +1052,9 @@ mod tests {
     #[test]
     fn sampling_models_cover_deck_and_iid() {
         // 主题：取样模型。`duplicates=false` 是 Deck（一轮不放回、全池用尽、发完原地重洗、
-        // 不越族/不越清单）；`duplicates=true` 与 Deck 无关，仍是有放回独立均匀。
+        // 不越类/不越清单）；`duplicates=true` 与 Deck 无关，仍是有放回独立均匀。
         let cfg = RuleConfig::builtin().standard3;
-        // 陪跑池：清单内异族（WF / Staff）与清单外（Scandinavian）各一张 —— 族口径失效就会被抽到。
+        // 陪跑池：清单内异类（WF / Staff）与清单外（Scandinavian）各一张 —— 类别口径失效就会被抽到。
         let pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
             ("Spain".into(), sset(&["sp1", "sp2", "sp3", "sp4"])),
             ("WF/African".into(), sset(&["wf1"])),
@@ -1126,7 +1066,7 @@ mod tests {
         let mut round1 = Vec::new();
         for i in 0..4 {
             let img = rule.pick(&player(&format!("r-{i}"), "ESP", "1"), false).unwrap();
-            assert_eq!(img.dir, "Spain", "第 {i} 次越出本族/清单");
+            assert_eq!(img.dir, "Spain", "第 {i} 次越出本类/清单");
             round1.push(img.stem);
         }
         round1.sort();
@@ -1195,10 +1135,10 @@ mod tests {
         // 归属者目录也失效，兜底才会真正被触发（否则第二级 owner 回落先接住，兜底永远测不到）。
         cfg.ethnics.remove("ESP");
         let mut pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        pools.insert("Spain".into(), sset(&["sp1"]));   // 清单内、男球员族
-        pools.insert("Japan".into(), sset(&["jp1"]));   // 清单内、男球员族
-        pools.insert("WF/African".into(), sset(&["wf1"]));       // 清单内、女球员族
-        pools.insert("Staff/China/male".into(), sset(&["st1"]));   // 清单内、男职员族
+        pools.insert("Spain".into(), sset(&["sp1"]));   // 清单内、男球员类别
+        pools.insert("Japan".into(), sset(&["jp1"]));   // 清单内、男球员类别
+        pools.insert("WF/African".into(), sset(&["wf1"]));       // 清单内、女球员类别
+        pools.insert("Staff/China/male".into(), sset(&["st1"]));   // 清单内、男职员类别
         pools.insert("Scandinavian".into(), sset(&["sc1"]));      // 清单外
         pools.insert(String::new(), sset(&["root1"]));          // 包根，清单外
         let mut rule = Standard3Rule::new(&pools, &cfg);
@@ -1209,7 +1149,7 @@ mod tests {
             seen.insert(img.dir);
         }
         // 男球员路径：兜底不得产出 WF/*、Staff/*、Scandinavian、包根图。
-        assert_eq!(seen, sset(&["Spain", "Japan"]), "兜底越过了 FolderList 的族口径");
+        assert_eq!(seen, sset(&["Spain", "Japan"]), "兜底越过了 FolderList 的类别口径");
         assert_eq!(rule.stats(), vec![
             ("owner_fallback", 0), ("pool_fallback", 80), ("wf_family", 0), ("staff_family", 0)]);
         // ④ 清单内所有目录都空 ⇒ 一律 EmptyPack 跳过（Q4 裁定：与空包同处置）。
@@ -1223,8 +1163,8 @@ mod tests {
 
     #[test]
     fn family_routing_covers_female_and_staff_dirs() {
-        // 主题：族路由 + 族命中计数。同一条 rule 连跑四族，最后核对计数口径：
-        // 男球员是默认族不计数，失败的 pick 也不计数。
+        // 主题：类别路由 + 类别命中计数。同一条 rule 连跑四类，最后核对计数口径：
+        // 男球员是默认类别不计数，失败的 pick 也不计数。
         let mut cfg = RuleConfig::builtin().standard3;
         cfg.ethnics.insert("TST".into(), "Spain".into());
         cfg.folder_mapping_female.insert("Spain".into(), vec!["WF/Spain".into()]);
@@ -1239,80 +1179,76 @@ mod tests {
         pools.insert("Staff/MiddleEast/female".into(), sset(&["stf1"]));
 
         let mut rule = Standard3Rule::new(&recursive(&pools), &cfg);
-        // ① 基础名单（detailed=None）与男球员 → 62 族裔族
+        // ① 基础名单（detailed=None）与男球员 → 62 个族裔目录
         assert_eq!(rule.pick(&player("m1", "TST", "1"), true).unwrap().dir, "Spain");
-        // ② 女球员 → WF 族（男目录 Spain 经映射换成 WF/Spain）
-        let img = rule.pick(&detailed_player("w1", "TST", "1", "女", ""), true).unwrap();
+        // ② 女球员 → WF 类别（男目录 Spain 经映射换成 WF/Spain）
+        let img = rule.pick(&detailed_player("w1", "TST", "1", PersonKind::PlayerFemale), true).unwrap();
         assert_eq!(img.dir, "WF/Spain");
         // ③ 男职员 → Staff/<region>/male
-        let img = rule.pick(&detailed_player("s1", "TST", "1", "Male", "Coach"), true).unwrap();
+        let img = rule.pick(&detailed_player("s1", "TST", "1", PersonKind::StaffMale), true).unwrap();
         assert_eq!(img.dir, "Staff/Armenian/male");
         // ④ 女职员：区域先过 FolderMappingStaffFemale 覆盖表（Armenian → MiddleEast）
-        let img = rule.pick(&detailed_player("sf1", "TST", "1", "Female", "Scout"), true).unwrap();
+        let img = rule.pick(&detailed_player("sf1", "TST", "1", PersonKind::StaffFemale), true).unwrap();
         assert_eq!(img.dir, "Staff/MiddleEast/female");
-        // 4 次 pick 里男球员那次不计入族计数 ⇒ 1 + 2 = 3，而不是 4。
+        // 4 次 pick 里男球员那次不计入类别计数 ⇒ 1 + 2 = 3，而不是 4。
         assert_eq!(rule.stats(), vec![
             ("owner_fallback", 0), ("pool_fallback", 0), ("wf_family", 1), ("staff_family", 2)]);
-        // ⑤ 失败/跳过不计数：空包下女球员拿不到图，族计数保持 0（口径是「成功出图」）。
+        // ⑤ 失败/跳过不计数：空包下女球员拿不到图，类别计数保持 0（口径是「成功出图」）。
         let nothing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut rule = Standard3Rule::new(&recursive(&nothing), &cfg);
-        assert!(rule.pick(&detailed_player("w9", "TST", "1", "女", ""), true).is_none());
+        assert!(rule.pick(&detailed_player("w9", "TST", "1", PersonKind::PlayerFemale), true).is_none());
         assert_eq!(rule.stats(), vec![
             ("owner_fallback", 0), ("pool_fallback", 0), ("wf_family", 0), ("staff_family", 0)]);
     }
 
     #[test]
-    fn staff_roster_from_real_rtf_lands_in_its_own_family() {
-        // 端到端：真实职员名单（18 列）→ rtf_scanner 解析 → 标准三选图。
-        // 这条链路只靠两个字段串起来：`detailed.preferred_job`（非空 ⇒ 职员）与
-        // `detailed.gender`（第 11 列原文）。列映射或族判据任一改错，这里立刻红 ——
-        // 手搓 `detailed_player` 的用例测不到"真名单解析出来到底长什么样"。
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/testing_data/ext_staff_long_chn.rtf");
-        let (logger, _log_rx) = crate::logger::ChannelLogger::channel();
-        // 两步与生产同序：先识别格式（表头决定 Basic/ExtPlayer/ExtStaff），再解析行。
-        let mut scanner = crate::rtf_scanner::RtfScanner::new();
-        scanner.detect_format(&path, &logger).expect("职员样本的格式识别应通过");
-        let roster = scanner
-            .parse_roster(&path, false, &logger)
-            .expect("职员样本应能解析");
-        assert!(!roster.is_empty(), "样本不应解析出 0 行");
-        // 前置守卫：这批记录必须都带 detailed 与职位，否则下面测的其实是球员路径。
-        assert!(
-            roster
-                .iter()
-                .all(|p| p.detailed.as_ref().is_some_and(|d| !d.preferred_job.is_empty())),
-            "职员名单的解析结果必须逐行带 preferred_job"
-        );
-        // 126 个清单目录各给一张图：任何一族都能出图，断言才只反映族口径。
+    fn staff_rosters_from_real_rtfs_land_in_their_own_family() {
+        // 真实名单解析与标准三选图必须共享同一类别；短名单包含职位和性别同时为空的未加载职员。
         let cfg = RuleConfig::builtin().standard3;
         let mut pools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for d in &cfg.folder_list {
             pools.insert(d.clone(), sset(&["only"]));
         }
-        let mut rule = Standard3Rule::new(&recursive(&pools), &cfg);
-        let mut females = 0usize;
-        for p in &roster {
-            let d = p.detailed.as_ref().unwrap();
-            let female = crate::image_ai::is_female(&d.gender);
-            let img = rule
-                .pick(p, true)
-                .unwrap_or_else(|| panic!("{}（{}）没抽到图", p.name, d.preferred_job));
-            let want = if female { "/female" } else { "/male" };
-            assert!(
-                img.dir.starts_with("Staff/") && img.dir.ends_with(want),
-                "{}（性别 {:?}）应进 Staff/*{}，实际 {}",
-                p.name,
-                d.gender,
-                want,
-                img.dir
-            );
-            if female {
-                females += 1;
+        for (fixture, expected_blank_rows) in [
+            ("ext_staff_long_chn.rtf", None),
+            ("ext_staff_short_chn.rtf", Some(37usize)),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests/testing_data").join(fixture);
+            let (logger, _log_rx) = crate::logger::ChannelLogger::channel();
+            let mut scanner = crate::rtf_scanner::RtfScanner::new();
+            scanner.detect_format(&path, &logger)
+                .unwrap_or_else(|e| panic!("{fixture} 的格式识别应通过：{e}"));
+            let roster = scanner.parse_roster(&path, false, &logger)
+                .unwrap_or_else(|e| panic!("{fixture} 应能解析：{e}"));
+            assert!(!roster.is_empty(), "{fixture} 不应解析出 0 行");
+            assert!(roster.iter().all(|p| p.kind.is_staff()),
+                "{fixture} 的记录必须逐行保留职员类别");
+            if let Some(expected) = expected_blank_rows {
+                // 源文件的 398 个数据行里有一个两位 UID（45），按名单校验规则不会生成记录。
+                assert_eq!(roster.len(), 397, "短名单应保留全部合法记录");
+                let blank_rows = roster.iter().filter(|p| {
+                    p.detailed.as_ref().is_some_and(|d|
+                        d.gender.is_empty() && d.preferred_job.is_empty())
+                }).count();
+                assert_eq!(blank_rows, expected, "短名单的未加载职员行数");
             }
+            let mut rule = Standard3Rule::new(&recursive(&pools), &cfg);
+            let mut females = 0usize;
+            for p in &roster {
+                let img = rule.pick(p, true)
+                    .unwrap_or_else(|| panic!("{fixture} 中 UID {} 没抽到图", p.uid));
+                let want = if p.kind.is_female() {
+                    females += 1;
+                    "/female"
+                } else {
+                    "/male"
+                };
+                assert!(img.dir.starts_with("Staff/") && img.dir.ends_with(want),
+                    "{fixture} 中 UID {} 应进 Staff/*{}，实际 {}", p.uid, want, img.dir);
+            }
+            assert!(females > 0, "{fixture} 应覆盖女职员目录分支");
         }
-        // 性别分叉必须真的被踩到：样本里 394 男 / 4 女，全是女职员就不会走到 /female 分支。
-        assert!(females > 0, "样本里应有女职员，否则性别分叉没被覆盖");
     }
 
     #[test]

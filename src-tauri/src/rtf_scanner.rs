@@ -153,6 +153,43 @@ impl RtfFormat {
     }
 }
 
+/// 人员类别由数据源提供，消费方不得从可能为空的数据列反推。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PersonKind {
+    #[default]
+    PlayerMale,
+    PlayerFemale,
+    StaffMale,
+    StaffFemale,
+}
+
+impl PersonKind {
+    /// 让消费方统一选择职员专用资源，避免检查可能为空的职位文本。
+    pub fn is_staff(self) -> bool {
+        matches!(self, Self::StaffMale | Self::StaffFemale)
+    }
+
+    /// 让消费方统一应用女性专用规则，避免重复解释本地化性别文本。
+    pub fn is_female(self) -> bool {
+        matches!(self, Self::PlayerFemale | Self::StaffFemale)
+    }
+}
+
+/// 根据数据源已经确认的名单格式和性别原文确定人员类别。
+///
+/// 职员/球员只看表头格式，性别复用提示词侧的中英文判据。基础名单只有 7 列，
+/// 没有性别与职业列，因此维持全男球员假设。
+pub fn person_kind(format: RtfFormat, gender: &str) -> PersonKind {
+    match (format, crate::image_ai::is_female(gender)) {
+        (RtfFormat::Basic, _) => PersonKind::PlayerMale,
+        (RtfFormat::ExtPlayer, true) => PersonKind::PlayerFemale,
+        (RtfFormat::ExtPlayer, false) => PersonKind::PlayerMale,
+        (RtfFormat::ExtStaff, true) => PersonKind::StaffFemale,
+        (RtfFormat::ExtStaff, false) => PersonKind::StaffMale,
+    }
+}
+
 /// 一次名单解析的摘要（格式 / 语言 / 条数 / 随机人数）。
 /// 【为何单独成类型】「扫描RTF」命令与「替换」流水线都会解析名单，两处要给出同一份摘要：
 /// 替换成功时随 replace:finished 事件回传前端，名单预览因此不必再点一次「扫描RTF」就能
@@ -247,6 +284,7 @@ pub struct PlayerRecord {
     pub hair_length: String,
     pub hair_color: String,
     pub ethnicity_code: String, // 取值 "0".."10"
+    pub kind: PersonKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detailed: Option<DetailedInfo>, // 只有拓展名单才有；为空时不序列化，避免前端看到空的 detailed
 }
@@ -863,12 +901,13 @@ fn parse_basic_row(cells: &[String]) -> PlayerRecord {
         hair_length: cells[HAIR_LENGTH_COL].clone(),
         hair_color: cells[HAIR_COLOR_COL].clone(),
         ethnicity_code: cells[ETHNICITY_COL].clone(),
+        kind: PersonKind::PlayerMale,
         detailed: None,
     }
 }
 
-/// 组装拓展行。是否随机人按标志正向判断（包含“是”或“Yes”）；第 15 列按判断结果写入 `based` 或
-/// `preferred_job`（另一个留空，前端据此区分球员/职员记录）；第 19 列起的用户自定义列原文
+/// 组装拓展行。是否随机人按标志正向判断（包含“是”或“Yes”）；人员类别由格式与第 11 列
+/// 当场折叠，第 15 列按格式写入 `based` 或 `preferred_job`；第 19 列起的用户自定义列原文
 /// 放进 `extra_fields`；国籍两列就地查表转成三字码。
 fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
     let is_player = format == RtfFormat::ExtPlayer;
@@ -886,6 +925,7 @@ fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
         hair_length: cells[HAIR_LENGTH_COL].clone(),
         hair_color: cells[HAIR_COLOR_COL].clone(),
         ethnicity_code: cells[ETHNICITY_COL].clone(),
+        kind: person_kind(format, &cells[EXT_GENDER_COL]),
         detailed: Some(DetailedInfo {
             skin_code: cells[EXT_SKIN_COL].clone(),
             avatar: cells[EXT_AVATAR_COL].clone(),
@@ -1233,6 +1273,16 @@ mod tests {
     }
 
     #[test]
+    fn person_kind_maps_roster_format_and_gender() {
+        // 人员类别 = 表头格式 × 性别原文；基础名单无性别列，恒男球员。
+        assert_eq!(person_kind(RtfFormat::ExtPlayer, "Male"), PersonKind::PlayerMale);
+        assert_eq!(person_kind(RtfFormat::ExtPlayer, "女"), PersonKind::PlayerFemale);
+        assert_eq!(person_kind(RtfFormat::ExtStaff, "男"), PersonKind::StaffMale);
+        assert_eq!(person_kind(RtfFormat::ExtStaff, "Female"), PersonKind::StaffFemale);
+        assert_eq!(person_kind(RtfFormat::Basic, "Female"), PersonKind::PlayerMale);
+    }
+
+    #[test]
     fn ext_extra_columns_and_avatar_stored_verbatim() {
         // 第 18 列之后的用户自定义列按原文存进 extra_fields：球员表（英文表头）与职员表
         //（中文表头）共用同一收录规则，各验一份；职员表顺带锁定头像列与性别的原文入库。
@@ -1288,6 +1338,7 @@ mod tests {
         assert_eq!(data.len(), 1);
         let d = data[0].detailed.as_ref().unwrap();
         assert_eq!(data[0].uid, "67268144");
+        assert_eq!(data[0].kind, PersonKind::StaffMale);
         assert_eq!(d.skin_code, "");
         assert_eq!(d.gender, "");
         assert_eq!(d.rca, "");

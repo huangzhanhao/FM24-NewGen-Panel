@@ -434,7 +434,7 @@ mod tests {
                             hair_length: "1".into(),
                             hair_color: "1".into(),
                             ethnicity_code: code.to_string(),
-                            detailed: None,
+                            ..Default::default()
                         },
                         true,
                     )
@@ -487,7 +487,7 @@ mod tests {
                             hair_length: "1".into(),
                             hair_color: "1".into(),
                             ethnicity_code: code.to_string(),
-                            detailed: None,
+                            ..Default::default()
                         },
                         false,
                     )
@@ -514,7 +514,7 @@ mod tests {
         // 标准三：126 目录清单（62 男球员族裔 + 32 女球员 + 32 职员）+ Ethnics（233 国）
         // + 规则块（国家/族群/全局共 43 个）+ Version 4 + Random 兜底。
         assert_eq!(cfg.standard3.folder_list.len(), 126);
-        // 目录族映射表：男族裔目录 → 女球员/职员目录（58 条，含多值），女职员换区仅 4 条。
+        // 目录类别映射表：男族裔目录 → 女球员/职员目录（58 条，含多值），女职员换区仅 4 条。
         assert_eq!(cfg.standard3.folder_mapping_female.len(), 58);
         assert_eq!(cfg.standard3.folder_mapping_staff.len(), 58);
         assert_eq!(cfg.standard3.folder_mapping_staff_female.len(), 4);

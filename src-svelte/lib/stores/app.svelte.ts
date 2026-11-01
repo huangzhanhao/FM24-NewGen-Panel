@@ -104,6 +104,77 @@ export function filterPlayers(rows: readonly PlayerRecord[], word: string): Play
   return word.trim() ? rows.filter((r) => matchPlayer(r, word)) : [...rows];
 }
 
+/** 悬停提示：样式见 app.css 的 .tip（虚线描边 + 页面底色）。文本为空/缺省不挂载。
+ *  用自绘气泡替代原生 title 的理由：原生气泡不跟随主题、不能换行排版，也跟不上滚动。
+ *  挂载时删掉 node 上的原生 title——两套提示同时出现会读成两条互相矛盾的信息。 */
+export function tip(node: HTMLElement, text?: string | null) {
+  /** 视口边距（px）：气泡不许贴边，离屏幕边缘至少留这么宽。 */
+  const EDGE = 8;
+  /** 与元素的间距（px）。 */
+  const GAP = 6;
+  let bubble: HTMLDivElement | null = null;
+
+  /** 落位：默认贴元素下方左对齐；下方空间不够翻到上方；左右夹取到视口内。 */
+  function place(el: HTMLDivElement) {
+    const host = node.getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    let top = host.bottom + GAP;
+    if (top + box.height > window.innerHeight - EDGE) {
+      const above = host.top - GAP - box.height;
+      top = above >= EDGE ? above : Math.max(EDGE, window.innerHeight - EDGE - box.height);
+    }
+    const maxLeft = window.innerWidth - EDGE - box.width;
+    const left = Math.min(Math.max(EDGE, host.left), Math.max(EDGE, maxLeft));
+    el.style.top = `${Math.round(top)}px`;
+    el.style.left = `${Math.round(left)}px`;
+  }
+
+  function hide() {
+    if (!bubble) return;
+    bubble.remove();
+    bubble = null;
+  }
+
+  function show() {
+    if (!text?.trim() || bubble) return;
+    const el = document.createElement('div');
+    el.className = 'tip';
+    el.textContent = text;
+    document.body.appendChild(el);
+    place(el); // 先量后落位：插入后同一帧内量得到尺寸，不会先闪在默认位置
+    bubble = el;
+  }
+
+  // 滚动（capture，能收到任意内层滚动容器的）与窗口失焦都要收起：气泡是 fixed 定位，
+  // 不会跟着元素走，留着就脱锚指错了地方。
+  function onScroll() {
+    hide();
+  }
+
+  node.removeAttribute('title');
+  node.addEventListener('mouseenter', show);
+  node.addEventListener('mouseleave', hide);
+  node.addEventListener('blur', hide);
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('blur', hide);
+
+  return {
+    /** 文本变了：先收起再等下次悬停按新文本重建（不做原地改字，省一套重排逻辑）。 */
+    update(next?: string | null) {
+      text = next;
+      hide();
+    },
+    destroy() {
+      hide();
+      node.removeEventListener('mouseenter', show);
+      node.removeEventListener('mouseleave', hide);
+      node.removeEventListener('blur', hide);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('blur', hide);
+    },
+  };
+}
+
 /** 主动拉一次最新快照（调后端 get_app_state）。 */
 export async function refreshSnapshot() {
   await applySnapshot(await api.getAppState());

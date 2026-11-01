@@ -13,7 +13,7 @@
    分组索引（:root 与 [data-theme='light'] 严格同序同组，便于逐行对读）：
      ① 背景表面  ② 描边边框色  ③ 文本  ④ 强调色  ⑤ 语义状态  ⑥ 遮罩叠加  ⑦ 媒体浮层
      ⑧ 字体族    ⑨ 字号        ⑩ 字重  ⑪ 间距    ⑫ 圆角      ⑬ 胶囊族    ⑭ 角标
-     ⑮ 组件尺寸  ⑯ 阴影/层级   ⑰ z-index  ⑱ 动效
+     ⑮ 组件尺寸  ⑯ 阴影/层级   ⑰ z-index  ⑱ 动效  ⑲ 悬停提示
    组内排序规则：按语义层级排（底→面→浮起→凹陷；强→弱；基准→交互态→派生；通用→专用），
                  不按字母序。命名规则：类别前缀 + 短横线 + 档位，档位数字越小越基础。
    标注约定：【疑似未引用】【命名偏差】仅作提示，核实前不得删除或改名（改名即改引用关系）。
@@ -152,6 +152,18 @@
   --dur-slow: 180ms;
   --ease-out: cubic-bezier(.22, 1, .36, 1);
   --ease-inout: cubic-bezier(.4, 0, .2, 1); /* 【疑似未引用】全站动效统一 --ease-out，本档无消费 */
+
+  /* ---- ⑲ 悬停提示（.tip + use:tip action）：值一律引用既有令牌，
+          深浅主题随 --bg-base / --hairline-2 / --text-1 / --shadow-pop 自动跟随，
+          故 [data-theme='light'] 不重复声明这一组 ---- */
+  --tip-bg: var(--bg-base);
+  --tip-border: var(--hairline-2);
+  --tip-fg: var(--text-1);
+  --tip-radius: var(--radius-md);
+  --tip-pad: var(--sp-2) var(--sp-3);
+  --tip-max-w: 320px;
+  --tip-shadow: var(--shadow-pop);
+  --tip-z: 9000;    /* 高于 --z-popover-top：提示要在弹层之上，否则被弹层盖住半截 */
 }
 
 /* ---------- 设计令牌：浅色「日间球场」 ---------- */
@@ -711,6 +723,20 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .pill .dot { width: 6px; height: 6px; border-radius: var(--radius-circle); background: currentColor; }
 .pill.ok { color: var(--ok); background: var(--ok-soft); }
 .pill.warn { color: var(--warn); background: var(--warn-soft); }
+
+/* ============================================================
+   悬停提示（use:tip action 渲染的 .tip 节点，挂 document.body 下）
+   ============================================================ */
+/* 虚线描边 + 页面底色：系统原生 title 不能换行排版也不会跟随主题，全站的气泡统一走这一份。
+   position:fixed 由 action 按 getBoundingClientRect 落位，pointer-events:none 防气泡自身挡住鼠标
+   造成 mouseleave/enter 反复抖动。 */
+.tip {
+  position: fixed; z-index: var(--tip-z); max-width: var(--tip-max-w);
+  padding: var(--tip-pad); border: 1px dashed var(--tip-border);
+  border-radius: var(--tip-radius); background: var(--tip-bg); color: var(--tip-fg);
+  font-size: var(--fs-xs); line-height: 1.55; white-space: pre-line;
+  pointer-events: none; box-shadow: var(--tip-shadow);
+}
 
 /* ============================================================
    进度

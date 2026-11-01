@@ -3,7 +3,8 @@
 // 再跑 pnpm tauri dev —— vite 配了 strictPort，重复启动会直接失败并带崩 tauri dev。
 import { spawn } from 'node:child_process';
 
-const PORT = Number(process.env.TAURI_DEV_PORT ?? 5173);
+// 与 vite.config.ts 的 server.port 保持一致：对不上会复用到别的页面，或让 devUrl 指向空端口。
+const PORT = Number(process.env.TAURI_DEV_PORT ?? 1420);
 const URL = `http://127.0.0.1:${PORT}/`;
 
 // 只有确实是本项目的 dev server（index.html 里引用了 src-svelte/main.ts）才复用，

@@ -256,7 +256,7 @@ const zhCN = {
     guidance: "引导系数",
     guidanceHint: "提示词引导强度，越大越贴合提示词，越小越多变",
     sizeError: {
-      format: "尺寸格式不正确，应为 宽×高（如 1280×1280）",
+      format: "尺寸格式不正确，应为 宽×高 或 宽*高（如 1280×1280）",
       minSide: (v: number) => `宽/高不能小于 ${v} 像素`,
       maxSide: (v: number) => `宽/高不能超过 ${v} 像素`,
       totalMin: (v: number) => `总像素过小，建议约 ${v}×${v} 以上`,
@@ -474,6 +474,8 @@ const zhCN = {
       tabQueue: "生成队列",
       startBtn: "启动生成",
       cancelBtn: "取消生成",
+      /** 已请求取消、在跑条目尚未收尾时的按钮文案 */
+      cancellingBtn: "取消中…",
       /** 「查看单人」：把唯一勾选的队列条目转入「球员源·单人」卡（原「清空队列」职责由全选+移除覆盖） */
       viewSingle: "查看单人",
       viewSingleTitle: (name: string) => `把 ${name} 转入「球员源·单人」卡`,
@@ -484,13 +486,41 @@ const zhCN = {
       statusRunning: "生成中",
       statusSuccess: "成功",
       statusFailed: "失败",
+      /** 用户取消（数据上是 failed + errorKind=cancelled），与「失败」不是一回事 */
+      statusCancelled: "已取消",
+      infoConfig: "配置",
+      /** 队列运行中：单人卡与工作台被这条任务占用 */
+      queueRunningTag: "队列生成中",
+      infoPrompt: "提示词",
+      infoNegative: "负向",
       colPlayer: "球员",
       colDetail: "详情",
+      // ---- 启动方式（手动确认 / 全自动）与队列行的逐条确认 ----
+      /** 确认方式分段控件：左「手动确认」、右「全自动」（用户指定的顺序） */
+      confirmModeManual: "手动确认",
+      confirmModeAuto: "全自动",
+      confirmModeHintManual: "启动前需逐条确认：点队列行，在右侧核对并修改该条参数",
+      confirmModeAria: "确认方式",
+      /** 单条确认按钮：把该行核对过的参数写回队列 */
+      confirmBtn: "确认",
+      /** 已确认态：按钮同位置转灰不可点 */
+      confirmedBtn: "已确认",
+      /** 启动被拦：还有 N 条没逐条确认 */
+      needConfirm: (n: number) => `还有 ${n} 条未确认，请先逐条确认后再启动。`,
+      /** 手动模式但未选中任何行时的引导（贴在原表单上方） */
+      queueEditHint: "点左侧队列行，在这里核对并修改该条的生成参数。",
+      /** 借用失败：该行入队后它的服务商/模型已不在配置里（能力位未知，不能在这里改参数） */
+      borrowUnavailable: (name: string) => `「${name}」用的服务商或模型已不在配置里，无法核对这条的参数；可勾选后点「移除」，或从名单重新加入后再核对。`,
       count: (total: number) => `共 ${total} 条`,
       startConfirm: (n: number) =>
         `开始批量生成 ${n} 个排队任务？将逐条调用服务商接口并产生费用。`,
+      /** 只跑勾选的排队条目（其余留在队列里） */
+      startConfirmPicked: (n: number, rest: number) =>
+        `开始批量生成已勾选的 ${n} 个任务？未勾选的 ${rest} 条会留在队列里，可稍后再启动。`,
       cancelConfirm:
-        "取消后未启动的条目将标记为已取消，正在生成的会跑完。确定取消？",
+        "取消后未提交的条目立即取消；已提交的会等待本次请求返回并保留结果（会产生费用）。确定取消？",
+      cancellingHint:
+        "正在取消：未提交的已停止；已提交的等待服务端返回后结束（会产生费用）。",
       removeConfirm: (n: number) => `移除选中的 ${n} 条条目？`,
       empty: "队列为空。在「名单预览」勾选球员后点「加入队列」，即可批量生成。",
       enqueued: (n: number) => `已加入 ${n} 条生成任务`,
@@ -502,7 +532,7 @@ const zhCN = {
       stageLabel: (stage: string): string => {
         const labels: Record<string, string> = {
           submitting: "提交中",
-          polling: "排队中",
+          polling: "服务端处理中",
           downloading: "下载中",
         };
         return labels[stage] ?? "";
@@ -965,7 +995,7 @@ const zhTW: Dict = {
     guidance: "引導係數",
     guidanceHint: "提示詞引導強度，越大越貼合提示詞，越小越多變",
     sizeError: {
-      format: "尺寸格式不正確，應為 寬×高（如 1280×1280）",
+      format: "尺寸格式不正確，應為 寬×高 或 寬*高（如 1280×1280）",
       minSide: (v: number) => `寬/高不能小於 ${v} 畫素`,
       maxSide: (v: number) => `寬/高不能超過 ${v} 畫素`,
       totalMin: (v: number) => `總畫素過小，建議約 ${v}×${v} 以上`,
@@ -1183,6 +1213,8 @@ const zhTW: Dict = {
       tabQueue: "生成佇列",
       startBtn: "啟動生成",
       cancelBtn: "取消生成",
+      /** 已请求取消、在跑条目尚未收尾时的按钮文案 */
+      cancellingBtn: "取消中…",
       /** 「查看单人」：把唯一勾选的队列条目转入「球员源·单人」卡（原「清空队列」职责由全选+移除覆盖） */
       viewSingle: "檢視單人",
       viewSingleTitle: (name: string) => `把 ${name} 轉入「球員源 · 單人」卡`,
@@ -1193,13 +1225,41 @@ const zhTW: Dict = {
       statusRunning: "生成中",
       statusSuccess: "成功",
       statusFailed: "失敗",
+      /** 使用者取消（資料上是 failed + errorKind=cancelled），與「失敗」不是一回事 */
+      statusCancelled: "已取消",
+      infoConfig: "設定",
+      /** 佇列執行中：單人卡與工作台被這條任務佔用 */
+      queueRunningTag: "佇列生成中",
+      infoPrompt: "提示詞",
+      infoNegative: "負向",
       colPlayer: "球員",
       colDetail: "詳情",
+      // ---- 啟動方式（手動確認 / 全自動）與佇列列的逐條確認 ----
+      /** 確認方式分段控件：左「手動確認」、右「全自動」（使用者指定的順序） */
+      confirmModeManual: "手動確認",
+      confirmModeAuto: "全自動",
+      confirmModeHintManual: "啟動前需逐條確認：點佇列列，在右側核對並修改該條參數",
+      confirmModeAria: "確認方式",
+      /** 單條確認按鈕：把該列核對過的參數寫回佇列 */
+      confirmBtn: "確認",
+      /** 已確認態：按鈕同位置轉灰不可點 */
+      confirmedBtn: "已確認",
+      /** 啟動被攔：還有 N 條沒逐條確認 */
+      needConfirm: (n: number) => `還有 ${n} 條未確認，請先逐條確認後再啟動。`,
+      /** 手動模式但未選中任何列時的引導（貼在原表單上方） */
+      queueEditHint: "點左側佇列列，在這裡核對並修改該條的生成參數。",
+      /** 借用失敗：該列入列後它的服務商/模型已不在設定裡（能力位未知，不能在這裡改參數） */
+      borrowUnavailable: (name: string) => `「${name}」用的服務商或模型已不在設定裡，無法核對這條的參數；可勾選後點「移除」，或從名單重新加入後再核對。`,
       count: (total: number) => `共 ${total} 條`,
       startConfirm: (n: number) =>
         `開始批次生成 ${n} 個排隊任務？將逐條呼叫服務商介面並產生費用。`,
+      /** 只跑勾選的排隊條目（其餘留在佇列裡） */
+      startConfirmPicked: (n: number, rest: number) =>
+        `開始批次生成已勾選的 ${n} 個任務？未勾選的 ${rest} 條會留在佇列裡，可稍後再啟動。`,
       cancelConfirm:
-        "取消後未啟動的條目將標記為已取消，正在生成的會跑完。確定取消？",
+        "取消後未提交的條目立即取消；已提交的會等待本次請求返回並保留結果（會產生費用）。確定取消？",
+      cancellingHint:
+        "正在取消：未提交的已停止；已提交的等待服務端返回後結束（會產生費用）。",
       removeConfirm: (n: number) => `移除選中的 ${n} 條條目？`,
       empty: "佇列為空。在「名單預覽」勾選球員後點「加入佇列」，即可批次生成。",
       enqueued: (n: number) => `已加入 ${n} 條生成任務`,
@@ -1211,7 +1271,7 @@ const zhTW: Dict = {
       stageLabel: (stage: string): string => {
         const labels: Record<string, string> = {
           submitting: "提交中",
-          polling: "排隊中",
+          polling: "伺服器處理中",
           downloading: "下載中",
         };
         return labels[stage] ?? "";
@@ -1688,7 +1748,7 @@ const en: Dict = {
     guidanceHint:
       "Prompt guidance strength; higher sticks closer to the prompt, lower is more varied",
     sizeError: {
-      format: "Invalid size format, expected width×height (e.g. 1280×1280)",
+      format: "Invalid size format, expected width×height or width*height (e.g. 1280×1280)",
       minSide: (v: number) => `Width/height must be at least ${v} px`,
       maxSide: (v: number) => `Width/height must not exceed ${v} px`,
       totalMin: (v: number) => `Total pixels too small; about ${v}×${v} or more is recommended`,
@@ -1914,6 +1974,8 @@ const en: Dict = {
       tabQueue: "Generation queue",
       startBtn: "Start generation",
       cancelBtn: "Cancel generation",
+      /** Button label while a cancel request is pending (the running entry is still finishing). */
+      cancellingBtn: "Cancelling…",
       /** 「查看单人」：把唯一勾选的队列条目转入「球员源·单人」卡（原「清空队列」职责由全选+移除覆盖） */
       viewSingle: "View single",
       viewSingleTitle: (name: string) =>
@@ -1926,13 +1988,43 @@ const en: Dict = {
       statusRunning: "Generating",
       statusSuccess: "Success",
       statusFailed: "Failed",
+      /** User-cancelled (failed + errorKind=cancelled); not a failure. */
+      statusCancelled: "Cancelled",
+      infoConfig: "Config",
+      /** While the queue runs, the single card and workbench are borrowed by this task. */
+      queueRunningTag: "Queue running",
+      infoPrompt: "Prompt",
+      infoNegative: "Negative",
       colPlayer: "Player",
       colDetail: "Detail",
+      // ---- Start mode (manual confirm / fully automatic) and per-entry confirmation ----
+      /** Segmented control: manual on the left, fully automatic on the right. */
+      confirmModeManual: "Confirm manually",
+      confirmModeAuto: "Fully automatic",
+      confirmModeHintManual:
+        "Each entry must be confirmed before starting: click a queue row to review and edit it on the right",
+      confirmModeAria: "Confirmation mode",
+      /** Per-entry confirm button: writes the reviewed parameters back to the queue. */
+      confirmBtn: "Confirm",
+      /** Confirmed state: same slot, greyed out and disabled. */
+      confirmedBtn: "Confirmed",
+      /** Start blocked: N entries are still unconfirmed. */
+      needConfirm: (n: number) => `${n} entries are still unconfirmed. Confirm each one before starting.`,
+      /** Guidance shown above the form when manual mode has no selected row. */
+      queueEditHint: "Click a queue row on the left to review and edit its generation parameters here.",
+      /** Borrow refused: the row's provider/model is no longer configured, so its capabilities are unknown. */
+      borrowUnavailable: (name: string) =>
+        `The provider or model used by "${name}" is no longer configured, so its parameters can't be reviewed here. Pick the row and remove it, or re-add the player from the roster.`,
       count: (total: number) => `${total} total`,
       startConfirm: (n: number) =>
         `Start batch generation of ${n} queued tasks? Each will call the provider API and incur charges.`,
+      /** Only the checked queue entries run; the rest stay queued. */
+      startConfirmPicked: (n: number, rest: number) =>
+        `Start batch generation of the ${n} checked tasks? The other ${rest} stay queued for later.`,
       cancelConfirm:
-        "Unstarted entries will be marked cancelled; the one currently generating will finish. Cancel anyway?",
+        "Unsubmitted entries are cancelled immediately; already-submitted ones wait for this request to return and keep their results (charges apply). Cancel anyway?",
+      cancellingHint:
+        "Cancelling: unsubmitted entries are stopped; submitted ones finish once the provider responds (charges apply).",
       removeConfirm: (n: number) => `Remove the ${n} selected entries?`,
       empty:
         "Queue is empty. Check players in the roster preview and click Add to queue for batch generation.",
@@ -1945,7 +2037,7 @@ const en: Dict = {
       stageLabel: (stage: string): string => {
         const labels: Record<string, string> = {
           submitting: "Submitting",
-          polling: "Queued",
+          polling: "Waiting for provider",
           downloading: "Downloading",
         };
         return labels[stage] ?? "";

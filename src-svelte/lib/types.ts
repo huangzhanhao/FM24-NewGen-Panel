@@ -180,7 +180,8 @@ export interface ProviderConfig {
   baseUrl: string; defaultModel: string; models: ModelInfo[];
 }
 
-/** 生图设置。concurrency/namingPattern 在 P1 只随文件读写、不参与逻辑（分别 P2/P3 生效）；
+/** 生图设置。concurrency 仅随文件读写、不参与调度（队列一律串行提交，见后端
+ *  commands::QUEUE_CONCURRENCY）；namingPattern 在 P1 只随文件读写、P3 生效。
  *  historyLimit 与 galleryRecordLimit 是两条独立淘汰闸门的上限（图片数 / 记录行数），互不换算。 */
 export interface GenSettings {
   defaultProviderId: string; historyLimit: number; galleryRecordLimit: number;
@@ -227,6 +228,10 @@ export interface GenRequest {
   uid?: string | null;
   /** 球员名（随请求带入，仅用于画廊记录展示；无数据源时缺省 null）。 */
   name?: string | null;
+  /** 国籍三字码：只进日志与记录，任何适配器都不发送。 */
+  nationality?: string | null;
+  /** 俱乐部：只进日志与记录，任何适配器都不发送。 */
+  club?: string | null;
   /** 提示词模板 id（随请求带入写入画廊记录；未选模板时缺省 null）。 */
   templateId?: string | null;
   /** 调用方式：'async' = 想走异步（后端仍按模型 supportsAsync 再门控一遍）；null/缺省 = 同步。 */

@@ -6,12 +6,15 @@ import { appStore } from './app.svelte';
 import { loadImageBlobUrl } from '../services/images';
 import { t } from '../text';
 import type {
+  Capabilities,
   GenErrorKind,
+  GenRequest,
   GeneratedImage,
   ImageConfig,
   PromptTemplate,
   ProviderConfig,
   QueueEntry,
+  QueueStatus,
   QueueFinished,
   QueueProgress,
   SizeRules,
@@ -30,7 +33,7 @@ export const VARIABLE_HINTS: ReadonlyArray<readonly [string, string]> = [
   ['ca', 'CA'], ['pa', 'PA'], ['uid', 'UID'],
 ];
 
-/** 解析 `宽*高`/`宽x高` 尺寸。 */
+/** 解析 宽×高（小写 `x`）/「宽*高」尺寸。 */
 export function parseSize(s: string): [number, number] | null {
   const m = /^(\d+)[x*](\d+)$/.exec(s.trim());
   return m ? [Number(m[1]), Number(m[2])] : null;
@@ -106,6 +109,75 @@ export function customSizeStart(rules: SizeRules | null | undefined): [number, n
   return [side, side];
 }
 
+/**
+ * 尺寸字面量的**形态**：档位串（wan / 火山 Seedream 的 `1K`、`1.5K`、`2K`、`4K`）还是像素对
+ * （`1024x1024`、百炼的 `1024*1024`）。`null` ＝ 两者都不是（空串、脏值）。
+ * 像素形态直接复用 [`parseSize`] 的同一判据（同一个正则），不另立第二份宽×高的定义。
+ */
+function sizeForm(size: string): 'tier' | 'pixel' | null {
+  const v = size.trim();
+  if (/^\d+(\.\d+)?[Kk]$/.test(v)) return 'tier';
+  return parseSize(v) ? 'pixel' : null;
+}
+
+/**
+ * 某组预设**能接受**哪些形态。必须看整份列表、不能只看第一条：dashscope 万相 2.7 的预设就是
+ * 「`1K/2K/4K` 档位串 + 官方推荐像素值」混排（见 `src-tauri/src/image_ai_providers/dashscope.rs`
+ * 的 `wan27_caps`：`tiers.chain(pixels)`），按首元素一刀切会把用户自选的像素值误判成跨形态、
+ * 每次切模型都白归位一次。
+ */
+function presetForms(presets: readonly string[]): { tier: boolean; pixel: boolean } {
+  let tier = false;
+  let pixel = false;
+  for (const p of presets) {
+    const f = sizeForm(p);
+    if (f === 'tier') tier = true;
+    else if (f === 'pixel') pixel = true;
+  }
+  return { tier, pixel };
+}
+
+/**
+ * 自由尺寸模型（`caps.sizes` 为空）需要的像素值——切模型时从档位串归位用、切服务商时起步用，
+ * 两处同一个口径。优先取该模型声明的**像素下限**
+ * （`totalMin` 开方＝最小合法正方形；只有 `minSide` 时用它），两者都没声明就用 1024×1024——
+ * 这是各家生图模型最常见的正方形出图档（魔搭/硅基流动千问系列的 1K 档就是它）。
+ * 这里刻意不用 [`customSizeStart`] 的 350×350 兜底：那是「自定义…」输入框的**起步值**，
+ * 而这里要的是一个「真要发出去」的取值。
+ */
+function tierToPixel(rules: SizeRules | null | undefined): string {
+  if (rules?.totalMin || rules?.minSide) {
+    const [side] = customSizeStart(rules);
+    return `${side}x${side}`;
+  }
+  return '1024x1024';
+}
+
+/**
+ * 切模型时把尺寸收口成新模型**真能接受**的字面量——只在「跨形态」时归位，同形态一律原样返回。
+ *
+ * 为什么必须归位：档位串（`1K`）发给只认像素的模型（z-image、千问 3.0 一类）会被厂商判非法，
+ * `start_queue` 按整批拦下；反向（像素值发给只认档位的火山 Seedream）同理。
+ * 为什么同形态不动：值可能不在新预设里，但那是用户有意挑的自定义尺寸，UI 会落在「自定义…」
+ * 并走 `sizeRules` 校验（既有设计，别顺手改成「不在预设就归位」）。
+ *
+ * 边界：
+ * - 模型明细缺失（该模型已从配置里删掉）：无从判断形态，保留原值，不猜。
+ * - `caps.sizes` 为空（自由尺寸模型）：没有预设可归位；像素值/脏值原样保留，唯独档位串它不认
+ *   → 推一个合法像素值（依据见 [`tierToPixel`]）。
+ * - 当前值两种形态都不匹配（空串/脏值）：按「不属于任何形态」处理，归位首个预设；无预设则不动。
+ */
+function fitSizeToModel(current: string, caps: Capabilities | undefined): string {
+  if (!caps) return current;
+  const presets = caps.sizes ?? [];
+  const form = sizeForm(current);
+  if (presets.length === 0) return form === 'tier' ? tierToPixel(caps.sizeRules) : current;
+  const accepts = presetForms(presets);
+  if (form === 'tier') return accepts.tier ? current : presets[0];
+  if (form === 'pixel') return accepts.pixel ? current : presets[0];
+  return presets[0];
+}
+
 export const imageaiStore = $state({
   config: null as ImageConfig | null,
   providerId: 'openai',
@@ -146,10 +218,26 @@ export const imageaiStore = $state({
   queue: [] as QueueEntry[],
   /** 由 setQueue 按快照派生（存在 running 条目即在跑）；queueStart 例外地乐观置位。 */
   queueRunning: false,
+  /** 已请求取消、但队列尚未完全收尾。取消只拦「还没提交」的请求：未派发条目立刻变「已取消」，
+   *  已提交的那条**不再中断**，只能等本次响应返回（结果照常落盘并记画廊）——执行中没有任何
+   *  检查点，故这段真空期可能长达一整个请求；必须有反馈，否则用户会以为按钮没生效而反复点。 */
+  queueCancelling: false,
   /** 最近一次队列进度事件载荷（驱动队列坞进度条）；订阅是进程级的，切走 AI 台事件不丢。 */
   queueProgress: null as QueueProgress | null,
   /** 最近一次批量收尾摘要；下次 queueStart 时复位。 */
   queueFinished: null as QueueFinished | null,
+  /** 启动方式：true = 全自动（点启动即提交，原行为）；false = 手动确认（逐条核对参数后才启动）。
+   *  会话内状态，不落盘——它是一次操作时的选择，不是用户偏好。 */
+  queueAutoConfirm: true,
+  /** 手动模式下被核对的那一条（右侧工作台此刻装的是该行的参数，见 queueBorrowForm）。会话内、不落盘：
+   *  它只是「现在在看哪一条」的临时光标，刷新后重新点一行即可。 */
+  queueSelectedId: null as string | null,
+  /** 已逐条确认过的条目 id。确认后再改参数会清掉对应键（绿退橙）——由工作台卡的冒泡
+   *  input/change 触发（见 GenSettingsCard 的 onCardEdited），不做字段比较：交互即视为「可能改过」。
+   *  指向已移除条目的残留键无副作用（读时按 id 判断）。 */
+  queueConfirmedIds: {} as Record<string, boolean>,
+  /** 借用中：表单此刻属于某条队列行。归位 effect 与 provider/model 选择器据此让路。 */
+  queueBorrowing: false,
   /** 名单表格勾选（key=uid）。切组/换名单/翻页不清空——勾选跟随球员。 */
   selectedInTable: {} as Record<string, boolean>,
 
@@ -301,7 +389,11 @@ function resetStepsGuidance() {
 export function selectProvider(id: string) {
   imageaiStore.providerId = id;
   imageaiStore.model = imageaiStore.provider?.defaultModel ?? '';
-  imageaiStore.size = imageaiStore.modelInfo?.capabilities.sizes[0] ?? '350x350';
+  // 尺寸从新模型的首个预设起步；预设为空（自由尺寸模型，只有 sizeRules）时按该模型声明的像素
+  // 下限起步。这里不能用 350×350 兜底：那是「自定义…」输入框的起步值，低于绝大多数模型的下限，
+  // 一切到自由尺寸的服务商就开局报红。
+  const caps = imageaiStore.modelInfo?.capabilities;
+  imageaiStore.size = caps?.sizes.length ? caps.sizes[0] : tierToPixel(caps?.sizeRules);
   imageaiStore.n = 1;
   imageaiStore.seed = '';
   resetStepsGuidance();
@@ -365,7 +457,10 @@ async function ensureTemplateValid() {
 export function selectModel(model: string) {
   imageaiStore.model = model;
   const caps = imageaiStore.modelInfo?.capabilities;
-  // 尺寸不随模型切换重置：原值不在新预设时 UI 落「自定义…」，用户可能是有意沿用。
+  // 尺寸只在**跨形态**时归位（档位串 1K/2K ↔ 像素 1024x1024，判据见 fitSizeToModel）：
+  // 同形态内继续沿用旧值——原值不在新预设里也不动，UI 落「自定义…」，用户可能是有意沿用；
+  // 跨形态必须换，否则发出去的是新模型根本不认的字面量（start_queue 整批拦下）。
+  imageaiStore.size = fitSizeToModel(imageaiStore.size, caps);
   if (caps && imageaiStore.n > caps.maxN) imageaiStore.n = caps.maxN;
   // 改写默认值逐模型不同（z-image 关，开启即思考模式、单价翻倍）：切模型归位。
   imageaiStore.promptExtend = caps?.promptExtendDefault ?? true;
@@ -456,6 +551,10 @@ export async function generate(meta?: { size?: string; seed?: string }) {
     const seedRaw = meta ? meta.seed ?? '' : imageaiStore.seed;
     const seedNum = parseSeed(seedRaw); // 无效输入按随机处理，结果卡展示的也是实际生效值
     const usedSeed = seedNum === null ? '' : String(seedNum);
+    // 人员信息只进日志与记录（适配器不发送）：名单里查不到就留空，不影响生成。
+    const rec = sp
+      ? (await api.queryPlayersByUids([sp.uid]).catch(() => []))[0] ?? null
+      : null;
     const res = await api.generateImage({
       providerId: imageaiStore.providerId,
       model: imageaiStore.model,
@@ -464,6 +563,8 @@ export async function generate(meta?: { size?: string; seed?: string }) {
       // 数据源球员身份与模板 id 随请求带入：后端据此写画廊记录（无数据源时为空）。
       uid: imageaiStore.sourcePlayer?.uid ?? null,
       name: imageaiStore.sourcePlayer?.name ?? null,
+      nationality: rec?.primaryNat?.trim() || null,
+      club: rec?.detailed?.club?.trim() || null,
       templateId: imageaiStore.templateId,
       size,
       n: imageaiStore.n,
@@ -570,6 +671,15 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
       errorKind: null,
     });
   }
+  // 人员信息（国籍/俱乐部）随请求带入：**只进日志与记录**，适配器不发送。
+  // 批量查一次即可（名单未就绪时失败即忽略，日志里只是少两个字段）。
+  const recs = await api.queryPlayersByUids([...new Set(rows.map((r) => r.uid))]).catch(() => []);
+  const byUid = new Map(recs.map((r) => [r.uid, r]));
+  for (const e of entries) {
+    const rec = byUid.get(e.uid);
+    e.req.nationality = rec?.primaryNat?.trim() || null;
+    e.req.club = rec?.detailed?.club?.trim() || null;
+  }
   return entries;
 }
 
@@ -577,6 +687,8 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
 export function setQueue(entries: QueueEntry[]) {
   imageaiStore.queue = entries;
   imageaiStore.queueRunning = entries.some((e) => e.status === 'running');
+  // 快照里已无 running：说明取消（或自然收尾）已经落地，过渡态该收了。
+  if (!imageaiStore.queueRunning) imageaiStore.queueCancelling = false;
 }
 
 /** 组装并入队，返回本次提交条数；后端全量快照写回 store。 */
@@ -589,15 +701,230 @@ export async function enqueuePlayers(rows: ReadonlyArray<PlayerRow>): Promise<nu
   return entries.length;
 }
 
-/** 启动批量生成。后端校验失败（缺 Key/重入）会抛错；成功则乐观置 running。 */
-export async function queueStart() {
+/** 启动批量生成。`ids` 只跑这些条目（按勾选启动），省略即跑全部排队条目。
+ *  后端校验失败（缺 Key/重入）会抛错；成功则乐观置 running。 */
+export async function queueStart(ids?: string[]) {
   imageaiStore.queueFinished = null; // 新一批开始：收起上一次收尾摘要
-  await api.startQueue();
+  imageaiStore.queueCancelling = false; // 上一轮的取消过渡态不得带进新一批
+  await api.startQueue(ids);
   imageaiStore.queueRunning = true;
 }
 
+/** 逐条确认后的参数写回后端队列：后端只改排队中的条目，返回的全量快照整份替换本地镜像。
+ *  参数合法性不在这里校验——启动时后端 `validate_entries` 会整批拦下不合规的条目。 */
+export async function queueApplyEdits(edits: { id: string; req: GenRequest }[]) {
+  setQueue(await api.updateQueueEntries(edits));
+}
+
+// ---------------- 手动确认：把工作台原表单「借」给一条队列行 ----------------
+// 复核一条队列任务的参数必须用**工作台那套表单**（同一批控件、同一套交互），不为它另画一份输入框。
+// 故选中行时把该行参数灌进本 store 的表单字段，用户就在原表单里改；点「确认」按既有映射写回队列。
+//
+// 【语义（刻意取舍，不是漏做——别当 bug 修）】
+// - 切行 = 直接覆盖：上一行没点过「确认」的修改随覆盖丢弃，不做快照备份、不做逐字段还原。
+// - 退出选中（切全自动 / 队列开跑 / 该行消失）= 不回滚：表单停在最后一条的参数上，
+//   用户原来的工作台编辑不会自己回来——要恢复就自己改回去。
+// - 确认后再改：工作台卡的冒泡 input/change 清掉已确认标记（绿退橙，实现见 GenSettingsCard
+//   的 onCardEdited）；再点一次「确认」才会把新值写回后端。
+
+/**
+ * 把一条队列行借给工作台表单：把该行参数直接灌进表单字段（覆盖现值，不留备份）。
+ * id 为空 / 条目已不在队列 / 条目非排队中 → 清选中、退出借用态，返回 false。
+ * @returns 是否真的进入了借用态；false = 调用方要提示用户（见下「能力位未知」）。
+ */
+export function queueBorrowForm(id: string | null): boolean {
+  const entry = id ? imageaiStore.queue.find((e) => e.id === id) ?? null : null;
+  if (!entry || entry.status !== 'queued') {
+    imageaiStore.queueSelectedId = null;
+    imageaiStore.queueBorrowing = false;
+    return false;
+  }
+  // 前置检查：该行的服务商/模型还认得出来吗？条目入队后配置可能被删改（换 id、删模型），
+  // 此时 modelInfo 为 null，queueFormRequest 里所有 `caps?.supportsXxx ? … : null` 会退化成 null——
+  // **能力位未知不能按「不支持」处理**：那样一进借用就判脏，确认回去等于把 steps/guidance/
+  // 改写/水印/输出格式这些参数静默清空。用户虽可在借用期把模型换掉自救，但那样这一行的
+  // 参数已被整体改写（等于借着一份坏值重新组装），不如直接拒绝借用、让他在队列里先修配置。
+  // 故宁可不借：与 modelInfo 的兜底同口径（有明细行、或等于服务商默认模型的通用档都算认得）。
+  const provider = imageaiStore.config?.providers.find((p) => p.id === entry.req.providerId);
+  const modelOk =
+    (provider?.models.some((m) => m.model === entry.req.model) ?? false) ||
+    provider?.defaultModel === entry.req.model;
+  if (!provider || !modelOk) {
+    imageaiStore.queueSelectedId = null;
+    imageaiStore.queueBorrowing = false;
+    return false;
+  }
+  imageaiStore.queueBorrowing = true;
+  const req = entry.req;
+  imageaiStore.providerId = req.providerId;
+  imageaiStore.model = req.model;
+  imageaiStore.templateId = req.templateId ?? 'default';
+  imageaiStore.prompt = req.prompt;
+  // 该行文本已定稿：标 dirty 让「重掷」不再用后端组装结果覆盖它。
+  imageaiStore.promptDirty = true;
+  imageaiStore.negative = req.negativePrompt;
+  imageaiStore.size = req.size;
+  imageaiStore.n = req.n;
+  imageaiStore.quality = req.quality ?? 'auto';
+  imageaiStore.seed = req.seed != null ? String(req.seed) : '';
+  imageaiStore.steps = req.steps != null ? String(req.steps) : '';
+  imageaiStore.guidance = req.guidance != null ? String(req.guidance) : '';
+  imageaiStore.callMode = req.callMode === 'async' ? 'async' : 'sync';
+  imageaiStore.promptExtend = req.promptExtend ?? true;
+  imageaiStore.watermark = req.watermark ?? false;
+  imageaiStore.enableThinking = req.enableThinking ?? true;
+  imageaiStore.promptExtendMode = req.promptExtendMode ?? 'direct';
+  imageaiStore.outputFormat = req.outputFormat === 'jpeg' ? 'jpeg' : 'png';
+  imageaiStore.queueSelectedId = entry.id;
+  return true;
+}
+
+/**
+ * 按**当前工作台表单**组装一条 GenRequest（借用中才有效，否则 null）。
+ * 映射规则与 buildQueueEntries 逐项一致：两处口径不同会让「单条确认」与「入队」发出不同参数。
+ * 不含 uid/name/nationality/club（身份字段，表单没有，由调用方从条目续上）。
+ * templateId 也不在这里返回：它是「这段文本出自哪个模板」的来源标记，由 queueConfirmEntry 取表单值补上。
+ * caps 取当前 modelInfo——借用时 provider/model 已切到该行，故它就是该行的能力位。
+ */
+export function queueFormRequest(): GenRequest | null {
+  if (!imageaiStore.queueBorrowing) return null;
+  const caps = imageaiStore.modelInfo?.capabilities;
+  return {
+    providerId: imageaiStore.providerId,
+    model: imageaiStore.model,
+    prompt: imageaiStore.prompt,
+    negativePrompt: imageaiStore.negative,
+    size: imageaiStore.size,
+    n: imageaiStore.n,
+    quality: imageaiStore.quality === 'auto' ? null : imageaiStore.quality,
+    seed: parseSeed(imageaiStore.seed),
+    steps: caps?.supportsSteps ? parseSteps(imageaiStore.steps) : null,
+    guidance: caps?.supportsGuidance ? parseGuidance(imageaiStore.guidance) : null,
+    promptExtend: caps?.supportsPromptExtend ? imageaiStore.promptExtend : null,
+    watermark: caps?.supportsWatermark ? imageaiStore.watermark : null,
+    promptExtendMode: caps?.supportsPromptExtendMode ? imageaiStore.promptExtendMode : null,
+    enableThinking: caps?.supportsEnableThinking ? imageaiStore.enableThinking : null,
+    outputFormat: caps?.supportsOutputFormat ? imageaiStore.outputFormat : null,
+    // 仅当模型支持异步且用户选了异步才传 'async'；否则传 null（后端默认同步）。
+    callMode: caps?.supportsAsync && imageaiStore.callMode === 'async' ? 'async' : null,
+  };
+}
+
+/** 选中一条队列行来核对参数：把该行借给工作台表单（见 queueBorrowForm）。
+ *  传 null 或该 id 已不在队列里（快照刷新把它刷掉了）视为清空选中。
+ *  @returns 借用是否成功；false 时调用方要提示「该行的服务商/模型已不在配置里」。 */
+export function queueSelectEntry(id: string | null): boolean {
+  return queueBorrowForm(id);
+}
+
+/** 清空选中行（**只清光标，不回滚表单**：见本节开头的语义说明）。切回自动模式、队列开跑、
+ *  被选中的条目已消失时都要收口，否则右侧工作台会一直标着一条不再需要核对的参数。 */
+export function queueClearSelection() {
+  imageaiStore.queueSelectedId = null;
+  imageaiStore.queueBorrowing = false;
+}
+
+/** 确认一条：把工作台表单组装的参数写回后端队列（快照整份替换）后打上已确认标记。
+ *  表单只在「这一条正是被借用的那条」时生效——否则用户可能改了 A 却确认 B，写回的是 B 的旧参数。
+ *  身份字段（uid/name/国籍/俱乐部）从条目续上：表单不含这些，也不该被改动。
+ *  模板 id 却取**当前表单值**：借用期间模板选择器仍可用，换模板会把提示词重渲染成新模板的产出，
+ *  此时若仍写回条目的旧 templateId，画廊记录会记错「这段文本来自哪个模板」。
+ *  失败（IPC/锁等异常）原样抛给调用方展示；参数合法性不在这里判——启动时 `validate_entries` 兜底。 */
+export async function queueConfirmEntry(id: string): Promise<void> {
+  const entry = imageaiStore.queue.find((e) => e.id === id);
+  if (!entry) return;
+  const form = imageaiStore.queueSelectedId === id ? queueFormRequest() : null;
+  const req: GenRequest = form
+    ? {
+        ...form,
+        uid: entry.req.uid ?? null,
+        name: entry.req.name ?? null,
+        // 国籍/俱乐部沿用入队那一刻查名单记下的值，不在这里重查：确认的对象是「这条已入队任务」，
+        // 它当初是按那份名单资料组装的；重查会把名单后来的变更混进一条早已定稿的任务里。
+        // （buildQueueEntries 入队时查名单是另一回事——那是首次组装，与「复核既有任务」刻意不同口径。）
+        nationality: entry.req.nationality ?? null,
+        club: entry.req.club ?? null,
+        templateId: imageaiStore.templateId,
+      }
+    : entry.req;
+  await queueApplyEdits([{ id, req }]);
+  imageaiStore.queueConfirmedIds[id] = true;
+}
+
+/** 本次要启动的 id 里还没确认的那些（顺序按 entries，便于「还有 N 条未确认」之外再定位到具体行）。
+ *  不在这批 ids 里、或已不在队列里的 id 都不参与——启动判据只看真的要跑的那几条。 */
+export function queuePendingConfirmIds(entries: QueueEntry[], ids: string[]): string[] {
+  const wanted = new Set(ids);
+  return entries
+    .filter((e) => wanted.has(e.id) && !imageaiStore.queueConfirmedIds[e.id])
+    .map((e) => e.id);
+}
+
+/** 请求取消：只置令牌，后端在「尚未提交」的检查点收手（见 QueueState.cancel 的取消口径）。 *  成功后进入「取消中」过渡态——按钮与状态文案据此切换，直到收尾事件或快照里无 running。 */
 export async function queueCancel() {
-  await api.cancelQueue();
+  // 先置位再 await：`gen:queue:finished` 可能先到（handler 会把标志写 false），若反过来写就会
+  // 把 false 覆盖回 true，此后不再有事件 → 按钮永久 disabled、提示常驻。
+  imageaiStore.queueCancelling = true;
+  try {
+    // 后端把「未提交」的条目当场标成已取消并回传快照：直接套用，界面立刻变「已取消」，
+    // 不必等执行中那条收尾时才有事件触发刷新。
+    setQueue(await api.cancelQueue());
+  } catch (e) {
+    imageaiStore.queueCancelling = false; // 请求没成功：收回过渡态，让用户可以重试
+    throw e;
+  }
+}
+
+/** 本次要启动的条目 id：**有勾选只取勾选的排队条目，一条都没勾才取全部排队条目**
+ *  （从名单「加入队列」后直接启动是主路径，不该强迫用户先勾选）。
+ *  勾选里的非排队条目（成功/失败）不参与启动——那种选择只对「查看单人/移除」有意义。 */
+export function queueStartIds(
+  entries: QueueEntry[],
+  picked: Record<string, boolean>,
+): string[] {
+  const queued = entries.filter((e) => e.status === "queued");
+  const pickedQueued = queued.filter((e) => picked[e.id]).map((e) => e.id);
+  return pickedQueued.length > 0 ? pickedQueued : queued.map((e) => e.id);
+}
+
+/** 队列里正在跑的那条（生产串行，至多一条）；没有则 null。
+ *  单人卡与生图工作台据此切成「这条任务」的只读视图——用户不必再猜现在在跑谁、发的是什么。 */
+export function runningQueueEntry(): QueueEntry | null {
+  const byStatus = imageaiStore.queue.find((e) => e.status === "running");
+  if (byStatus) return byStatus;
+  // 快照刷新是 120ms 节流（trailing），换条瞬间还没落地：进度事件先到且带 entryId，
+  // 用它立刻定位「现在跑的是哪条」，卡片与只读视图才不会滞后一整拍。
+  const p = imageaiStore.queueProgress;
+  if (p?.status === "running" && p.entryId) {
+    return imageaiStore.queue.find((e) => e.id === p.entryId) ?? null;
+  }
+  return null;
+}
+
+/** 一条队列任务的生成配置摘要：服务商/模型 · 尺寸 · N 张 · 非空参数（未设置的项不占位）。
+ *  只读展示用，判据与入队时的请求同源（直接读条目自带的 req）。 */
+export function queueEntryConfig(e: QueueEntry): string {
+  const r = e.req;
+  return [
+    `${r.providerId}/${r.model}`,
+    r.size,
+    r.n ? `${r.n} 张` : "",
+    r.quality ? `quality ${r.quality}` : "",
+    r.seed != null ? `seed ${r.seed}` : "",
+    r.steps != null ? `steps ${r.steps}` : "",
+    r.guidance != null ? `guidance ${r.guidance}` : "",
+    r.callMode === "async" ? "async" : "",
+    r.outputFormat === "jpeg" ? "jpeg" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** 队列行的状态徽标类别。**已取消与失败必须分开**：两者数据上都是 status=failed，
+ *  靠 errorKind=cancelled 区分——那是用户自己按的取消，不是跑挂了，文案与配色都不能共用。
+ *  抽成纯函数是为了让这条判据只有一份并有单测兜底（组件只管取词与上色）。 */
+export function queueBadgeKey(e: QueueEntry): QueueStatus | "cancelled" {
+  return e.status === "failed" && e.errorKind === "cancelled" ? "cancelled" : e.status;
 }
 
 export function queueRemove(ids: string[]) {
@@ -679,6 +1006,8 @@ export async function initQueueListeners(onError: (e: unknown) => void): Promise
   await listen<QueueFinished>('gen:queue:finished', (e) => {
     imageaiStore.queueFinished = e.payload;
     imageaiStore.queueRunning = false;
+    // 收尾即「取消中」结束：此时不可能还有在跑条目。
+    imageaiStore.queueCancelling = false;
     // 立即拉全量快照并撤掉挂起的节流查询，免得 120ms 后再打一次等价 IPC。
     if (queueRefreshTimer) {
       clearTimeout(queueRefreshTimer);

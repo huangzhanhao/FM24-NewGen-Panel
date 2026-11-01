@@ -12,6 +12,7 @@
   import GenSettingsCard from "./GenSettingsCard.svelte"; // 生成设置卡：onopentemplates 回调
   import { t } from "../../text";
   import { formatError, showError } from "../../ui/dialog";
+  import { tip } from "../../stores/app.svelte";
   import Icon from "../../ui/Icon.svelte";
   import ResultGallery from "./ResultGallery.svelte"; // 结果画廊/灯箱：onregenerate 回调
   import {
@@ -21,6 +22,7 @@
     loadImageState,
     selectModel,
     selectProvider,
+    runningQueueEntry,
   } from "../../stores/imageai.svelte";
 
   let providerOpen = $state(false);
@@ -80,8 +82,19 @@
     return parts.join(" · ");
   });
 
-  /** CTA 可用性：生成中 / 尺寸违规（store 单点，GenSettingsCard 同源）/ 提示词超长时禁用。 */
-  const genDisabled = $derived(imageaiStore.generating || !!imageaiStore.sizeError || imageaiStore.promptOver);
+  /** 队列正在跑的那条：此时生成设置卡是它的只读视图，单张 CTA 必须一起禁用——
+   *  否则屏上显示队列任务、点下去发的却是被隐藏表单里你先前的内容，等于生成错的东西还多花一次钱。 */
+  const queueTask = $derived(runningQueueEntry());
+  /** 手动模式下选中了队列行：右侧此刻显示的是那一条的参数，单张生成同样会发错内容 → 一起禁用。 */
+  const queueEditLock = $derived(!imageaiStore.queueAutoConfirm && imageaiStore.queueSelectedId !== null);
+  /** CTA 可用性：生成中 / 队列占用 / 队列行核对中 / 尺寸违规（store 单点，GenSettingsCard 同源）/ 提示词超长时禁用。 */
+  const genDisabled = $derived(
+    imageaiStore.generating ||
+      queueTask !== null ||
+      queueEditLock ||
+      !!imageaiStore.sizeError ||
+      imageaiStore.promptOver,
+  );
 
   onMount(() => {
     if (!imageaiStore.config) void loadImageState().catch(showError);
@@ -91,8 +104,9 @@
    *  CTA 与内联重试不传 meta，用工作台当前值。 */
   async function onGenerate(meta?: { size: string; seed: string }) {
     // 禁用态统一在入口拦截：快捷键（Ctrl+Enter）与数据源卡回调会绕过按钮 disabled，
-    // 必须与主 CTA 同条件。带 meta 的「再生成」用原图尺寸，只在生成中拦截，不受当前 sizeError 影响。
-    if (imageaiStore.generating || (!meta && genDisabled)) return;
+    // 必须与主 CTA 同条件。带 meta 的「再生成」用原图尺寸，只在生成中/队列占用/核对中拦截，
+    // 不受当前 sizeError 影响。
+    if (queueTask || imageaiStore.generating || queueEditLock || (!meta && genDisabled)) return;
     genError = "";
     try {
       await generate(meta);
@@ -117,14 +131,16 @@
 
 <div class="panel">
   <!-- ① 服务配置条（全宽单行）：进台第一眼即见服务商 / 模型 / Key 就绪状态。
-       完整表单与能力摘要分别留在设置弹窗与模型下拉的悬停提示。 -->
+       完整表单与能力摘要分别留在设置弹窗与模型下拉的悬停提示。
+       借用队列行期间这两枚下拉照常可用：换模型＝换这条任务要发的请求，改完在右侧参数卡底部点「确认」
+       即按卡片当前值写回（改动会把已确认标记打回橙，需再确认一次）。 -->
   <section class="conn-bar">
     <label class="cb-field">
       <span class="cb-label">{t.gen.provider}</span>
-      <!-- title = 全名：窄窗下这枚下拉会被压窄截断，悬停仍要能读到完整服务商名 -->
+      <!-- 悬停提示 = 全名：窄窗下这枚下拉会被压窄截断，悬停仍要能读到完整服务商名 -->
       <select
         id="ig-provider"
-        title={imageaiStore.provider?.name ?? ""}
+        use:tip={imageaiStore.provider?.name ?? ""}
         value={imageaiStore.providerId}
         onchange={(e) => selectProvider(e.currentTarget.value)}
       >
@@ -135,11 +151,11 @@
     </label>
     <label class="cb-field">
       <span class="cb-label">{t.gen.model}</span>
-      <!-- title = 模型 ID + 能力摘要：模型 ID 是最容易被截断的一行文字，能力摘要本就挂在这里 -->
+      <!-- 悬停提示 = 模型 ID + 能力摘要：模型 ID 是最容易被截断的一行文字，能力摘要本就挂在这里 -->
       <select
         id="ig-model"
         value={imageaiStore.model}
-        title={imageaiStore.model ? `${imageaiStore.model} · ${capSummary}` : capSummary}
+        use:tip={imageaiStore.model ? `${imageaiStore.model} · ${capSummary}` : capSummary}
         onchange={(e) => selectModel(e.currentTarget.value)}
       >
         <!-- 默认模型不在明细行里时也要能选中（自建 OpenAI 兼容服务常无明细行） -->
@@ -158,7 +174,7 @@
       class="cb-status"
       class:ok={readyForKey}
       class:warn={!readyForKey}
-      title={readyForKey ? t.gen.statusReadyTitle : keySet ? connStatus : t.gen.keyMissingHint}
+      use:tip={readyForKey ? t.gen.statusReadyTitle : keySet ? connStatus : t.gen.keyMissingHint}
       onclick={openProviderSettings}
     >
       {#if keySet}
@@ -189,7 +205,11 @@
       <button
         class="btn primary cta"
         disabled={genDisabled}
-        title={imageaiStore.sizeError ?? (imageaiStore.promptOver ? t.gen.promptTooLong(promptLimit) : "")}
+        use:tip={queueTask
+          ? t.gen.queue.queueRunningTag
+          : queueEditLock
+            ? t.gen.queue.queueEditHint
+            : (imageaiStore.sizeError ?? (imageaiStore.promptOver ? t.gen.promptTooLong(promptLimit) : ""))}
         onclick={() => onGenerate()}
       >
         {#if imageaiStore.generating}
@@ -205,13 +225,13 @@
           <Icon name="alert" class="ia-ic" stroke={1.8} />
           <div class="ia-body">
             <span class="ia-title">{t.gen.genErrorTitle}</span>
-            <span class="ia-msg" title={genError}>{genError}</span>
+            <span class="ia-msg" use:tip={genError}>{genError}</span>
           </div>
           <button class="btn sm ia-retry" onclick={() => onGenerate()}>
             <Icon name="refresh" class="ic" />
             {t.gen.retry}
           </button>
-          <button class="icon-btn" title={t.gen.closeAlert} onclick={() => (genError = "")}>
+          <button class="icon-btn" use:tip={t.gen.closeAlert} onclick={() => (genError = "")}>
             <Icon name="x" size={13} />
           </button>
         </div>
@@ -228,7 +248,7 @@
           <button
             class="btn sm"
             disabled={imageaiStore.results.length === 0}
-            title={t.gen.clearResultsTitle}
+            use:tip={t.gen.clearResultsTitle}
             onclick={onClearResults}
           >
             {t.gen.clearResults}

@@ -114,9 +114,14 @@ export const api = {
   // 按 id 移除队列条目，返回全量队列。
   removeFromQueue: (ids: string[]) => invoke<QueueEntry[]>('remove_from_queue', { ids }),
   // 启动批量生成队列。
-  startQueue: () => invoke<void>('start_queue'),
+  // ids 为「本次要跑的条目」；不传 = 全部排队条目（null 走后端 None 分支）。
+  startQueue: (ids?: string[]) => invoke<void>('start_queue', { ids: ids ?? null }),
+  // 手动确认后写回条目参数（后端只改排队中的条目，非排队/不存在的 id 原样跳过），返回全量队列。
+  // 参数非法时后端整批拒绝并回 Err（队列不变），由调用方内联展示。
+  updateQueueEntries: (entries: { id: string; req: GenRequest }[]) => invoke<QueueEntry[]>('update_queue_entries', { entries }),
   // 取消批量生成队列。
-  cancelQueue: () => invoke<void>('cancel_queue'),
+  // 取消会把「未提交」的条目当场标成已取消，并回传快照（前端据此立即刷新，不等事件）。
+  cancelQueue: () => invoke<QueueEntry[]>('cancel_queue'),
   // 查询当前队列全量快照。
   queryQueue: () => invoke<QueueEntry[]>('query_queue'),
 };

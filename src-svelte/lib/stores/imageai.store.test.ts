@@ -20,8 +20,13 @@ vi.mock('../services/api', () => ({
     addToQueue: vi.fn(async (entries: QueueEntry[]) =>
       entries.map((e, i) => ({ ...e, id: `q${i + 1}` })),
     ),
+    queryPlayersByUids: vi.fn(async () => []),
     queryQueue: vi.fn(async () => []),
     removeFromQueue: vi.fn(async () => []),
+    startQueue: vi.fn(async () => {}),
+    cancelQueue: vi.fn(async () => [] as QueueEntry[]),
+    // 手动确认写回参数：后端只改排队条目并回全量快照
+    updateQueueEntries: vi.fn(async () => [] as QueueEntry[]),
     // 画廊记录：默认空表；个别用例 mockResolvedValueOnce 覆盖
     getGallery: vi.fn(async () => []),
     // loadImageState 拉取配置（默认给一份最小合法配置；用例可覆盖）
@@ -64,7 +69,20 @@ import {
   parseSeed,
   selectModel,
   setQueue,
+  queueApplyEdits,
+  queueBadgeKey,
+  queueBorrowForm,
+  queueCancel,
+  queueClearSelection,
+  queueConfirmEntry,
+  queueEntryConfig,
+  queueFormRequest,
+  queuePendingConfirmIds,
   queueRetry,
+  queueSelectEntry,
+  runningQueueEntry,
+  queueStart,
+  queueStartIds,
   setSourcePlayer,
   shouldShowRetriedBadge,
   stageOwnerId,
@@ -109,6 +127,32 @@ describe('image store', () => {
     expect(imageaiStore.model).toBe('m2');
     expect(imageaiStore.size).toBe('768x768');
     expect(imageaiStore.n).toBe(1);
+
+    // 预设为空的自由尺寸服务商：起步值取该模型声明的像素下限，不能落 350×350——那是「自定义…」
+    // 输入框的起步值，一进这类服务商就开局报红。
+    imageaiStore.config = {
+      ...cfg,
+      providers: [
+        ...cfg.providers,
+        {
+          id: 'p2', kind: 'openai', name: 'P2', baseUrl: 'http://x/v1', defaultModel: 'mfree',
+          models: [
+            {
+              model: 'mfree',
+              capabilities: {
+                sizes: [], maxN: 1, supportsQuality: false, supportsSeed: true,
+                supportsSteps: false, supportsNegativePrompt: false, supportsResponseFormat: false,
+                qualities: [], sizeRules: { totalMin: 768 * 768 },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    selectProvider('p2');
+    expect(imageaiStore.size).toBe('768x768');
+    // 起步值必须落在该模型的尺寸规则内：否则一进这类服务商卡片就红字。
+    expect(imageaiStore.sizeError).toBeNull();
   });
 
   it('applyTemplate renders placeholders and fills negative', async () => {
@@ -137,9 +181,20 @@ describe('queue store', () => {
     vi.mocked(api.renderPrompt).mockClear();
     vi.mocked(api.previewPrompt).mockClear();
     vi.mocked(api.addToQueue).mockClear();
+    // cancelQueue 用了一次性替身（mockImplementationOnce / mockRejectedValueOnce）：`mockClear()`
+    // **不清**once 队列，若某次断言在消费它之前就抛错，残留会泄漏到随后用例。故 reset 后重挂默认实现。
+    vi.mocked(api.cancelQueue).mockReset();
+    vi.mocked(api.cancelQueue).mockImplementation(async () => []);
+    vi.mocked(api.updateQueueEntries).mockReset();
+    vi.mocked(api.updateQueueEntries).mockImplementation(async () => []);
     clearSelection();
     imageaiStore.queue = [];
     imageaiStore.queueRunning = false;
+    imageaiStore.queueCancelling = false; // 过渡态不得跨用例携带
+    imageaiStore.queueProgress = null; // 进度载荷会参与「在跑哪条」的判定，不得跨用例
+    // 逐条确认的会话态同样不得跨用例：残留的选中/借用会让下一条用例误判「还需不需要确认」。
+    queueClearSelection();
+    imageaiStore.queueConfirmedIds = {};
   });
 
   it('toggleSelect / toggleSelectPage / clearSelection / selectedCount', () => {
@@ -216,6 +271,343 @@ describe('queue store', () => {
     expect(imageaiStore.queueRunning).toBe(true);
     setQueue([{ ...base, status: 'queued' }]);
     expect(imageaiStore.queueRunning).toBe(false);
+  });
+
+  it('runningQueueEntry / queueEntryConfig：只读视图取到在跑那条的配置', () => {
+    const mk = (id: string, status: QueueEntry['status'], req: Partial<QueueEntry['req']> = {}): QueueEntry => ({
+      id, uid: id, name: id,
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null, ...req,
+      },
+      status, images: [], error: '',
+    });
+    // 无 running → null；有 → 返回那一条（串行下至多一条）
+    setQueue([mk('q1', 'queued'), mk('q2', 'success')]);
+    expect(runningQueueEntry()).toBeNull();
+    const running = mk('q3', 'running');
+    setQueue([mk('q1', 'queued'), running]);
+    expect(runningQueueEntry()?.id).toBe('q3');
+
+    // 快照滞后（120ms 节流）时，用进度事件里的 entryId 兜底：换条瞬间也要指到新那条
+    setQueue([mk('q1', 'queued')]); // 快照里还没有 running（正是要覆盖的滞后形态）
+    imageaiStore.queueProgress = { status: 'running', current: 0, total: 2, uid: 'q1', entryId: 'q1', stage: 'submitting' };
+    expect(runningQueueEntry()?.id).toBe('q1');
+    // 终态事件（非 running）不参与兜底
+    imageaiStore.queueProgress = { status: 'success', current: 1, total: 2, uid: 'q1', entryId: 'q1' };
+    expect(runningQueueEntry()).toBeNull();
+
+    // 配置摘要只列非空参数：默认项不该冒出 seed/steps 之类的空值
+    expect(queueEntryConfig(running)).toBe('p1/m2 · 768x768 · 1 张');
+    expect(
+      queueEntryConfig(mk('q4', 'running', { seed: 42, steps: 30, quality: 'hd', callMode: 'async', n: 2 })),
+    ).toBe('p1/m2 · 768x768 · 2 张 · quality hd · seed 42 · steps 30 · async');
+  });
+
+  it('queueStartIds：勾选优先，未勾选才跑全部排队条目', () => {
+    const mk = (id: string, status: QueueEntry['status']): QueueEntry => ({
+      id, uid: id, name: id,
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status, images: [], error: '',
+    });
+    const entries = [mk('q1', 'queued'), mk('q2', 'queued'), mk('q3', 'queued'), mk('q4', 'running')];
+    // 有勾选：只取勾选的排队条目（勾选里的非排队条目被排除）
+    expect(queueStartIds(entries, { q1: true, q2: true, q4: true })).toEqual(['q1', 'q2']);
+    // 一条都没勾：跑全部排队条目（不含运行中/终态）
+    expect(queueStartIds(entries, {})).toEqual(['q1', 'q2', 'q3']);
+    // 只勾了非排队条目：同样回落到全部排队条目，避免出现「点了启动却什么都没跑」
+    expect(queueStartIds(entries, { q4: true })).toEqual(['q1', 'q2', 'q3']);
+  });
+
+  it('queueBadgeKey：已取消（failed+cancelled）与失败分开成两档', () => {
+    const base: QueueEntry = {
+      id: 'q1', uid: 'u1', name: '甲',
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'queued', images: [], error: '',
+    };
+    expect(queueBadgeKey(base)).toBe('queued');
+    expect(queueBadgeKey({ ...base, status: 'running' })).toBe('running');
+    expect(queueBadgeKey({ ...base, status: 'success' })).toBe('success');
+    // 用户取消与真失败在数据上同为 failed，徽标必须分开（否则取消会被显示成「失败」）。
+    expect(queueBadgeKey({ ...base, status: 'failed' })).toBe('failed');
+    expect(queueBadgeKey({ ...base, status: 'failed', errorKind: 'cancelled' })).toBe('cancelled');
+  });
+
+  it('queueApplyEdits 用后端返回的全量快照整份替换本地队列（queueAutoConfirm 默认全自动）', async () => {
+    expect(imageaiStore.queueAutoConfirm).toBe(true);
+    const before: QueueEntry = {
+      id: 'q1', uid: 'u1', name: '甲',
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'queued', images: [], error: '',
+    };
+    setQueue([before]);
+    const edited: QueueEntry = { ...before, req: { ...before.req, prompt: '改过的提示词' } };
+    vi.mocked(api.updateQueueEntries).mockResolvedValueOnce([edited]);
+    await queueApplyEdits([{ id: before.id, req: edited.req }]);
+    // 入参形状是 IPC 契约（id + 完整 req），改动一条不顺手改别的字段
+    expect(vi.mocked(api.updateQueueEntries)).toHaveBeenCalledWith([{ id: 'q1', req: edited.req }]);
+    expect(imageaiStore.queue).toEqual([edited]);
+  });
+
+  it('queueBorrowForm：把该行参数直接灌入原表单；换行直接覆盖（不留备份）', () => {
+    imageaiStore.config = cfg;
+    selectProvider('p1');
+    // 用户自己的工作台编辑：借用时被该行参数直接覆盖（约定：切行=直接覆盖，不做备份）
+    imageaiStore.prompt = '用户自己的提示词';
+    imageaiStore.negative = '用户负向';
+    imageaiStore.n = 3;
+    imageaiStore.seed = '7';
+    imageaiStore.promptDirty = false;
+    const mk = (id: string, req: Partial<QueueEntry['req']>): QueueEntry => ({
+      id, uid: `u-${id}`, name: `球员${id}`,
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '甲的脸', negativePrompt: '模糊', size: '768x768',
+        n: 2, quality: 'high', seed: 42, callMode: 'sync', templateId: 't1', ...req,
+      },
+      status: 'queued', images: [], error: '',
+    });
+    setQueue([mk('q1', {}), mk('q2', { quality: null, prompt: '乙的脸' })]);
+
+    expect(queueBorrowForm('q1')).toBe(true);
+    expect(imageaiStore.queueBorrowing).toBe(true);
+    expect(imageaiStore.queueSelectedId).toBe('q1');
+    // 逐条映射（数值参数一律字符串化：表单里是字符串输入框）
+    expect(imageaiStore).toMatchObject({
+      providerId: 'p1', model: 'm2', templateId: 't1', prompt: '甲的脸', negative: '模糊',
+      size: '768x768', n: 2, quality: 'high', seed: '42', steps: '', guidance: '',
+      callMode: 'sync', promptExtend: true, watermark: false, enableThinking: true,
+      promptExtendMode: 'direct', outputFormat: 'png',
+    });
+    // 该行文本已定稿 → 标 dirty，重掷不得再用后端组装结果覆盖它
+    expect(imageaiStore.promptDirty).toBe(true);
+
+    // 换行：直接覆盖表单（上一行没点确认，改动随之丢弃）；没有任何快照可回流
+    queueBorrowForm('q2');
+    expect(imageaiStore.queueSelectedId).toBe('q2');
+    expect(imageaiStore.prompt).toBe('乙的脸');
+    // quality=null 回落 'auto'（提交时再映射回 null）
+    expect(imageaiStore.quality).toBe('auto');
+    expect(imageaiStore.seed).toBe('42');
+    // 用户原本那份编辑已被覆盖，不会自己回来
+    expect(imageaiStore.prompt).not.toBe('用户自己的提示词');
+
+    // 不存在的 id / 非排队条目 → 清选中、退出借用态，返回 false
+    expect(queueBorrowForm('gone')).toBe(false);
+    expect(imageaiStore.queueBorrowing).toBe(false);
+    expect(imageaiStore.queueSelectedId).toBeNull();
+  });
+
+  it('queueConfirmEntry：从当前表单组装 req 写回 → 快照整份替换 → 打上已确认标记', async () => {
+    imageaiStore.config = cfg;
+    selectProvider('p1');
+    const before: QueueEntry = {
+      id: 'q1', uid: 'u1', name: '甲',
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '甲的脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null, uid: 'u1', name: '甲', templateId: 't1',
+      },
+      status: 'queued', images: [], error: '',
+    };
+    setQueue([before]);
+    queueBorrowForm('q1');
+    // 用户在借用来的原表单里改：提示词与 seed
+    imageaiStore.prompt = '确认后的脸';
+    imageaiStore.seed = '42';
+    // 借用期间换了模板：提示词已被新模板重渲染 → 写回的 templateId 必须跟着表单走，
+    // 否则画廊记录会把这段文本记到旧模板名下。
+    imageaiStore.templateId = 't2';
+    const edited: QueueEntry = { ...before, req: { ...before.req, prompt: '确认后的脸', seed: 42 } };
+    vi.mocked(api.updateQueueEntries).mockResolvedValueOnce([edited]);
+    await queueConfirmEntry('q1');
+    // 写回的是表单值（quality 'auto' → null、seed '42' → 42、templateId 取表单），身份字段从条目续上
+    expect(vi.mocked(api.updateQueueEntries)).toHaveBeenCalledWith([
+      {
+        id: 'q1',
+        req: expect.objectContaining({
+          prompt: '确认后的脸', quality: null, seed: 42, size: '768x768', n: 1,
+          uid: 'u1', name: '甲', templateId: 't2',
+        }),
+      },
+    ]);
+    expect(imageaiStore.queue).toEqual([edited]); // 后端返回的全量快照整份替换本地镜像
+    expect(imageaiStore.queueConfirmedIds['q1']).toBe(true);
+
+    // 未借用该条时用条目自带的 req：避免「改了 A 却确认 B」把 B 的参数当表单值写回
+    queueClearSelection();
+    vi.mocked(api.updateQueueEntries).mockClear();
+    vi.mocked(api.updateQueueEntries).mockResolvedValueOnce([edited]);
+    await queueConfirmEntry('q1');
+    expect(vi.mocked(api.updateQueueEntries)).toHaveBeenCalledWith([{ id: 'q1', req: edited.req }]);
+
+    // caps 支持 steps/guidance 时必须照发（能力位若读错会退化成 null，把参数静默丢掉）
+    imageaiStore.config = {
+      ...cfg,
+      providers: [
+        {
+          ...cfg.providers[0],
+          models: [
+            ...cfg.providers[0].models,
+            {
+              model: 'm3',
+              capabilities: {
+                ...cfg.providers[0].models[0].capabilities,
+                supportsSteps: true,
+                supportsGuidance: true,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const sampling: QueueEntry = {
+      id: 'q2', uid: 'u2', name: '乙',
+      req: {
+        providerId: 'p1', model: 'm3', prompt: '乙的脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null, steps: 30, guidance: 3.5,
+      },
+      status: 'queued', images: [], error: '',
+    };
+    setQueue([sampling]);
+    queueBorrowForm('q2');
+    // 表单里是字符串，组装回去仍是数字（不是 null）——这是「参数照发」的唯一判据
+    expect(imageaiStore).toMatchObject({ steps: '30', guidance: '3.5' });
+    expect(queueFormRequest()).toMatchObject({ steps: 30, guidance: 3.5 });
+    vi.mocked(api.updateQueueEntries).mockClear();
+    vi.mocked(api.updateQueueEntries).mockResolvedValueOnce([sampling]);
+    await queueConfirmEntry('q2');
+    expect(vi.mocked(api.updateQueueEntries)).toHaveBeenCalledWith([
+      { id: 'q2', req: expect.objectContaining({ steps: 30, guidance: 3.5 }) },
+    ]);
+  });
+
+  it('queueClearSelection：只清选中，不回滚表单（刻意取舍，不是漏做）', () => {
+    imageaiStore.config = cfg;
+    selectProvider('p1');
+    imageaiStore.prompt = '用户自己的提示词';
+    imageaiStore.negative = '用户负向';
+    imageaiStore.size = '512x512';
+    imageaiStore.n = 4;
+    imageaiStore.seed = '9';
+    imageaiStore.promptDirty = false;
+    const entry: QueueEntry = {
+      id: 'q1', uid: 'u1', name: '甲',
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '甲的脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'queued', images: [], error: '',
+    };
+    setQueue([entry]);
+    queueSelectEntry('q1');
+    expect(imageaiStore.queueBorrowing).toBe(true);
+    // 借用期间表单已切成该行的值
+    expect(imageaiStore).toMatchObject({ size: '768x768', n: 1, seed: '', steps: '', guidance: '' });
+    queueClearSelection();
+    expect(imageaiStore.queueSelectedId).toBeNull();
+    expect(imageaiStore.queueBorrowing).toBe(false);
+    // 表单**不回滚**：停在该行的参数上；用户原来的编辑不会自己回来（要恢复得自己改回去）。
+    expect(imageaiStore).toMatchObject({
+      providerId: 'p1', model: 'm2', prompt: '甲的脸', negative: '', size: '768x768', n: 1, seed: '',
+    });
+    // 传 null / 失效 id（快照里已没有这条）同样收口
+    queueSelectEntry('gone');
+    expect(imageaiStore.queueSelectedId).toBeNull();
+    expect(imageaiStore.queueBorrowing).toBe(false);
+
+    // 该行入队后服务商/模型已从配置里删改：拒绝借用（能力位未知时按「不支持」处理会把参数清空），
+    // 表单保持原样、不进借用态，由调用方提示用户
+    imageaiStore.prompt = '用户自己的提示词';
+    setQueue([{ ...entry, id: 'q9', req: { ...entry.req, providerId: 'gone-provider' } }]);
+    expect(queueBorrowForm('q9')).toBe(false);
+    expect(imageaiStore.queueBorrowing).toBe(false);
+    expect(imageaiStore.queueSelectedId).toBeNull();
+    expect(imageaiStore.prompt).toBe('用户自己的提示词'); // 没有被那条的提示词污染
+    setQueue([{ ...entry, id: 'q8', req: { ...entry.req, model: 'gone-model' } }]);
+    expect(queueBorrowForm('q8')).toBe(false);
+    expect(imageaiStore.queueBorrowing).toBe(false);
+  });
+
+  it('queuePendingConfirmIds：只挑未确认的，顺序按 entries，忽略不在这批/已不在队列的 id', () => {
+    const mk = (id: string): QueueEntry => ({
+      id, uid: `u-${id}`, name: `球员${id}`,
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'queued', images: [], error: '',
+    });
+    const entries = [mk('q1'), mk('q2'), mk('q3'), mk('q4')];
+    // 勾选 3 条、确认 1 条 → 另 2 条待确认（顺序按 entries，与勾选顺序无关）
+    imageaiStore.queueConfirmedIds = { q2: true };
+    expect(queuePendingConfirmIds(entries, ['q3', 'q1', 'q2'])).toEqual(['q1', 'q3']);
+    // 不存在于 entries 的 id（快照已刷新掉）忽略
+    expect(queuePendingConfirmIds(entries, ['qGone', 'q1'])).toEqual(['q1']);
+    // 全确认 → 空数组（启动放行）
+    imageaiStore.queueConfirmedIds = { q1: true, q2: true, q3: true };
+    expect(queuePendingConfirmIds(entries, ['q1', 'q2', 'q3'])).toEqual([]);
+  });
+
+  it('queueCancel 套用后端快照（排队中→已取消、在跑保留生成中）并管理「取消中」', async () => {
+    const base: QueueEntry = {
+      id: 'q1', uid: 'u1', name: '甲',
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'queued', images: [], error: '',
+    };
+    const running = { ...base, status: 'running' as const };
+    const queued = { ...base, id: 'q2', uid: 'u2', name: '乙', status: 'queued' as const };
+
+    // ① 取消：后端把「未提交」的条目当场落成终态，在跑那条原样返回；前端直接用返回值刷新，
+    //    不必等执行中那条收尾时才有事件（否则用户会一直看到「排队中」）。
+    setQueue([running, queued]);
+    expect(imageaiStore.queueRunning).toBe(true);
+    vi.mocked(api.cancelQueue).mockResolvedValueOnce([
+      running,
+      { ...queued, status: 'failed', error: '已取消', errorKind: 'cancelled' },
+    ]);
+    await queueCancel();
+    expect(vi.mocked(api.cancelQueue)).toHaveBeenCalled();
+    expect(imageaiStore.queueCancelling).toBe(true);
+    // 已取消 ≠ 失败：数据上是 failed + errorKind=cancelled，标签另有映射。
+    expect(imageaiStore.queue[1].status).toBe('failed');
+    expect(imageaiStore.queue[1].errorKind).toBe('cancelled');
+    // 已提交的那条继续「生成中」，不被取消口径改写。
+    expect(imageaiStore.queue[0].status).toBe('running');
+
+    // ② 快照里已无 running（在跑那条也收尾）→ 过渡态结束
+    setQueue([]);
+    expect(imageaiStore.queueRunning).toBe(false);
+    expect(imageaiStore.queueCancelling).toBe(false);
+
+    // ③ 竞态：`gen:queue:finished` 恰好落在 cancelQueue 的 await 窗口内（handler 写 false）。
+    //    旧写法「先 await 再置位」会把它覆盖回 true，此后无事件 → 按钮永久 disabled。
+    setQueue([running]);
+    vi.mocked(api.cancelQueue).mockImplementationOnce(async () => {
+      imageaiStore.queueCancelling = false;
+      return [running];
+    });
+    await queueCancel();
+    expect(imageaiStore.queueCancelling).toBe(false);
+
+    // ④ 失败回滚（catch 分支）：请求失败必须收回过渡态并抛错，否则用户看到「取消中」却什么都没发生。
+    vi.mocked(api.cancelQueue).mockRejectedValueOnce(new Error('后端拒绝'));
+    await expect(queueCancel()).rejects.toThrow('后端拒绝');
+    expect(imageaiStore.queueCancelling).toBe(false);
+
+    // ⑤ 新一批开始同样复位，上一轮的取消态不得带进来
+    await queueStart();
+    expect(imageaiStore.queueCancelling).toBe(false);
   });
 });
 
@@ -366,6 +758,62 @@ describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
     // 起步值必须落在规则内——否则「一点自定义就吃红线」的老毛病会以新形式回来
     const [w, h] = customSizeStart(volcanoPro);
     expect(validateSizeRules(`${w}x${h}`, volcanoPro)).toBeNull();
+  });
+
+  it('fitSizeToModel（selectModel 端到端）：跨形态归位、同形态与混排沿用、自由尺寸与脏值兜底', () => {
+    // 预设照抄真实服务商的能力位口径（别造假形态，否则测的是假想模型）：
+    // 纯档位＝火山 Seedream（1K/1.5K/2K）、纯像素＝百炼 z-image、
+    // 混排＝万相 2.7（dashscope 的 wan27_caps 是 tiers.chain(pixels)，档位串与官方推荐像素值共存）。
+    const base = {
+      maxN: 1, supportsQuality: false, supportsSeed: true, supportsSteps: false,
+      supportsNegativePrompt: true, supportsResponseFormat: false, qualities: [] as string[],
+    };
+    imageaiStore.config = {
+      ...cfg,
+      providers: [{
+        id: 'px', kind: 'openai', name: 'PX', baseUrl: 'http://x/v1', defaultModel: 'm-pixel',
+        models: [
+          { model: 'm-pixel', capabilities: { ...base, sizes: ['1024x1024', '1664x928'] } },
+          { model: 'm-tier', capabilities: { ...base, sizes: ['1K', '1.5K', '2K'] } },
+          { model: 'm-mixed', capabilities: { ...base, sizes: ['1K', '2K', '4K', '4096*4096', '4096*2304'] } },
+          // 自由尺寸模型：有像素下限（万相 2.7 的真实规则）与完全没有规则（自建 OpenAI 兼容）两种
+          {
+            model: 'm-free-rules',
+            capabilities: { ...base, sizes: [], sizeRules: { totalMin: 768 * 768, totalMax: 4096 * 4096, ratioMin: 1 / 8, ratioMax: 8 } },
+          },
+          { model: 'm-free-norules', capabilities: { ...base, sizes: [], sizeRules: null } },
+        ],
+      }],
+    };
+    imageaiStore.providerId = 'px';
+    /** 走真实调用路径：设好「切换前」的尺寸 → selectModel → 读回归位结果。 */
+    const fit = (size: string, model: string) => {
+      imageaiStore.size = size;
+      selectModel(model);
+      return imageaiStore.size;
+    };
+
+    // 1) 档位串 → 纯像素模型：必须换成该模型能收的像素预设（不换就是发 1K 让厂商 400）
+    expect(fit('1K', 'm-pixel')).toBe('1024x1024');
+    // 2) 像素 → 纯档位模型：反向同理
+    expect(fit('1024x1024', 'm-tier')).toBe('1K');
+    // 3) 混排模型（万相 2.7）两个方向都不归位：档位串与像素值它都认
+    expect(fit('1K', 'm-mixed')).toBe('1K');
+    // 不在预设里、但形态被接受（万相允许自定义宽*高）→ 原样保留。这条锁住「按整份预设判形态」：
+    // 若改成只看 presets[0]（='1K'），这里会被误归位成 '1K'，用户自选的合法尺寸凭空丢失。
+    expect(fit('2048*2048', 'm-mixed')).toBe('2048*2048');
+    // 4) 同形态不在预设也保留：像素模型之间互切，用户自定义的 1328x1328 不动（既有设计）
+    expect(fit('1328x1328', 'm-pixel')).toBe('1328x1328');
+    // 5) sizes 空 + 声明了像素下限：档位串按该下限推出正方形（万相 2.7 下限 768²）
+    expect(fit('1K', 'm-free-rules')).toBe('768x768');
+    // 6) sizes 空 + 无任何规则：兜底 1024×1024（不是「自定义…」起步值 350×350）
+    expect(fit('1K', 'm-free-norules')).toBe('1024x1024');
+    // 7) 脏值 → 有预设：归位首个预设
+    expect(fit('abc', 'm-tier')).toBe('1K');
+    // 8) 脏值 → sizes 空：保持原值、不抛错
+    const dirtyOnFree = () => fit('abc', 'm-free-norules');
+    expect(dirtyOnFree).not.toThrow();
+    expect(dirtyOnFree()).toBe('abc');
   });
 
   it('queueRetry 移除旧条目并用同参数重新排队', async () => {

@@ -9,17 +9,24 @@
      两个文本域的高度只由 rows 定（行高 = --fs-md 13px × 1.65 = 21.45px，上下 padding 与描边共 18px）：
      正文 4 行 ≈ 104px（`resize: vertical` 可拖高）、负向 2 行 = 61px。
      状态除 sizeCustomMode/sizeW/sizeH 等纯 UI 态外全部住在 imageaiStore；
+     手动确认模式下选中队列行时，这张卡的原表单被「借」给那一行（参数由 store 灌入，控件原样复用），
+     卡缘转为橙/绿描边，卡底「确认」把当前表单值写回队列（仅手动确认模式渲染）——
+     不为核对另建一套简化输入框，卡内任何改动都会把绿框打回橙。
      尺寸违规单点读 store.sizeError（CTA 禁用共用）；外部触点：管理模板 onopentemplates。 -->
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
   import { showError } from "../../ui/dialog";
+  import { tip } from "../../stores/app.svelte";
   import { t } from "../../text";
   import {
     applyTemplate,
     customSizeStart,
     imageaiStore,
     parseSize,
+    queueConfirmEntry,
+    queueEntryConfig,
     rerollPrompt,
+    runningQueueEntry,
     SEED_MAX,
   } from "../../stores/imageai.svelte";
   import NumberStepper from "./NumberStepper.svelte";
@@ -37,6 +44,43 @@
   const caps = $derived(imageaiStore.modelInfo?.capabilities);
 
   // 字数计数：超限判定 promptOver 由 store 单点派生（跨组件共用），这里只渲染计数
+  /** 队列正在跑的那条：占用期间本卡只读展示它，跑完恢复可编辑表单。 */
+  const queueTask = $derived(runningQueueEntry());
+  /** 借用中的那条队列行：手动模式下点左侧队列行，本卡的原表单就被借给该行（参数由 store 灌入）。
+   *  这里只用来判断卡缘描边颜色。只认排队中的条目——已跑完/正在跑的没有可改的参数。 */
+  const borrowEntry = $derived.by(() => {
+    if (!imageaiStore.queueBorrowing) return null;
+    const id = imageaiStore.queueSelectedId;
+    if (!id) return null;
+    const entry = imageaiStore.queue.find((e) => e.id === id) ?? null;
+    return entry && entry.status === "queued" ? entry : null;
+  });
+  /** 该行是否已确认。边框读这一份——与左侧队列行同源，两处颜色不会各算一套。
+   *  【约定】确认后卡内任何改动都会把绿框打回橙（冒泡 input/change 清标记，不做字段比较）：
+   *  再点一次卡底「确认」才会把新值写回。 */
+  const editConfirmed = $derived(!!borrowEntry && !!imageaiStore.queueConfirmedIds[borrowEntry.id]);
+
+  /** 确认当前借用的这条：把表单当前值写回后端队列，成功后该行与卡缘一起转绿。
+   *  失败（IPC/后端整批拒绝）弹窗告知——队列没变，用户改完再点一次即可。 */
+  async function onConfirmQueue() {
+    if (!borrowEntry) return;
+    try {
+      await queueConfirmEntry(borrowEntry.id);
+    } catch (err) {
+      await showError(err);
+    }
+  }
+  /** 确认后再改：卡内任何一次 input/change 冒泡到这里都清掉已确认标记（绿退橙），
+   *  直到再点一次「确认」才把新值写回。不做字段比较——交互即视为「可能改过」。 */
+  function onCardEdited() {
+    if (borrowEntry) delete imageaiStore.queueConfirmedIds[borrowEntry.id];
+  }
+  /** 点击型改参控件（NumberStepper 的 ± 按钮、重掷）只写 store、不派发 DOM input/change，
+   *  冒泡收不到——在这些控件的回调里显式走同一入口，保证「改即清标记」无旁路。 */
+  function onBorrowParamEdit() {
+    onCardEdited();
+  }
+
   const promptLen = $derived(imageaiStore.prompt.length);
   const promptLimit = $derived(caps?.maxPromptChars ?? 0);
   const promptNear = $derived(promptLimit > 0 && promptLen > promptLimit * 0.9 && !imageaiStore.promptOver);
@@ -48,7 +92,8 @@
    *  （见 store.customSizeStart）——写死的 350×350 低于火山/wan 的总像素下限，开局就是一条红线。 */
   const startSize = () => customSizeStart(caps?.sizeRules);
   // 「自定义…」是显式选择的模式：即便合成值恰好等于某预设也保持自定义态，
-  // 直到改选预设、或切服务商重置了尺寸才退出（切模型不动尺寸）。
+  // 直到改选预设、或切服务商/切模型把尺寸换掉才退出（切模型只在**跨形态**时换尺寸，
+  // 见 store 的 fitSizeToModel——档位串 ↔ 像素值互不相认，不换就会发出对方不认的字面量）。
   let sizeCustomMode = $state(false);
   let sizeW = $state(parseSize(imageaiStore.size)?.[0] ?? startSize()[0]);
   let sizeH = $state(parseSize(imageaiStore.size)?.[1] ?? startSize()[1]);
@@ -98,18 +143,31 @@
     void imageaiStore.model;
     const parsed = parseSize(imageaiStore.size);
     if (parsed) {
+      // 可解析的尺寸一律回填：借用行时也要回填，否则宽×高输入框显示的是用户原来的值，
+      // 与 store.size（该行的值）不一致，用户动一下输入就被悄悄改回旧尺寸。
       sizeW = parsed[0];
       sizeH = parsed[1];
-    } else {
-      const start = startSize();
-      sizeW = start[0];
-      sizeH = start[1];
+      return;
     }
+    // 解析不出宽高（档位串模型）时才用该模型的规则起步值——借用中唯独这种情况要跳过：
+    // 借用行会连带换掉 provider/model，那时硬套当前模型下限会盖掉框里本来那对值。
+    // 注意只有「解析不出 + 借用中」这一种组合跳过：能解析的尺寸借用期照常回填，
+    // 用户在借用期换了模型，尺寸框要跟着 store.size 走，不能停在旧值上。
+    if (imageaiStore.queueBorrowing) return;
+    const start = startSize();
+    sizeW = start[0];
+    sizeH = start[1];
   });
 
   // 切服务商会把 size 重置为新模型的首个预设 → 退出「自定义…」强制态（Key 框清空留在父组件 effect）。
+  // 借用行也会换掉 providerId，此时同样让位：sizeCustomMode 只决定下拉显示哪一项，
+  // 而取值表达式已有兜底（不在新预设里就落「自定义…」），让位后用户切服务商能正常退出自定义态。
+  // 切模型同理要让位：跨形态时 store 会把 size 换成新模型预设（fitSizeToModel），
+  // 若还留着强制态，下拉会停在「自定义…」而 store.size 其实是个预设值——显示与实发不一致。
+  // 同形态切模型不动尺寸；值仍是自定义值时取值表达式照样落「自定义…」，所以这里清掉没有副作用。
   $effect(() => {
     void imageaiStore.providerId;
+    void imageaiStore.model;
     sizeCustomMode = false;
   });
 
@@ -244,10 +302,43 @@
   });
 </script>
 
-<section class="pcard">
+<section
+  class="pcard"
+  class:borrow-unconfirmed={imageaiStore.queueBorrowing && !editConfirmed}
+  class:borrow-confirmed={imageaiStore.queueBorrowing && editConfirmed}
+  oninput={onCardEdited}
+  onchange={onCardEdited}
+>
   <div class="pcard-h">
     <span>{t.gen.cardSettings}</span>
   </div>
+
+  {#if queueTask}
+    <!-- 队列占用期间：这里换成「这条任务」的只读视图。不动下面表单的任何状态，
+         跑完自动恢复你原来的编辑（提示词/参数都还在，没被覆盖）。 -->
+    <div class="queue-task">
+      <div class="qt-head">
+        <span class="pill qt-pill">{t.gen.queue.queueRunningTag}</span>
+        <span class="qt-name" use:tip={queueTask.name}>{queueTask.name}</span>
+      </div>
+      <div class="qt-row">
+        <span class="qt-k">{t.gen.queue.infoConfig}</span>
+        <span class="qt-v">{queueEntryConfig(queueTask)}</span>
+      </div>
+      <div class="qt-k">{t.gen.queue.infoPrompt}</div>
+      <pre class="qt-prompt mono">{queueTask.req.prompt}</pre>
+      {#if queueTask.req.negativePrompt}
+        <div class="qt-k">{t.gen.queue.infoNegative}</div>
+        <pre class="qt-prompt mono">{queueTask.req.negativePrompt}</pre>
+      {/if}
+    </div>
+  {:else}
+
+  <!-- 手动模式但还没选中任何行：先说明这卡现在该做什么，否则用户看到的是「普通表单」，
+       会以为手动确认只是一句提示。借用中已经选中了一条，这条引导就该让位。 -->
+  {#if !imageaiStore.queueAutoConfirm && !imageaiStore.queueBorrowing}
+    <p class="queue-edit-hint">{t.gen.queue.queueEditHint}</p>
+  {/if}
 
   <!-- ============ 上半区：画面内容（直接落在卡面） ============ -->
   <!-- 模板应用栏：无内框 select 嵌进统一容器，管理动作贴着模板选择器 -->
@@ -291,7 +382,7 @@
       oninput={() => (imageaiStore.promptDirty = true)}
     ></textarea>
     {#if imageaiStore.sourcePlayer}
-      <button type="button" class="reroll-btn" title={t.gen.rerollPromptTitle} onclick={rerollPrompt}>
+      <button type="button" class="reroll-btn" use:tip={t.gen.rerollPromptTitle} onclick={() => { onBorrowParamEdit(); rerollPrompt(); }}>
         {t.gen.rerollPrompt}
       </button>
     {/if}
@@ -353,7 +444,7 @@
             {#if frame.ratio}
               <span class="frm-ratio">{frame.ratio}</span>
             {/if}
-            <span class="frm-n" title={t.gen.nMaxHint(imageaiStore.n)}>×{imageaiStore.n}</span>
+            <span class="frm-n" use:tip={t.gen.nMaxHint(imageaiStore.n)}>×{imageaiStore.n}</span>
           </div>
         </div>
         <p class="frm-cap" class:err={frame.invalid}>
@@ -390,7 +481,7 @@
                 step="1"
                 placeholder={t.gen.sizeWLabel}
                 aria-label={t.gen.sizeWLabel}
-                title={sizeRangeTitle}
+                use:tip={sizeRangeTitle}
                 class:invalid={!!imageaiStore.sizeError}
                 bind:value={sizeW}
                 oninput={() => onDimInput("w")}
@@ -404,7 +495,7 @@
                 step="1"
                 placeholder={t.gen.sizeHLabel}
                 aria-label={t.gen.sizeHLabel}
-                title={sizeRangeTitle}
+                use:tip={sizeRangeTitle}
                 class:invalid={!!imageaiStore.sizeError}
                 bind:value={sizeH}
                 oninput={() => onDimInput("h")}
@@ -430,7 +521,7 @@
                   step="1"
                   placeholder={t.gen.sizeWLabel}
                   aria-label={t.gen.sizeWLabel}
-                  title={sizeRangeTitle}
+                  use:tip={sizeRangeTitle}
                   class:invalid={!!imageaiStore.sizeError}
                   bind:value={sizeW}
                   oninput={syncCustomSize}
@@ -444,7 +535,7 @@
                   step="1"
                   placeholder={t.gen.sizeHLabel}
                   aria-label={t.gen.sizeHLabel}
-                  title={sizeRangeTitle}
+                  use:tip={sizeRangeTitle}
                   class:invalid={!!imageaiStore.sizeError}
                   bind:value={sizeH}
                   oninput={syncCustomSize}
@@ -462,7 +553,7 @@
                 min={1}
                 max={caps.maxN}
                 ariaLabel={t.gen.n}
-                onchange={(v) => (imageaiStore.n = v)}
+                onchange={(v) => { onBorrowParamEdit(); imageaiStore.n = v; }}
               />
             {:else if caps?.supportsN === false || caps?.maxN === 1}
               <span class="static-note">{t.gen.nSingle}</span>
@@ -472,7 +563,7 @@
                 min={1}
                 max={99}
                 ariaLabel={t.gen.n}
-                onchange={(v) => (imageaiStore.n = v)}
+                onchange={(v) => { onBorrowParamEdit(); imageaiStore.n = v; }}
               />
             {/if}
           </div>
@@ -481,7 +572,7 @@
               <label for="ig-seed">{t.gen.seed}</label>
               <!-- number 型：min/max 把官方取值域 [0, SEED_MAX] 声明给平台（无障碍与校验 API 读得到），
                    但浏览器不拦手输的越界值 ⇒ 生效判定仍在 store.parseSeed（越界按随机），
-                   可见反馈走 class:invalid + title。
+                   可见反馈走 class:invalid + 悬停提示。
                    不用 bind:value：number 输入的 bind 会把值转成 number/null，而 store.seed 是
                    字符串（'' = 随机、原样保留用户输入），parseSeed 与 seedOutOfRange 都按字符串读。 -->
               <input
@@ -491,7 +582,7 @@
                 max={SEED_MAX}
                 step="1"
                 placeholder={t.gen.seedPlaceholder}
-                title={imageaiStore.seedOutOfRange ? t.gen.seedOutOfRange(SEED_MAX) : ""}
+                use:tip={imageaiStore.seedOutOfRange ? t.gen.seedOutOfRange(SEED_MAX) : ""}
                 class:invalid={imageaiStore.seedOutOfRange}
                 value={imageaiStore.seed}
                 oninput={(e) => (imageaiStore.seed = e.currentTarget.value)}
@@ -509,7 +600,7 @@
                 max={caps.stepsMax || undefined}
                 step="1"
                 placeholder={caps.stepsDefault ? String(caps.stepsDefault) : ""}
-                title={t.gen.stepsHint}
+                use:tip={t.gen.stepsHint}
                 value={imageaiStore.steps}
                 oninput={(e) => (imageaiStore.steps = e.currentTarget.value)}
               />
@@ -526,7 +617,7 @@
                 max={caps.guidanceMax || undefined}
                 step="0.5"
                 placeholder={caps.guidanceDefault ? String(caps.guidanceDefault) : ""}
-                title={t.gen.guidanceHint}
+                use:tip={t.gen.guidanceHint}
                 value={imageaiStore.guidance}
                 oninput={(e) => (imageaiStore.guidance = e.currentTarget.value)}
               />
@@ -558,7 +649,7 @@
               <select
                 id="ig-output-format"
                 value={imageaiStore.outputFormat}
-                title={t.gen.outputFormatHint}
+                use:tip={t.gen.outputFormatHint}
                 onchange={(e) => (imageaiStore.outputFormat = e.currentTarget.value as 'png' | 'jpeg')}
               >
                 <option value="png">PNG</option>
@@ -571,7 +662,7 @@
                  开关本体挂 .switch 复用全局轨道几何与 checked/focus 状态（不重写一份），
                  但**不用** .opt-row 的两行副标题结构 —— 副标题会让该字段高出一倍、拉歪整行基线；
                  说明文字改走 title 悬停。类名仍叫 track（.switch .track 才有几何） -->
-            <label class="switch gfield f-watermark" title={t.gen.watermarkHint}>
+            <label class="switch gfield f-watermark" use:tip={t.gen.watermarkHint}>
               <input type="checkbox" bind:checked={imageaiStore.watermark} />
               <span class="track"></span>
               <span class="wm-text">{t.gen.watermark}</span>
@@ -584,7 +675,7 @@
               <select
                 id="ig-extend-mode"
                 value={imageaiStore.promptExtendMode}
-                title={t.gen.extendModeAgentHint}
+                use:tip={t.gen.extendModeAgentHint}
                 onchange={(e) => (imageaiStore.promptExtendMode = e.currentTarget.value)}
               >
                 <option value="direct">{t.gen.extendModeDirect}</option>
@@ -595,7 +686,7 @@
           {#if caps?.supportsEnableThinking}
             <!-- 思考模式官方「仅 prompt_extend=true 时生效」：改写关闭时置灰而非隐藏，
                  免得参数凭空消失；置灰态的值仍是用户上次的选择 -->
-            <label class="switch gfield f-thinking" class:g-off={!imageaiStore.promptExtend} title={t.gen.thinkingHint}>
+            <label class="switch gfield f-thinking" class:g-off={!imageaiStore.promptExtend} use:tip={t.gen.thinkingHint}>
               <input type="checkbox" disabled={!imageaiStore.promptExtend} bind:checked={imageaiStore.enableThinking} />
               <span class="track"></span>
               <span class="wm-text">{t.gen.thinking}</span>
@@ -604,7 +695,7 @@
           {#if caps?.supportsPromptExtend}
             <!-- 智能改写：改的是提示词文本，但仍属一次请求的开关，收拢到参数流末尾；
                  长说明走 title，免得把这个字段撑成两行高、拉歪整行基线 -->
-            <label class="switch gfield f-extend" title={t.gen.promptExtendHint}>
+            <label class="switch gfield f-extend" use:tip={t.gen.promptExtendHint}>
               <input type="checkbox" bind:checked={imageaiStore.promptExtend} />
               <span class="track"></span>
               <span class="wm-text">{t.gen.promptExtend}</span>
@@ -624,9 +715,98 @@
       <p class="hint canvas-err">{t.gen.sizeCustomHint}</p>
     {/if}
   </div>
+
+  {#if !imageaiStore.queueAutoConfirm && borrowEntry}
+    <!-- 手动确认模式且正借用某行时才渲染（全自动/单张生成不出现、不占位）：
+         核对完当场确认，写回的是表单当前值。已确认后按钮仍可点——期间再改过参数的话
+         绿框已被冒泡清回橙（见 onCardEdited），需再点一次确认才写回。 -->
+    <button class="btn queue-confirm" onclick={() => void onConfirmQueue()}>
+      {editConfirmed ? t.gen.queue.confirmedBtn : t.gen.queue.confirmBtn}
+    </button>
+  {/if}
+  {/if}
 </section>
 
 <style>
+  /* ---------- 队列占用期间的只读视图 ---------- */
+  /* 版式对齐卡内文字行：缩进 --sp-4，与下方正文/提示同一条左缘 */
+  .queue-task {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: 0 var(--sp-4);
+  }
+  .qt-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  /* 状态语义用警示色（与队列坞 pill 同款），不占错误红 */
+  .qt-pill {
+    flex: none;
+    color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .qt-name {
+    font-weight: var(--fw-medium);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .qt-row {
+    display: flex;
+    gap: var(--sp-2);
+  }
+  .qt-k {
+    flex: none;
+    color: var(--text-3);
+    font-size: var(--fs-sm);
+  }
+  .qt-v {
+    color: var(--text-2);
+    font-size: var(--fs-sm);
+    overflow-wrap: anywhere;
+  }
+  /* 提示词/负向可能很长：限高滚动，不把整卡撑长 */
+  .qt-prompt {
+    margin: 0;
+    max-height: 120px;
+    overflow: auto;
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    background: var(--bg-inset);
+    color: var(--text-2);
+    font-size: var(--fs-sm);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* ---------- 借用态（手动模式：点左侧队列行后，本卡的原表单属于该行） ---------- */
+  /* 用 outline 不用 border：outline 不占布局，切换确认状态时卡内高度与内容位置都不跳。
+     -1px 偏移把描边收在卡内，与左边队列行的描边同一手法。 */
+  .pcard.borrow-unconfirmed {
+    outline: 1px solid var(--warn);
+    outline-offset: -1px;
+  }
+  .pcard.borrow-confirmed {
+    outline: 1px solid var(--ok);
+    outline-offset: -1px;
+  }
+  /* 卡底确认按钮：盒型元素贴卡内容边（与文本域同宽），仅借用态渲染、不占位 */
+  .queue-confirm {
+    display: block;
+    width: 100%;
+    margin-top: var(--sp-3);
+  }
+  /* 手动模式但还没选中行：一行 --fs-xs 引导，贴在本卡表单上方（与下方文字行同一条左缘） */
+  .queue-edit-hint {
+    margin: 0 0 var(--sp-2);
+    padding: 0 var(--sp-4);
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+    overflow-wrap: anywhere;
+  }
+
   /* ---------- 上半区：画面内容 ---------- */
   /* 模板应用栏：统一容器包无内框下拉（选择器自身的描边/底色移除，焦点走容器 :focus-within）。
      这是盒内内边距：图标与文本域的内文（26px）同一条线，不是行左缘缩进 */

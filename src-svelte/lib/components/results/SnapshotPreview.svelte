@@ -5,7 +5,7 @@
      缩略图与放大气泡走共用 AvatarThumb（两处实现都与名单预览同一份，本组件只把路径交出去） -->
 <script lang="ts">
   import { api } from "../../services/api";
-  import { appStore } from "../../stores/app.svelte";
+  import { appStore, tip } from "../../stores/app.svelte";
   import { createAvatarBlobs } from "../../avatarBlobs.svelte"; // 头像 blob 加载器（名单/快照/球员查看卡共用）
   import { t } from "../../text"; // 全局文案常量
   import { showError } from "../../ui/dialog";
@@ -144,7 +144,7 @@
           {#each paged.view.items as { uid, relPath }, i (i)}
             <tr>
               <td class="mono">{uid}</td>
-              <td class="mono path" title={relPath}>{relPath}</td>
+              <td class="mono path" use:tip={relPath}>{relPath}</td>
               <td>
                 <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里（与名单预览头像列同款）；
                      path 来自本页批量解析结果（imgPaths），包内找不到图的条目无键 → 无图占位 -->

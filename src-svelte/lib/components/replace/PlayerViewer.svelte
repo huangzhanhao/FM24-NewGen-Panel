@@ -13,7 +13,7 @@
   import { createAvatarBlobs } from "../../avatarBlobs.svelte";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
-  import { appStore, basedValue, filterPlayers } from "../../stores/app.svelte";
+  import { appStore, basedValue, filterPlayers, tip } from "../../stores/app.svelte";
   import { ui } from "../../stores/ui.svelte";
   import { imageaiStore, setSourcePlayer } from "../../stores/imageai.svelte"; // 生图数据源
   import Icon from "../../ui/Icon.svelte";
@@ -257,7 +257,7 @@
             onkeydown={(e) => e.key === "Enter" && runSearch()}
           />
         </div>
-        <button type="button" class="btn sm" onclick={runSearch} disabled={!query.trim()} title={t.viewer.hint}>
+        <button type="button" class="btn sm" onclick={runSearch} disabled={!query.trim()} use:tip={t.viewer.hint}>
           <Icon name="search" size={14} />
           {t.viewer.searchBtn}
         </button>
@@ -277,8 +277,8 @@
     <!-- 右列：姓名、信息胶囊单池、替换行 -->
     <div class="player-info">
       <div class="player-head">
-        <!-- 姓名为头部视觉主体；极端窄宽下由省略号收口（title 悬停看全名） -->
-        <h2 title={rec?.name ?? undefined}>{rec?.name || "—"}</h2>
+        <!-- 姓名为头部视觉主体；极端窄宽下由省略号收口（悬停提示看全名） -->
+        <h2 use:tip={rec?.name ?? undefined}>{rec?.name || "—"}</h2>
       </div>
 
       <!-- 信息胶囊单池：.meta-row 的 flex-wrap 按容器宽度自动折行（320 窄栏与堆叠全宽同一套
@@ -321,7 +321,7 @@
           class:on={isSource}
           onclick={useForGenerate}
           disabled={!previewedUid || busy}
-          title={isSource ? t.gen.source.selected : t.gen.source.sendTitle(rec?.name?.trim() || previewedUid)}
+          use:tip={isSource ? t.gen.source.selected : t.gen.source.sendTitle(rec?.name?.trim() || previewedUid)}
           >{isSource ? t.gen.source.selected : t.gen.source.useForGen}</button
         >
       </div>

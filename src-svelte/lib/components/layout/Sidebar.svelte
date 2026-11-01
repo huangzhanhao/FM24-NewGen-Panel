@@ -5,7 +5,7 @@
   import { api } from "../../services/api";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text";
-  import { appStore, applySnapshot } from "../../stores/app.svelte";
+  import { appStore, applySnapshot, tip } from "../../stores/app.svelte";
   import {
     imageaiStore,
     queueCancel,
@@ -202,7 +202,7 @@
         <button
           class="theme-switch"
           onclick={toggleTheme}
-          title={t.theme.switchTo(ui.theme === "dark" ? "light" : "dark")}
+          use:tip={t.theme.switchTo(ui.theme === "dark" ? "light" : "dark")}
         >
           <Icon name={ui.theme === "dark" ? "moon" : "sun"} />
           <span>{ui.theme === "dark" ? t.theme.dark : t.theme.light}</span>
@@ -217,7 +217,7 @@
       <span>{t.sidebar.profileSection}</span>
       <button
         class="icon-btn"
-        title={t.sidebar.newProfileBtn}
+        use:tip={t.sidebar.newProfileBtn}
         onclick={() => (creating = !creating)}
       >
         <Icon name="plus" />
@@ -254,13 +254,13 @@
     <div class="prf-actions">
       <!-- No Profile（缺省档）：固定未激活、不可删除 -->
       {#if appStore.selectedProfile === "No Profile"}
-        <button class="btn" disabled title={t.sidebar.noProfileNoActivate}
+        <button class="btn" disabled use:tip={t.sidebar.noProfileNoActivate}
           >{t.sidebar.notActivated}</button
         >
         <button
           class="btn danger-solid"
           disabled
-          title={t.sidebar.noProfileNoDelete}
+          use:tip={t.sidebar.noProfileNoDelete}
           >{t.sidebar.noProfileNoDelete}</button
         >
       {:else if browseMode}
@@ -269,7 +269,7 @@
           class="btn primary"
           onclick={activateProfile}
           disabled={busy}
-          title={t.sidebar.activateHint(appStore.selectedProfile)}
+          use:tip={t.sidebar.activateHint(appStore.selectedProfile)}
           >{t.sidebar.activateBtn}</button
         >
         <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}
@@ -277,7 +277,7 @@
         >
       {:else}
         <!-- 选中项已激活：激活按钮置灰不可点，仍可删除 -->
-        <button class="btn" disabled title={t.sidebar.activeAlreadyHint}
+        <button class="btn" disabled use:tip={t.sidebar.activeAlreadyHint}
           >{t.sidebar.activated}</button
         >
         <button class="btn danger-solid" onclick={deleteProfile} disabled={busy}
@@ -294,7 +294,7 @@
       <!-- 组操作仅对激活档可用：忙碌或浏览态时禁用 -->
       <button
         class="icon-btn"
-        title={browseMode ? t.sidebar.linkBrowseHint : t.sidebar.linkNewHint}
+        use:tip={browseMode ? t.sidebar.linkBrowseHint : t.sidebar.linkNewHint}
         onclick={linkFacepack}
         disabled={busy || !hasProfile}
       >
@@ -311,7 +311,7 @@
               class="group-item"
               onclick={() => selectGroup(g.imgDir)}
               disabled={busy || browseMode}
-              title={browseMode ? t.sidebar.selectGroupBrowseHint : g.imgDir}
+              use:tip={browseMode ? t.sidebar.selectGroupBrowseHint : g.imgDir}
             >
               <span class="g-name">{basename(g.imgDir)}</span>
               <span class="g-rtf" class:ok={!!g.rtf}
@@ -320,7 +320,7 @@
             </button>
             <button
               class="icon-btn danger"
-              title={browseMode
+              use:tip={browseMode
                 ? t.sidebar.deleteGroupBrowseHint
                 : t.sidebar.deleteGroupBtn}
               onclick={() => deleteGroup(g.imgDir)}
@@ -356,7 +356,7 @@
       >{t.sidebar.linkFaq}</button
     >
     <details class="lang-menu" bind:this={langMenu}>
-      <summary class="link small" title={t.sidebar.langMenuTitle}
+      <summary class="link small" use:tip={t.sidebar.langMenuTitle}
         >{t.lang.label}</summary
       >
       <ul>

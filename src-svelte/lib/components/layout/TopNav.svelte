@@ -6,7 +6,7 @@
      （连接线点亮 + 状态点变色）。两者各表达一件事，不打架：即使停在 ③AI 生成头像，
      若 ① 还没备齐，①② 之间的连接线不会点亮、① 的状态点仍是琥珀 -->
 <script lang="ts">
-  import { appStore } from '../../stores/app.svelte';
+  import { appStore, tip } from '../../stores/app.svelte';
   import { imageaiStore } from '../../stores/imageai.svelte';
   import { ui } from '../../stores/ui.svelte';
   import type { Workbench } from '../../stores/ui.svelte';
@@ -97,9 +97,9 @@
         >
           <span class="num">{i + 1}</span>
           <span>{t.workbench[it.id]}</span>
-          <span class="wb-dot {states[i]}" title={stateTitle[states[i]]}></span>
+          <span class="wb-dot {states[i]}" use:tip={stateTitle[states[i]]}></span>
           {#if i === 2 && queueBadge > 0}
-            <span class="wb-badge" title={t.gen.queue.tabQueue}
+            <span class="wb-badge" use:tip={t.gen.queue.tabQueue}
               >{queueBadge}</span
             >
           {/if}

@@ -4,7 +4,7 @@
   import { api } from "../../services/api";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text"; // 全局文案常量
-  import { appStore, refreshSnapshot, runTask } from "../../stores/app.svelte";
+  import { appStore, refreshSnapshot, runTask, tip } from "../../stores/app.svelte";
   import Icon from "../../ui/Icon.svelte";
 
   // 三个模式的取值/标签/说明单点在 text.ts 的 t.replace.modes 维护；
@@ -143,7 +143,7 @@
       class:running={busy}
       onclick={startReplace}
       disabled={busy || browseMode || !ready}
-      title={browseMode ? t.replace.browseDisabledHint : ""}
+      use:tip={browseMode ? t.replace.browseDisabledHint : ""}
     >
       <!-- 填充层：宽度绑定进度百分比；aria-hidden 避免被读屏当作内容 -->
       {#if busy}

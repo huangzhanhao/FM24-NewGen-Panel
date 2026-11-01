@@ -4,6 +4,7 @@
 <script lang="ts">
   import { confirm, message } from "@tauri-apps/plugin-dialog";
   import { t } from "../../text";
+  import { tip } from "../../stores/app.svelte";
   import { deleteProvider, imageaiStore, saveProvider, setProviderKey } from "../../stores/imageai.svelte";
   import { showError } from "../../ui/dialog";
   import Icon from "../../ui/Icon.svelte";
@@ -470,7 +471,7 @@
                 type="text"
                 bind:value={editing.baseUrl}
                 placeholder="https://example.com/v1"
-                title={editing.kind === "dashscope" ? t.gen.baseUrlHintDashscope : ""}
+                use:tip={editing.kind === "dashscope" ? t.gen.baseUrlHintDashscope : ""}
               />
             </div>
             <!-- Key 跟着服务商走：一家一把，明文不回显。本地 ComfyUI 免鉴权，不显示这一行 -->
@@ -536,7 +537,7 @@
                         type="button"
                         class="m-toggle"
                         aria-expanded={expandedIdx === i}
-                        title={t.gen.modelCapToggle}
+                        use:tip={t.gen.modelCapToggle}
                         onclick={() => toggleCaps(i)}
                       >
                         <Icon name={expandedIdx === i ? "chevronDown" : "chevronRight"} size={14} />
@@ -549,7 +550,7 @@
                       />
                       <button
                         class="icon-btn m-del"
-                        title={t.gen.removeModelTitle}
+                        use:tip={t.gen.removeModelTitle}
                         aria-label={t.gen.removeModelTitle}
                         onclick={() => removeModel(i)}
                       >
@@ -565,12 +566,12 @@
                           {@const rowTitle = row.hint ? `${row.api} · ${row.hint}` : row.api}
                           <div class="cap-row">
                             <!-- 名称列只留中文（英文官方字段名走悬停），免得中文名被挤成两行 -->
-                            <div class="cap-name" title={rowTitle}>{row.label}</div>
+                            <div class="cap-name" use:tip={rowTitle}>{row.label}</div>
                             <div class="cap-val">
                               {#if row.bind}
                                 {#if row.bindStyle === "mode"}
                                   <!-- 两态控件：表达「选一种调用方式（同步/异步）」比开关的「开/关」更准确 -->
-                                  <div class="seg3 cap-mode" role="group" aria-label={row.label} title={rowTitle}>
+                                  <div class="seg3 cap-mode" role="group" aria-label={row.label} use:tip={rowTitle}>
                                     <button
                                       type="button"
                                       class:active={!caps[row.bind]}
@@ -589,7 +590,7 @@
                                     </button>
                                   </div>
                                 {:else}
-                                  <label class="switch cap-sw" title={rowTitle}>
+                                  <label class="switch cap-sw" use:tip={rowTitle}>
                                     <input type="checkbox" bind:checked={caps[row.bind!]} />
                                     <span class="track"></span>
                                   </label>
@@ -598,7 +599,7 @@
                               {#each row.subs as s (s.label)}
                                 {#if s.t === "num"}
                                   <span class="cap-sub">
-                                    <span class="cap-k" title={s.hint}>{s.label}</span>
+                                    <span class="cap-k" use:tip={s.hint}>{s.label}</span>
                                     <input type="number" min="0" step={s.step ?? "1"} bind:value={caps[s.bind]} />
                                   </span>
                                 {:else if s.t === "list"}
@@ -622,7 +623,7 @@
                                   </span>
                                 {:else if s.t === "pair"}
                                   <span class="cap-sub">
-                                    <span class="cap-k" title={s.hint}>{s.label}</span>
+                                    <span class="cap-k" use:tip={s.hint}>{s.label}</span>
                                     <span class="cap-pair">
                                       <span class="cap-op">≥</span>
                                       <input
@@ -646,7 +647,7 @@
                                   <span class="cap-sub">
                                     <span class="cap-k">{s.label}</span>
                                     <select
-                                      title={s.hint}
+                                      use:tip={s.hint}
                                       value={caps[s.bind]}
                                       onchange={(e) => (caps[s.bind] = e.currentTarget.value)}
                                     >

@@ -6,7 +6,7 @@
   import { t } from "../../text"; // 全局文案常量
   import { pinScrollEnd } from "../../ui/actions"; // 把长路径钉到最右的 action
   import Icon from "../../ui/Icon.svelte";
-  import { appStore, applySnapshot, markRosterFilled, markSnapshotRead, runTask } from "../../stores/app.svelte";
+  import { appStore, applySnapshot, markRosterFilled, markSnapshotRead, runTask, tip } from "../../stores/app.svelte";
   import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
 
@@ -165,7 +165,7 @@
           readonly
           value={snap.currentGroup ?? ""}
           placeholder={t.setup.imgDirPlaceholder}
-          title={snap.currentGroup ?? ""}
+          use:tip={snap.currentGroup ?? ""}
           use:pinScrollEnd={snap.currentGroup ?? ""}
         />
       </div>
@@ -174,10 +174,10 @@
           class="btn"
           onclick={checkIntegrity}
           disabled={busy || !snap.currentGroup}
-          title={snap.currentGroup ? t.setup.checkIntegrityHint : t.setup.noGroupHint}
+          use:tip={snap.currentGroup ? t.setup.checkIntegrityHint : t.setup.noGroupHint}
           >{t.setup.checkIntegrityBtn}</button
         >
-        <button class="btn" onclick={scanImages} disabled={busy || !snap.currentGroup} title={t.setup.scanImagesHint}
+        <button class="btn" onclick={scanImages} disabled={busy || !snap.currentGroup} use:tip={t.setup.scanImagesHint}
           >{t.setup.scanImagesBtn}</button
         >
       </div>
@@ -192,7 +192,7 @@
           type="text"
           readonly
           value={snap.currentRtf || t.setup.rtfUnsetValue}
-          title={snap.currentRtf}
+          use:tip={snap.currentRtf}
           use:pinScrollEnd={snap.currentRtf}
         />
       </div>
@@ -201,13 +201,13 @@
           class="btn"
           onclick={browseRtf}
           disabled={busy || browseMode || !snap.currentGroup}
-          title={browseMode
+          use:tip={browseMode
             ? t.setup.selectRtfBrowseHint
             : snap.currentGroup
               ? t.setup.selectRtfHint
               : t.setup.noGroupHint}>{t.setup.selectRtfBtn}</button
         >
-        <button class="btn" onclick={scanRtf} disabled={busy || !snap.currentRtf} title={t.setup.scanRtfHint}
+        <button class="btn" onclick={scanRtf} disabled={busy || !snap.currentRtf} use:tip={t.setup.scanRtfHint}
           >{t.setup.scanRtfBtn}</button
         >
       </div>
@@ -224,7 +224,7 @@
           readonly
           value={snap.configXml?.path ?? ""}
           placeholder={t.setup.xmlPlaceholder}
-          title={snap.configXml?.path ?? ""}
+          use:tip={snap.configXml?.path ?? ""}
           use:pinScrollEnd={snap.configXml?.path ?? ""}
         />
       </div>
@@ -233,13 +233,13 @@
           class="btn"
           onclick={readSnapshot}
           disabled={busy || !snap.configXml?.exists}
-          title={t.setup.viewConfigHint}>{t.setup.viewConfigBtn}</button
+          use:tip={t.setup.viewConfigHint}>{t.setup.viewConfigBtn}</button
         >
         <button
           class="btn"
           onclick={openSnapshot}
           disabled={busy || !snap.configXml?.exists}
-          title={t.setup.viewSnapshotHint}>{t.setup.viewSnapshotBtn}</button
+          use:tip={t.setup.viewSnapshotHint}>{t.setup.viewSnapshotBtn}</button
         >
       </div>
     </div>
@@ -283,7 +283,7 @@
     {/if}
     <!-- 标准规则入口：顶部分隔线另起一行，打开规则编辑对话框（RuleEditor） -->
     <div class="rule-row">
-      <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy} title={t.setup.ruleConfigHint}
+      <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy} use:tip={t.setup.ruleConfigHint}
         >{t.setup.ruleConfigBtn}</button
       >
       <span class="note">{t.setup.ruleConfigNote}</span>

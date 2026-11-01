@@ -20,6 +20,7 @@
 
 <script lang="ts">
   import { t } from "../../text"; // 全局文案常量
+  import { tip } from "../../stores/app.svelte";
   import Icon from "../../ui/Icon.svelte";
 
   let {
@@ -180,10 +181,10 @@
       {:else if pop.url}
         <img src={pop.url} alt={pop.key} />
       {:else}
-        <span class="pop-status err" title={pop.err}>{pop.err}</span>
+        <span class="pop-status err" use:tip={pop.err}>{pop.err}</span>
       {/if}
     </div>
-    <div class="pop-cap mono" title={pop.key}>{pop.key}</div>
+    <div class="pop-cap mono" use:tip={pop.key}>{pop.key}</div>
     {#if pop.pin}
       <button type="button" class="pop-x" aria-label={t.table.avatarClose} onclick={close}>
         <Icon name="x" stroke={2.2} />
@@ -206,7 +207,7 @@
   .pop-body img { display: block; width: 100%; height: 100%; object-fit: contain; }
   .pop-status { padding: var(--sp-3); font-size: var(--fs-sm); line-height: 1.6; color: var(--text-3); text-align: center; }
   .pop-status.err { color: var(--danger); }
-  /* 气泡底部的头像标识原文：超长省略，悬停看 title */
+  /* 气泡底部的头像标识原文：超长省略，悬停看全文 */
   .pop-cap { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--text-3); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* 钉住态关闭钮：20×20 表面色小圆角钮，悬停转危险色，两主题均清晰 */
   .pop-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--hairline-2); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-2); line-height: 1; cursor: pointer; transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }

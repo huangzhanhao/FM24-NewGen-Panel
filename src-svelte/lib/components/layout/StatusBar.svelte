@@ -1,6 +1,6 @@
 <!-- StatusBar · 底部状态栏：显示运行状态、进度与错误数徽章，并提供日志抽屉开关 -->
 <script lang="ts">
-  import { appStore } from '../../stores/app.svelte';
+  import { appStore, tip } from '../../stores/app.svelte';
   import { filterLines, logStore } from '../../stores/log.svelte';
   import { ui } from '../../stores/ui.svelte';
   import { t } from '../../text';
@@ -50,7 +50,7 @@
   {/if}
   <!-- 最新一行日志预览：空间不足时省略号截断（样式见 app.css .statusbar .last-log） -->
   {#if lastLog}
-    <span class="last-log" title={lastLog}>{lastLog}</span>
+    <span class="last-log" use:tip={lastLog}>{lastLog}</span>
   {/if}
   <!-- flex-1 的空隔层把后面的按钮推到最右侧 -->
   <span class="flex-1"></span>

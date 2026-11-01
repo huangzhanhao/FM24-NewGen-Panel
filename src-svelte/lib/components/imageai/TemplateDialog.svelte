@@ -2,6 +2,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { confirm } from "@tauri-apps/plugin-dialog";
+  import { tip } from "../../stores/app.svelte";
   import { deleteTemplate, imageaiStore, saveTemplate, VARIABLE_HINTS } from "../../stores/imageai.svelte";
   import { showError } from "../../ui/dialog";
   import { t } from "../../text";
@@ -103,7 +104,7 @@
           <p class="vars-hint">{t.gen.templateVariables}</p>
           <div class="var-chips">
             {#each VARIABLE_HINTS as [key, label] (key)}
-              <button type="button" class="chip" title={`{{${key}}}`} onclick={() => insertVar(key)}>
+              <button type="button" class="chip" use:tip={`{{${key}}}`} onclick={() => insertVar(key)}>
                 {label}
               </button>
             {/each}

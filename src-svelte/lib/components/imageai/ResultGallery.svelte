@@ -6,6 +6,7 @@
   import Icon from "../../ui/Icon.svelte";
   import { saveGeneratedImageAs } from "../../ui/generatedImageSave"; // 生成图另存为（与队列坞共用）
   import { showError } from "../../ui/dialog";
+  import { tip } from "../../stores/app.svelte";
   import { t } from "../../text";
   import {
     imageaiStore,
@@ -82,7 +83,7 @@
             type="button"
             class="img-frame"
             style={ratioStyle(img.size)}
-            title={t.gen.viewLarge}
+            use:tip={t.gen.viewLarge}
             onclick={() => (lightboxUrl = img.url)}
           >
             <img src={img.url} alt={t.gen.resultAlt} loading="lazy" decoding="async" />
@@ -92,7 +93,7 @@
             {#if img.seed}<span>{t.gen.metaSeed(img.seed)}</span>{/if}
           </div>
           <div class="actions">
-            <button class="btn sm" onclick={() => saveGeneratedImageAs(img.id)} title={t.gen.save}>
+            <button class="btn sm" onclick={() => saveGeneratedImageAs(img.id)} use:tip={t.gen.save}>
               <Icon name="download" class="ic" />
               {t.gen.save}
             </button>
@@ -100,21 +101,21 @@
             <button
               class="btn sm"
               disabled={!imageaiStore.sourcePlayer}
-              title={imageaiStore.sourcePlayer ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
+              use:tip={imageaiStore.sourcePlayer ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
               onclick={() => onSaveReplace(img.id)}
             >
               {t.gen.saveReplace.btn}
             </button>
             <button
               class="btn sm"
-              title={t.gen.regenTitle}
+              use:tip={t.gen.regenTitle}
               onclick={() => onregenerate({ size: img.size ?? "", seed: img.seed ?? "" })}
             >
               <Icon name="refresh" class="ic" />
             </button>
             <button
               class="btn sm icon-as-btn"
-              title={t.gen.viewLarge}
+              use:tip={t.gen.viewLarge}
               onclick={() => (lightboxUrl = img.url)}
             >
               <Icon name="zoom" class="ic" />
@@ -123,7 +124,7 @@
             {#if img.removable !== false}
               <button
                 class="icon-btn"
-                title={t.gen.removeImageTitle}
+                use:tip={t.gen.removeImageTitle}
                 onclick={() => removeResult(img.id)}
               >
                 <Icon name="x" size={13} />
@@ -132,7 +133,7 @@
           </div>
         {:else}
           <!-- 图片已不在（会话临时目录被清理）：复用 img-frame 几何的中置占位，不新造组件 -->
-          <div class="img-frame ph-frame" style={ratioStyle(img.size)} title={t.gen.imageMissing}>
+          <div class="img-frame ph-frame" style={ratioStyle(img.size)} use:tip={t.gen.imageMissing}>
             <Icon name="image" class="ph-ic" stroke={1.6} />
             <span class="ph-text">{t.gen.imageMissing}</span>
           </div>
@@ -155,7 +156,7 @@
       <img src={lightboxUrl} alt={t.gen.previewAlt} />
       <button
         class="icon-btn lb-close"
-        title={t.gen.closePreview}
+        use:tip={t.gen.closePreview}
         onclick={() => (lightboxUrl = null)}
       >
         <Icon name="x" size={16} />

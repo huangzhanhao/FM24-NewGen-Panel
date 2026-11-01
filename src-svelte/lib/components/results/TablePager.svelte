@@ -3,6 +3,7 @@
      page 从 0 计数、双向绑定 -->
 <script lang="ts">
   import { t } from "../../text"; // 全局文案常量
+  import { tip } from "../../stores/app.svelte";
   import Icon from "../../ui/Icon.svelte";
 
   // totalPages 至少为 1，由父组件按总条数算出
@@ -30,7 +31,7 @@
     class="btn"
     onclick={() => (page = Math.max(0, page - 1))}
     disabled={page === 0}
-    title={t.table.prevPage}
+    use:tip={t.table.prevPage}
   >
     <Icon name="chevronLeft" size={14} />
   </button>
@@ -39,7 +40,7 @@
     class="btn"
     onclick={() => (page += 1)}
     disabled={page + 1 >= totalPages}
-    title={t.table.nextPage}
+    use:tip={t.table.nextPage}
   >
     <Icon name="chevronRight" size={14} />
   </button>

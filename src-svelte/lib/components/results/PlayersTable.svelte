@@ -5,7 +5,7 @@
   import { api } from "../../services/api";
   import { showError } from "../../ui/dialog"; // 查询失败要弹窗，否则 rejection 被静默吞掉
   import { message } from "@tauri-apps/plugin-dialog"; // 「加入队列」成功提示（与 ImageAiPanel 保存同款）
-  import { appStore, basedValue, filterPlayers } from "../../stores/app.svelte";
+  import { appStore, basedValue, filterPlayers, tip } from "../../stores/app.svelte";
   import { ui } from "../../stores/ui.svelte"; // 「送生图」要切到 AI 生成头像工作台
   import {
     enqueuePlayers,
@@ -300,7 +300,7 @@
                 tabindex="0"
                 onclick={() => sortBy("uid")}
                 onkeydown={(e) => onSortKey(e, "uid")}
-                title={t.table.colUid}
+                use:tip={t.table.colUid}
                 >{t.table.colUid}<span class="muted">（{t.table.recordCount(paged.view.total)}）</span>{@render sortIcon(
                   "uid",
                 )}</th
@@ -310,7 +310,7 @@
               tabindex="0"
               onclick={() => sortBy("primaryNat")}
               onkeydown={(e) => onSortKey(e, "primaryNat")}
-              title={t.table.colNat}>{t.table.colNat}{@render sortIcon("primaryNat")}</th
+              use:tip={t.table.colNat}>{t.table.colNat}{@render sortIcon("primaryNat")}</th
             >
             <th class="static">{t.table.col2ndNat}</th>
             <th
@@ -319,10 +319,10 @@
               class="clamp clamp-name"
               onclick={() => sortBy("name")}
               onkeydown={(e) => onSortKey(e, "name")}
-              title={t.table.colName}>{t.table.colName}{@render sortIcon("name")}</th
+              use:tip={t.table.colName}>{t.table.colName}{@render sortIcon("name")}</th
             >
             <!-- 头像列恒显示（紧跟姓名） -->
-            <th class="static c" title={avatars.error ? t.table.avatarFailHint(avatars.error) : undefined}>
+            <th class="static c" use:tip={avatars.error ? t.table.avatarFailHint(avatars.error) : undefined}>
               {t.table.colAvatar}{#if avatars.error}<span class="avatar-warn" aria-hidden="true">!</span>{/if}
             </th>
             <th class="static c">{t.table.colHair}</th>
@@ -333,7 +333,7 @@
               class="c"
               onclick={() => sortBy("ethnicityCode")}
               onkeydown={(e) => onSortKey(e, "ethnicityCode")}
-              title={t.table.colEth}>{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
+              use:tip={t.table.colEth}>{t.table.colEth}{@render sortIcon("ethnicityCode")}</th
             >
             <!-- 拓展字段列（仅拓展名单有，由「拓展列」开关控制）：顺序=肤色/随机人/性别/年龄/
                  身高/俱乐部/所在地(偏好工作)/能力/潜力/R.C.A。基础字段列与勾选/头像/送生图恒显示 -->
@@ -352,7 +352,7 @@
               <th class="static c">{t.table.colRca}</th>
             {/if}
             <!-- 末列「送生图」操作列：基础/拓展名单都有，表头留白（按钮自带读屏文案） -->
-            <th class="static c" title={t.gen.source.sendBtn}></th>
+            <th class="static c" use:tip={t.gen.source.sendBtn}></th>
           </tr>
         </thead>
         <tbody>
@@ -370,7 +370,7 @@
               <td class="mono">{r.uid}</td>
               <td>{r.primaryNat}</td>
               <td>{r.secNat}</td>
-              <td class="clamp clamp-name" title={r.name}>{r.name}</td>
+              <td class="clamp clamp-name" use:tip={r.name}>{r.name}</td>
               <!-- 头像列恒显示（紧跟姓名）：按 UID 从后端快照/映射缓存取图，无映射或图不在包内显示 — -->
               <td class="c">
                 <!-- 缩略图 + 悬停/点击放大气泡：加载与交互都在共用组件里，这里只交路径与图片 URL -->
@@ -396,8 +396,8 @@
                 {#if hasGender}<td class="c">{d?.gender || "—"}</td>{/if}
                 <td class="c">{d?.age || "—"}</td>
                 <td class="c">{d?.height || "—"}</td>
-                <td title={d?.club ?? ""}>{d?.club || "—"}</td>
-                <td class="clamp clamp-based" title={basedValue(r.detailed)}>{basedValue(r.detailed) || "—"}</td>
+                <td use:tip={d?.club ?? ""}>{d?.club || "—"}</td>
+                <td class="clamp clamp-based" use:tip={basedValue(r.detailed)}>{basedValue(r.detailed) || "—"}</td>
                 <td class="c">{d?.ca || "—"}</td>
                 <td class="c">{d?.pa || "—"}</td>
                 <td class="c">{d?.rca || "—"}</td>
@@ -407,7 +407,7 @@
                 <button
                   class="btn sm gen-send"
                   class:on={imageaiStore.sourcePlayer?.uid === r.uid}
-                  title={t.gen.source.sendTitle(r.name)}
+                  use:tip={t.gen.source.sendTitle(r.name)}
                   onclick={() => sendToGenerate(r)}
                 >
                   {imageaiStore.sourcePlayer?.uid === r.uid ? t.gen.source.sent : t.gen.source.sendBtn}

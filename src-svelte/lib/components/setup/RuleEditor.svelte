@@ -6,7 +6,7 @@
   import { api } from '../../services/api';
   import { showError } from '../../ui/dialog';
   import { t } from '../../text'; // 全局文案常量
-  import { appStore, refreshSnapshot } from '../../stores/app.svelte';
+  import { appStore, refreshSnapshot, tip } from '../../stores/app.svelte';
 
   type RuleName = 'standard2' | 'standard3';
   const LABELS: Record<RuleName, string> = {
@@ -99,7 +99,7 @@
         <div class="modal-actions">
           {#if status}<span class="ok-text small">{status}</span>{/if}
           <span class="muted small">{appStore.snapshot?.currentProfile ?? ''}</span>
-          <button class="btn primary" onclick={save} disabled={!dirty} title={t.ruleEditor.saveHint}>{t.ruleEditor.saveBtn}</button>
+          <button class="btn primary" onclick={save} disabled={!dirty} use:tip={t.ruleEditor.saveHint}>{t.ruleEditor.saveBtn}</button>
           <button class="btn" onclick={close}>{t.ruleEditor.closeBtn}</button>
         </div>
       </div>

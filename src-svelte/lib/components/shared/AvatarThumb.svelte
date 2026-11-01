@@ -9,6 +9,7 @@
      - path 变化（同一 UID 换了图）时用 {#key} 重建气泡：否则气泡缓存里会留着旧图 -->
 <script lang="ts">
   import { loadImageBlobUrl } from "../../services/images";
+  import { tip } from "../../stores/app.svelte";
   import { t } from "../../text"; // 全局文案常量
   import AvatarPopover, { type AvatarEntry, type AvatarPopoverApi } from "./AvatarPopover.svelte"; // 放大气泡本体：缓存/钉住/延迟关闭都在其中
 
@@ -41,7 +42,7 @@
   <button
     type="button"
     class="thumb-btn"
-    title={itemKey}
+    use:tip={itemKey}
     aria-label={t.table.avatarAria}
     onmouseenter={(e) => pop?.open(itemKey, e.currentTarget, false)}
     onmouseleave={pop?.scheduleClose}
@@ -54,7 +55,7 @@
 {:else}
   <!-- 无图占位也占满 30px 固定盒：与有图行同高（纯文本会矮 2px，导致快照表按行高实测
        自适应时图装载前后行数抖动）；宽度随文案（≤60px 与缩略图 max-width 齐） -->
-  <span class="thumb-ph" title={itemKey}>{placeholder}</span>
+  <span class="thumb-ph" use:tip={itemKey}>{placeholder}</span>
 {/if}
 
 {#key path}

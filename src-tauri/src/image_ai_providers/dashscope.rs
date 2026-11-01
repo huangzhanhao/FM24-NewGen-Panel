@@ -42,7 +42,7 @@
 //! 协议全部拆为纯函数（URL / 体组装 / 解析 / 退避 / 分流判定），单测不触网。
 
 use super::{validate_model_caps, FetchedImage, GenStage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{
+use crate::image_ai::types::{
     classify_provider_error, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig,
     ProviderKind, SizeRules,
 };
@@ -689,7 +689,7 @@ mod tests {
             n: 2,
             seed: Some(7),
             caps: Some(fixture_caps()),
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 
@@ -1033,7 +1033,7 @@ mod tests {
         let err = parse_sync(&v).unwrap_err();
         assert_eq!(err.message, "BadRequest: size invalid");
         // 业务码未命中分类、非 HTTP 错误路径 → Provider
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::Provider);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::Provider);
         let v: Value = serde_json::from_str(r#"{"output":{"choices":[]}}"#).unwrap();
         assert!(parse_sync(&v).unwrap_err().message.contains("没有图片结果"));
     }
@@ -1080,13 +1080,13 @@ mod tests {
                 .unwrap();
         assert_eq!(
             parse_submit(&v).unwrap_err().kind,
-            crate::image_ai::GenErrorKind::ContentRejected
+            crate::image_ai::types::GenErrorKind::ContentRejected
         );
         // 缺 task_id：结构错误归 Provider。
         let v: Value = serde_json::from_str(r#"{"output":{}}"#).unwrap();
         assert_eq!(
             parse_submit(&v).unwrap_err().kind,
-            crate::image_ai::GenErrorKind::Provider
+            crate::image_ai::types::GenErrorKind::Provider
         );
     }
 
@@ -1115,7 +1115,7 @@ mod tests {
             r#"{"output":{"task_status":"FAILED","code":"DataInspectionFailed","message":"内容不合规"}}"#,
         )) {
             TaskState::Failed(e) => {
-                assert_eq!(e.kind, crate::image_ai::GenErrorKind::ContentRejected);
+                assert_eq!(e.kind, crate::image_ai::types::GenErrorKind::ContentRejected);
                 assert_eq!(e.message, "内容不合规");
             }
             _ => panic!("应为 Failed"),
@@ -1126,7 +1126,7 @@ mod tests {
             r#"{"code":"IPInfringementSuspect","message":"疑似侵权","output":{"task_status":"FAILED"}}"#,
         )) {
             TaskState::Failed(e) => {
-                assert_eq!(e.kind, crate::image_ai::GenErrorKind::ContentRejected);
+                assert_eq!(e.kind, crate::image_ai::types::GenErrorKind::ContentRejected);
                 assert_eq!(e.message, "疑似侵权");
             }
             _ => panic!("应为 Failed"),
@@ -1136,7 +1136,7 @@ mod tests {
             r#"{"code":"Throttling","message":"顶层","output":{"task_status":"FAILED","code":"DataInspectionFailed","message":"任务级"}}"#,
         )) {
             TaskState::Failed(e) => {
-                assert_eq!(e.kind, crate::image_ai::GenErrorKind::ContentRejected);
+                assert_eq!(e.kind, crate::image_ai::types::GenErrorKind::ContentRejected);
                 assert_eq!(e.message, "任务级");
             }
             _ => panic!("应为 Failed"),
@@ -1149,7 +1149,7 @@ mod tests {
         ] {
             match parse_task(&p(s)) {
                 TaskState::Failed(e) => {
-                    assert_eq!(e.kind, crate::image_ai::GenErrorKind::Provider, "{s}")
+                    assert_eq!(e.kind, crate::image_ai::types::GenErrorKind::Provider, "{s}")
                 }
                 _ => panic!("应为 Failed: {s}"),
             }

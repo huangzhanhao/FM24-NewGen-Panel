@@ -12,7 +12,8 @@
 //! （`parse_images` 对 b64 与 url 两种载荷都吃）。
 
 use super::{validate_model_caps, FetchedImage, GenStage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{from_http_status, Capabilities, GenRequest, ImageGenError};
+use crate::image_ai::types::{
+    from_http_status, Capabilities, GenRequest, ImageGenError};
 use base64::Engine;
 use std::future::Future;
 use std::pin::Pin;
@@ -228,7 +229,7 @@ mod tests {
                 supports_quality: true,
                 ..Default::default()
             }),
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 
@@ -345,7 +346,7 @@ mod tests {
             serde_json::from_str(r#"{"error":{"message":"bad key"}}"#).unwrap();
         let err = parse_images(&v).unwrap_err();
         assert_eq!(err.message, "服务商返回错误：bad key");
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::Provider);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::Provider);
     }
 
     #[test]
@@ -353,7 +354,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
         let err = parse_images(&v).unwrap_err();
         assert_eq!(err.message, "响应缺少 data 数组");
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::Provider);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::Provider);
         let v: serde_json::Value = serde_json::from_str(r#"{"data":[]}"#).unwrap();
         assert_eq!(parse_images(&v).unwrap_err().message, "data 数组为空");
     }

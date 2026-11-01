@@ -25,7 +25,7 @@
 //! （`validate_model_caps`）统一拦下，未填时本地随机取值（官方口径：不指定则随机）。
 
 use super::{validate_model_caps, FetchedImage, GenStage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{
+use crate::image_ai::types::{
     from_http_status, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig,
     ProviderKind,
 };
@@ -115,7 +115,7 @@ pub(crate) fn history_url(base: &str, prompt_id: &str) -> String {
     format!("{}/history/{prompt_id}", base.trim_end_matches('/'))
 }
 
-/// 解析 `宽x高`/`宽*高`；EmptyLatentImage 需要独立的 width/height，提交前必须拆开。
+/// 解析 宽×高（小写 `x`）/「宽*高」两种写法；EmptyLatentImage 需要独立的 width/height，提交前必须拆开。
 pub(crate) fn parse_size(size: &str) -> Option<(u32, u32)> {
     let v: Vec<u32> = size
         .split(['x', '*'])
@@ -391,7 +391,7 @@ impl ImageProvider for ComfyUIProvider {
         }
         if parse_size(&req.size).is_none() {
             return Err(ImageGenError::invalid_param(format!(
-                "尺寸「{}」格式不正确，应为 宽x高（如 1024x1024）",
+                "尺寸「{}」格式不正确，应为 宽×高 或 宽*高（如 1024x1024）",
                 req.size
             )));
         }
@@ -412,7 +412,7 @@ mod tests {
             size: "1024x1024".into(),
             n: 2,
             caps: Some(comfyui_caps()),
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 
@@ -581,17 +581,17 @@ mod tests {
         let mut r = gen_req();
         r.base_url = String::new();
         let err = ComfyUIProvider.validate(&r, &caps).unwrap_err();
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::NotConfigured);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::NotConfigured);
 
         let mut r = gen_req();
         r.size = "1024".into();
         let err = ComfyUIProvider.validate(&r, &caps).unwrap_err();
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::InvalidParam);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::InvalidParam);
 
         let mut r = gen_req();
         r.seed = Some(-1);
         let err = ComfyUIProvider.validate(&r, &caps).unwrap_err();
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::InvalidParam);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::InvalidParam);
 
         assert!(ComfyUIProvider.validate(&gen_req(), &caps).is_ok());
     }

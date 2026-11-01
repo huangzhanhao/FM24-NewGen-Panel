@@ -3,10 +3,18 @@
 //! 【设计】数据留在 Rust，IPC 只传摘要/分页，状态变更后回传 AppSnapshot 整体刷新。
 //! 命令与后台替换线程并发，故共享字段用 Mutex/Arc、运行与取消标志用 AtomicBool。
 //! 返回 Result<T, String> 的 Err 文案由前端直接弹窗展示。
+//!
+//! 【分块】按业务域排列，跨域共用设施在最前、单元测试在最后，块前标记一一对应：
+//!   ① 公共设施（状态 / 缓存 / 进度上报）→ ② 存档与组 → ③ 完整性校验与扫描
+//!   → ④ 批量替换 → ⑤ 单人换脸与名单预览 → ⑥ 快照与工作区文件
+//!   → ⑦ AI 文生图（实现在 image_ai）→ ⑧ 单元测试。
+//! 返回前端的结构体跟随各自域，一律 #[serde(rename_all = "camelCase")]，字段须与前端 types.ts 一致。
+//!
+//! 【登记】命令需带 #[tauri::command] 并在 lib.rs 的 invoke_handler 里登记，缺一即「命令未找到」。
+//! 命令函数名必须全 crate 唯一：宏按函数名导出包装器，重名会直接编译失败。
 use crate::face_mapper::{FaceMapper, Mode};
 use crate::facepack_scanner::{self, IntegrityResult, PackScan, PackSig};
-use crate::image_ai::{self, Config};
-use crate::image_ai_queue;
+use crate::image_ai::{self, gen_queue, Config};
 use crate::json_store;
 use crate::logger::{LogPage, LogSink, Logger};
 use crate::profile_manager::ProfileManager;
@@ -26,6 +34,8 @@ use tauri::{AppHandle, Emitter, State};
 // 标准三目录清单已由 rule_config 的 standard3.json（FolderList）取代，不再有硬编码常量。
 pub use crate::facepack_scanner::FACEPACK_DIRS;
 
+// ---------------- ① 公共设施（状态 / 缓存 / 进度上报，跨域共用） ----------------
+
 /// 应用全局状态（lib.rs 的 setup 里 app.manage 交给 Tauri 托管）。
 /// 命令与后台替换线程并发，故共享数据用 Mutex、跨线程引用用 Arc、标志用 AtomicBool。
 pub struct AppState {
@@ -39,7 +49,7 @@ pub struct AppState {
     pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
     pub image: Arc<Mutex<Config>>,                         // 生图生效配置（image_ai.json + 默认双来源）
     pub image_keys: Arc<Mutex<HashMap<String, String>>>,   // 会话内的明文 Key（密文随配置行落盘，本表只缓存解密结果）
-    pub queue: Arc<Mutex<image_ai_queue::QueueState>>,     // 批量生成队列（条目列表 + cancel 标志）
+    pub queue: Arc<Mutex<gen_queue::QueueState>>,               // 批量生成队列（条目列表 + cancel 标志）
     pub data_dir: PathBuf,                                 // 便携数据目录（标准规则 data/rules/ 在其下）
 }
 
@@ -60,7 +70,7 @@ pub struct SnapshotCache {
     pub entries: Vec<MappingEntry>,
 }
 
-// ---------------- 跟着「当前档 / 当前组」走的内存缓存：作用域变更即作废 ----------------
+// 跟着「当前档 / 当前组」走的内存缓存：作用域变更即作废
 
 /// 「缓存作用域」：决定 `rtf_cache` / `mapping_cache` 归谁用的三个量——当前档、当前组、当前组的名单路径。
 /// 【为什么需要它】这两个缓存是「最近一次解析/生成的」语义，**没有路径键**
@@ -79,49 +89,6 @@ fn clear_caches_if_scope_changed(state: &State<'_, AppState>, before: (String, O
     }
     state.rtf_cache.lock().unwrap().clear();
     state.mapping_cache.lock().unwrap().clear();
-}
-
-// ---------------- 传给前端的类型（统一 camelCase） ----------------
-// 这些结构体是前后端的数据契约：serde 把蛇形字段转成驼峰，前端 types.ts 有对应接口，两边字段必须一致。
-
-/// 一个头像包（组）的摘要：目录 + 已设 RTF。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupInfo {
-    pub img_dir: String,
-    pub rtf: String,
-}
-
-/// 当前组 config.xml 的路径与存在性（快照附带，前端渲染 config.xml 行）。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigXmlInfo {
-    pub path: String,
-    pub exists: bool,
-}
-
-/// 应用全局快照：一次性把前端需要的所有状态打包返回（前端拿到后整体替换本地状态）。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AppSnapshot {
-    pub profiles: Vec<String>,             // 所有存档名
-    pub current_profile: String,           // 当前激活存档
-    pub groups: Vec<GroupInfo>,            // 当前存档下的所有组
-    pub current_group: Option<String>,     // 当前选中组（Option 对应前端 null）
-    pub current_rtf: String,               // 当前组的 RTF
-    pub replacing: bool,                   // 是否正在替换
-    pub config_xml: Option<ConfigXmlInfo>, // 当前组的 config.xml（无选中组为 None）
-    pub log_path: String,                  // 日志文件路径
-}
-
-/// 替换进度载荷（replace:progress 事件）。current/total 是阶段内计数，无可数单位时为 0/0（前端只显示百分比）。
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ProgressPayload {
-    pub status: String,
-    pub value: u8,
-    pub current: usize,
-    pub total: usize,
 }
 
 /// 轻量任务（检查完整性 / 扫描头像 / 扫描RTF / 读取快照）的进度载荷：
@@ -196,81 +163,37 @@ impl TaskProgress {
     }
 }
 
-/// `replace` 通道的事件去重器：只在「阶段文案 或 百分比」变化时放行。
-/// 【为何键里不能带 current/total】替换流水线的阶段内部现在按项上报（逐球员抽图可达数万次），
-/// 计数每项都在变——把计数放进键等于没去重，照样刷爆 IPC。
-/// 百分比本就是由 current/total 折算来的，放行时把当时的计数一并带出去，两者自洽。
-struct ProgressDedup {
-    last: Option<(String, u8)>,
-}
+// ---------------- ② 存档与组 ----------------
 
-impl ProgressDedup {
-    /// 返回 true 表示这次该 emit（并把本次的 (阶段文案, 百分比) 记为上次）。
-    fn should_emit(&mut self, status: &str, value: u8) -> bool {
-        if self.last.as_ref().is_some_and(|(s, v)| s == status && *v == value) {
-            return false;
-        }
-        self.last = Some((status.to_string(), value));
-        true
-    }
-}
-
-// 「检查完整性」结果 IntegrityResult 已下沉到 facepack_scanner（属头像包分类判定的领域产物）。
-
-/// 「扫描头像」返回摘要：图片总数 + 命中的标准号（0=无法识别）。
+/// 一个头像包（组）的摘要：目录 + 已设 RTF。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ImageScanResult {
-    pub total: usize,
-    pub standard: u8,
+pub struct GroupInfo {
+    pub img_dir: String,
+    pub rtf: String,
 }
 
-// 「扫描RTF」返回摘要复用 rtf_scanner::RosterSummary（与替换路径同一口径），命令层不再另建类型。
-
-/// 前端发起替换时传来的参数（Deserialize = 从前端 JSON 解析而来）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReplaceArgs {
-    pub mode: String,
-    pub filter_newgan: bool,
-    pub allow_duplicates: bool,
-    pub save_backup: bool,
-    /// 用户已在发起前的预检（`preflight_replace`）里确认过「本次可能把本档既有映射清空」。
-    /// 前端只在预检要求确认、且用户点了确认时才置 true——它不能由界面勾选，否则等于没有守卫。
-    pub allow_blank: bool,
-}
-
-/// 「发起前预检」的返回体（对应前端 preflight_replace）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreflightResult {
-    /// 是否需要用户确认后才发起。判定只有一条：本次有可能把本档既有映射写成空表。
-    pub needs_confirm: bool,
-    /// 本档本组档景里现有的映射条数（确认后最坏情况会被整体覆盖掉的条数）。
-    pub existing: usize,
-}
-
-// 名单分页查询参数 PlayerQuery 与筛选/排序/分页逻辑已下沉到 rtf_scanner::query_page（名单领域）。
-
-/// 单人预览的返回体：球员资料 + 映射 + 实际图片路径（三者都可能为 None/null）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerPreview {
-    pub record: Option<PlayerRecord>,
-    pub mapping: Option<MappingEntry>,
-    pub image_path: Option<String>,
-}
-
-/// 「读取快照」返回摘要：快照里的映射总条数。
+/// 当前组 config.xml 的路径与存在性（快照附带，前端渲染 config.xml 行）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct SnapshotInfo {
-    pub total: usize,
+pub struct ConfigXmlInfo {
+    pub path: String,
+    pub exists: bool,
 }
 
-// 快照预览的 SnapshotEntry / SnapshotQuery 及筛选分页逻辑已下沉到 xml_parser（config.xml 映射领域）。
-
-// ---------------- 命令实现 ----------------
+/// 应用全局快照：一次性把前端需要的所有状态打包返回（前端拿到后整体替换本地状态）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSnapshot {
+    pub profiles: Vec<String>,             // 所有存档名
+    pub current_profile: String,           // 当前激活存档
+    pub groups: Vec<GroupInfo>,            // 当前存档下的所有组
+    pub current_group: Option<String>,     // 当前选中组（Option 对应前端 null）
+    pub current_rtf: String,               // 当前组的 RTF
+    pub replacing: bool,                   // 是否正在替换
+    pub config_xml: Option<ConfigXmlInfo>, // 当前组的 config.xml（无选中组为 None）
+    pub log_path: String,                  // 日志文件路径
+}
 
 /// 把 ProfileManager 的当前状态汇总成一个 AppSnapshot（发给前端的快照）。
 /// 【复用】几乎每个命令改完状态后都会调它，把最新状态回传前端，前端据此刷新界面。
@@ -307,8 +230,6 @@ fn snapshot(state: &State<'_, AppState>) -> AppSnapshot {
         log_path: state.logger.path().to_string_lossy().to_string(),
     }
 }
-
-// 命令函数需带 #[tauri::command]，并在 lib.rs 的 invoke_handler 里登记。
 
 /// 获取应用全局快照（前端启动时、或需要强制刷新时调）。
 #[tauri::command]
@@ -416,6 +337,52 @@ pub fn delete_group(state: State<'_, AppState>, img_dir: String) -> Result<AppSn
     Ok(snapshot(&state))
 }
 
+/// 预览指定存档（仅供前端下拉浏览，不改变后端当前档/激活状态）；currentProfile 返回被浏览的存档名，激活仍需调 switch_profile。
+#[tauri::command]
+pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
+    let pm = state.pm.lock().unwrap();
+    let (prf_cfg, cur_group) = pm.preview_cfg(&name)?;
+    // 浏览档的快照路径与存在性（与激活档口径一致）。
+    let config_xml = cur_group.as_ref().map(|g| {
+        let path = crate::paths::group_xml_path(&pm.user_cfg_path(), &name, g);
+        ConfigXmlInfo {
+            path: path.to_string_lossy().to_string(),
+            exists: path.is_file(),
+        }
+    });
+    Ok(AppSnapshot {
+        profiles: pm.config.profile.keys().cloned().collect(),
+        current_profile: name, // 浏览口径：返回被浏览的存档名
+        groups: prf_cfg
+            .groups
+            .iter()
+            .map(|(dir, g)| GroupInfo {
+                img_dir: dir.clone(),
+                rtf: g.rtf.clone(),
+            })
+            .collect(),
+        current_group: cur_group.clone(),
+        current_rtf: cur_group.as_ref().and_then(|g| prf_cfg.groups.get(g)).map(|g| g.rtf.clone()).unwrap_or_default(),
+        replacing: state.running.load(Ordering::SeqCst),
+        config_xml,
+        log_path: state.logger.path().to_string_lossy().to_string(),
+    })
+}
+
+// ---------------- ③ 完整性校验与扫描 ----------------
+
+// 「检查完整性」结果 IntegrityResult 已下沉到 facepack_scanner（属头像包分类判定的领域产物）。
+
+/// 「扫描头像」返回摘要：图片总数 + 命中的标准号（0=无法识别）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageScanResult {
+    pub total: usize,
+    pub standard: u8,
+}
+
+// 「扫描RTF」返回摘要复用 rtf_scanner::RosterSummary（与替换路径同一口径），命令层不再另建类型。
+
 /// 校验头像包目录，返回缺失的种族子目录名（前端确认后批量创建）。不访问全局状态，无需 State。
 #[tauri::command]
 pub fn validate_image_dirs(img_dir: String) -> Vec<String> {
@@ -468,8 +435,6 @@ pub fn create_missing_dirs(img_dir: String, names: Vec<String>) -> Result<(), St
     log::info!(target: "scan", "已创建缺失目录 {count} 个");
     Ok(())
 }
-
-// ---------------- 扫描（「扫描头像 / 扫描RTF」按钮） ----------------
 
 /// 标准号的中文标注（写日志用）。目录数取自规则配置的 FolderList，不在这里硬编码。
 fn layout_label(standard: u8, config: &RuleConfig) -> String {
@@ -566,28 +531,58 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
     Ok(summary)
 }
 
-/// 用Windows资源管理器打开目录。组 key 经 norm_dir 带尾部分隔符，而 explorer 对引号内的尾反斜杠解析脆弱
-/// （含空格的路径会打不开正确位置），故传入前先去掉尾部分隔符。
-fn explorer_open(dir: &Path, what: &str) -> Result<(), String> {
-    let s = dir.to_string_lossy();
-    let trimmed = s.trim_end_matches(['\\', '/']);
-    // 盘根（`C:\`）去尾后是 `C:`（表示「该盘当前目录」而非根），需保留原样；裸分隔符同理。
-    let target = if trimmed.is_empty() || trimmed.ends_with(':') {
-        s.as_ref()
-    } else {
-        trimmed
-    };
-    std::process::Command::new("explorer").arg(target).spawn().map_err(|e| format!("打开{what}失败: {e}"))?;
-    Ok(())
+// ---------------- ④ 批量替换 ----------------
+
+/// 替换进度载荷（replace:progress 事件）。current/total 是阶段内计数，无可数单位时为 0/0（前端只显示百分比）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressPayload {
+    pub status: String,
+    pub value: u8,
+    pub current: usize,
+    pub total: usize,
 }
 
-/// 打开标准规则目录（data/rules/）供用户编辑；缺失时先导出内置默认。
-/// 编辑保存后下次替换/检查完整性即生效。
-#[tauri::command]
-pub fn open_rules_dir(state: State<'_, AppState>) -> Result<(), String> {
-    templates::ensure_user_files(&state.data_dir)?;
-    let dir = state.data_dir.join("rules");
-    explorer_open(&dir, "规则目录")
+/// 前端发起替换时传来的参数（Deserialize = 从前端 JSON 解析而来）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceArgs {
+    pub mode: String,
+    pub filter_newgan: bool,
+    pub allow_duplicates: bool,
+    pub save_backup: bool,
+    /// 用户已在发起前的预检（`preflight_replace`）里确认过「本次可能把本档既有映射清空」。
+    /// 前端只在预检要求确认、且用户点了确认时才置 true——它不能由界面勾选，否则等于没有守卫。
+    pub allow_blank: bool,
+}
+
+/// 「发起前预检」的返回体（对应前端 preflight_replace）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightResult {
+    /// 是否需要用户确认后才发起。判定只有一条：本次有可能把本档既有映射写成空表。
+    pub needs_confirm: bool,
+    /// 本档本组档景里现有的映射条数（确认后最坏情况会被整体覆盖掉的条数）。
+    pub existing: usize,
+}
+
+/// `replace` 通道的事件去重器：只在「阶段文案 或 百分比」变化时放行。
+/// 【为何键里不能带 current/total】替换流水线的阶段内部现在按项上报（逐球员抽图可达数万次），
+/// 计数每项都在变——把计数放进键等于没去重，照样刷爆 IPC。
+/// 百分比本就是由 current/total 折算来的，放行时把当时的计数一并带出去，两者自洽。
+struct ProgressDedup {
+    last: Option<(String, u8)>,
+}
+
+impl ProgressDedup {
+    /// 返回 true 表示这次该 emit（并把本次的 (阶段文案, 百分比) 记为上次）。
+    fn should_emit(&mut self, status: &str, value: u8) -> bool {
+        if self.last.as_ref().is_some_and(|(s, v)| s == status && *v == value) {
+            return false;
+        }
+        self.last = Some((status.to_string(), value));
+        true
+    }
 }
 
 /// 「正在替换」标志的 RAII 守卫：Drop 时复位，让「校验提前 return」「线程正常收尾」「线程 panic」 三条路径共用同一出口。
@@ -904,6 +899,26 @@ pub fn start_replace(app: AppHandle, state: State<'_, AppState>, args: ReplaceAr
         }
     });
     Ok(())
+}
+
+/// 请求取消正在进行的替换。只把标志置 true，后台线程会在下一次检查时自行停下。
+#[tauri::command]
+pub fn cancel_replace(state: State<'_, AppState>) {
+    state.cancel.store(true, Ordering::SeqCst);
+    state.logger.info("replace", "用户请求取消");
+}
+
+// ---------------- ⑤ 单人换脸与名单预览 ----------------
+
+// 名单分页查询参数 PlayerQuery 与筛选/排序/分页逻辑已下沉到 rtf_scanner::query_page（名单领域）。
+
+/// 单人预览的返回体：球员资料 + 映射 + 实际图片路径（三者都可能为 None/null）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerPreview {
+    pub record: Option<PlayerRecord>,
+    pub mapping: Option<MappingEntry>,
+    pub image_path: Option<String>,
 }
 
 /// 单人换脸（对等旧版 PlayerService.replace_single_face）。只改 config.xml 里该 UID 那一行。
@@ -1267,7 +1282,49 @@ pub fn query_players_by_uids(state: State<'_, AppState>, uids: Vec<String>) -> V
     state.rtf_cache.lock().unwrap().iter().filter(|r| want.contains(r.uid.as_str())).cloned().collect()
 }
 
-// ---------------- 快照预览（「读取快照」按钮 → 结果区「快照预览」Tab） ----------------
+/// 名单预览「头像」列预览：把列原文解析成当前头像包内的实际图片路径（找不到返回 null）。
+/// 先走确定性路径探测（xml_parser::resolve_avatar_path）；裸词干在包根没命中时，
+/// 再借「扫描头像」的递归索引在全部子/孙目录里找同名图（缓存缺失/切组则不做递归，避免现场扫盘卡顿）。
+#[tauri::command]
+pub fn resolve_avatar(state: State<'_, AppState>, avatar: String) -> Result<Option<String>, String> {
+    let avatar = avatar.trim();
+    if avatar.is_empty() {
+        return Ok(None);
+    }
+    let pm = state.pm.lock().unwrap();
+    let img_dir = pm.cur_group.clone().ok_or("请先选择头像包目录")?;
+    drop(pm); // 与后续 faces_cache 是两把锁，显式提前释放避免嵌套持锁。
+              // 1) 绝对路径 / 相对包根（含补扩展名）。
+    if let Some(p) = xml_parser::resolve_avatar_path(Path::new(&img_dir), avatar) {
+        return Ok(Some(p));
+    }
+    // 2) 裸词干（无分隔符、无扩展名）才允许递归兜底；带路径的输入已在上面按其指定位置探测过。
+    if !xml_parser::is_bare_stem(avatar) {
+        return Ok(None);
+    }
+    let cache = state.faces_cache.lock().unwrap();
+    let Some(idx) = cache.as_ref().filter(|c| c.img_dir == img_dir) else {
+        return Ok(None); // 没有同目录的扫描索引：提示用户可先「扫描头像」，不在悬停时现场扫大包
+    };
+    // 递归兜底的目录选取策略在 PackScan::find_stem_dir（按字典序取最前命中目录）。
+    if let Some(dir) = idx.scan.find_stem_dir(avatar) {
+        if let Some(p) = xml_parser::resolve_image_file(Path::new(&img_dir), dir, avatar) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
+// ---------------- ⑥ 快照与工作区文件 ----------------
+
+/// 「读取快照」返回摘要：快照里的映射总条数。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotInfo {
+    pub total: usize,
+}
+
+// 快照预览的 SnapshotEntry / SnapshotQuery 及筛选分页逻辑已下沉到 xml_parser（config.xml 映射领域）。
 
 /// 「读取快照」：解析存档 XML 快照（config.xml 的存档副本）并缓存有序条目，供「快照预览」分页查询。
 /// xml_path 由前端传当前展示档的快照全路径（浏览态自洽）；每次点击都重读文件，展示最新内容。大快照解析耗时，故 async。
@@ -1371,42 +1428,6 @@ pub fn query_snapshot_images(img_dir: String, rel_paths: Vec<String>) -> Vec<Opt
     rel_paths.iter().map(|p| xml_parser::resolve_avatar_path(root, p)).collect()
 }
 
-// ---------------- 存档浏览预览（下拉选择存档 = 浏览，不切档） ----------------
-
-/// 预览指定存档（仅供前端下拉浏览，不改变后端当前档/激活状态）；currentProfile 返回被浏览的存档名，激活仍需调 switch_profile。
-#[tauri::command]
-pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSnapshot, String> {
-    let pm = state.pm.lock().unwrap();
-    let (prf_cfg, cur_group) = pm.preview_cfg(&name)?;
-    // 浏览档的快照路径与存在性（与激活档口径一致）。
-    let config_xml = cur_group.as_ref().map(|g| {
-        let path = crate::paths::group_xml_path(&pm.user_cfg_path(), &name, g);
-        ConfigXmlInfo {
-            path: path.to_string_lossy().to_string(),
-            exists: path.is_file(),
-        }
-    });
-    Ok(AppSnapshot {
-        profiles: pm.config.profile.keys().cloned().collect(),
-        current_profile: name, // 浏览口径：返回被浏览的存档名
-        groups: prf_cfg
-            .groups
-            .iter()
-            .map(|(dir, g)| GroupInfo {
-                img_dir: dir.clone(),
-                rtf: g.rtf.clone(),
-            })
-            .collect(),
-        current_group: cur_group.clone(),
-        current_rtf: cur_group.as_ref().and_then(|g| prf_cfg.groups.get(g)).map(|g| g.rtf.clone()).unwrap_or_default(),
-        replacing: state.running.load(Ordering::SeqCst),
-        config_xml,
-        log_path: state.logger.path().to_string_lossy().to_string(),
-    })
-}
-
-// ---------------- 目录打开（「当前任务」卡 config.xml 行：读取快照 / 查看位置） ----------------
-
 /// 打开存档 XML 快照所在目录（「查看位置」按钮）；路径由前端传当前展示档的快照全路径（浏览态自洽）。
 #[tauri::command]
 pub fn open_snapshot_dir(path: String) -> Result<(), String> {
@@ -1418,7 +1439,29 @@ pub fn open_snapshot_dir(path: String) -> Result<(), String> {
     explorer_open(dir, "存档快照目录")
 }
 
-// ---------------- 标准规则文件的查看/保存（规则编辑对话框） ----------------
+/// 用Windows资源管理器打开目录。组 key 经 norm_dir 带尾部分隔符，而 explorer 对引号内的尾反斜杠解析脆弱
+/// （含空格的路径会打不开正确位置），故传入前先去掉尾部分隔符。
+fn explorer_open(dir: &Path, what: &str) -> Result<(), String> {
+    let s = dir.to_string_lossy();
+    let trimmed = s.trim_end_matches(['\\', '/']);
+    // 盘根（`C:\`）去尾后是 `C:`（表示「该盘当前目录」而非根），需保留原样；裸分隔符同理。
+    let target = if trimmed.is_empty() || trimmed.ends_with(':') {
+        s.as_ref()
+    } else {
+        trimmed
+    };
+    std::process::Command::new("explorer").arg(target).spawn().map_err(|e| format!("打开{what}失败: {e}"))?;
+    Ok(())
+}
+
+/// 打开标准规则目录（data/rules/）供用户编辑；缺失时先导出内置默认。
+/// 编辑保存后下次替换/检查完整性即生效。
+#[tauri::command]
+pub fn open_rules_dir(state: State<'_, AppState>) -> Result<(), String> {
+    templates::ensure_user_files(&state.data_dir)?;
+    let dir = state.data_dir.join("rules");
+    explorer_open(&dir, "规则目录")
+}
 
 /// 按 name 查规则文件登记表（唯一白名单来源 templates::rule_files()）。
 /// 不在此 match：登记表由各标准模块提供「路径 + 校验 + 写回」，命令层只查表转发，新增标准无需改本文件。
@@ -1449,39 +1492,6 @@ pub fn save_rule_file(state: State<'_, AppState>, name: String, content: String)
     Ok(())
 }
 
-/// 名单预览「头像」列预览：把列原文解析成当前头像包内的实际图片路径（找不到返回 null）。
-/// 先走确定性路径探测（xml_parser::resolve_avatar_path）；裸词干在包根没命中时，
-/// 再借「扫描头像」的递归索引在全部子/孙目录里找同名图（缓存缺失/切组则不做递归，避免现场扫盘卡顿）。
-#[tauri::command]
-pub fn resolve_avatar(state: State<'_, AppState>, avatar: String) -> Result<Option<String>, String> {
-    let avatar = avatar.trim();
-    if avatar.is_empty() {
-        return Ok(None);
-    }
-    let pm = state.pm.lock().unwrap();
-    let img_dir = pm.cur_group.clone().ok_or("请先选择头像包目录")?;
-    drop(pm); // 与后续 faces_cache 是两把锁，显式提前释放避免嵌套持锁。
-              // 1) 绝对路径 / 相对包根（含补扩展名）。
-    if let Some(p) = xml_parser::resolve_avatar_path(Path::new(&img_dir), avatar) {
-        return Ok(Some(p));
-    }
-    // 2) 裸词干（无分隔符、无扩展名）才允许递归兜底；带路径的输入已在上面按其指定位置探测过。
-    if !xml_parser::is_bare_stem(avatar) {
-        return Ok(None);
-    }
-    let cache = state.faces_cache.lock().unwrap();
-    let Some(idx) = cache.as_ref().filter(|c| c.img_dir == img_dir) else {
-        return Ok(None); // 没有同目录的扫描索引：提示用户可先「扫描头像」，不在悬停时现场扫大包
-    };
-    // 递归兜底的目录选取策略在 PackScan::find_stem_dir（按字典序取最前命中目录）。
-    if let Some(dir) = idx.scan.find_stem_dir(avatar) {
-        if let Some(p) = xml_parser::resolve_image_file(Path::new(&img_dir), dir, avatar) {
-            return Ok(Some(p));
-        }
-    }
-    Ok(None)
-}
-
 /// 读取预览图片字节：WebView 无权读本地磁盘，故由 Rust 读出并以二进制响应（ArrayBuffer）返回，前端转 blob URL 显示。
 #[tauri::command]
 pub fn read_image(path: String) -> Result<tauri::ipc::Response, String> {
@@ -1495,221 +1505,7 @@ pub fn query_logs(state: State<'_, AppState>, level: String, only: bool, offset:
     state.logger.query(&level, only, offset, limit)
 }
 
-/// 请求取消正在进行的替换。只把标志置 true，后台线程会在下一次检查时自行停下。
-#[tauri::command]
-pub fn cancel_replace(state: State<'_, AppState>) {
-    state.cancel.store(true, Ordering::SeqCst);
-    state.logger.info("replace", "用户请求取消");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::logger::ChannelLogger;
-
-    #[test]
-    fn scan_rtf_core_parses_summary() {
-        let dir = tempfile::tempdir().unwrap();
-        let rtf = dir.path().join("list.rtf");
-        std::fs::write(
-            &rtf,
-            "| UID       | Nat  | 2nd Nat | Name          |    |    |   |\n\
-             | 2000472008| ESP  | USA     | Pepe Sáenz    | 1  | 12 | 1 |\n\
-             | 2002161479| BRA  |         | José·Milhomem | 1  | 16 | 3 |\n",
-        )
-        .unwrap();
-        let logger = ChannelLogger::channel().0;
-        let (summary, data, _) = scan_rtf_core(rtf.to_str().unwrap(), &logger, &mut |_, _| {}).unwrap();
-        assert_eq!(summary.total, 2);
-        assert_eq!(summary.newgan, 2); // 两条 UID 均带 r- 前缀
-        assert!(!summary.detailed); // 基础名单无拓展信息
-        assert_eq!(summary.format, "基础名单");
-        assert_eq!(summary.language, "English");
-        assert_eq!(data.len(), 2);
-        // 非法 RTF → Err，文案带「RTF 格式不合法」
-        let bad = dir.path().join("bad.rtf");
-        std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
-        let err = scan_rtf_core(bad.to_str().unwrap(), &logger, &mut |_, _| {}).err().unwrap();
-        assert!(err.contains("RTF 格式不合法"), "{err}");
-    }
-
-    #[test]
-    fn progress_dedup_keys_on_status_and_value_only() {
-        // 替换流水线阶段内部逐项上报：计数每项都在变，但同一百分比只该发一条事件。
-        // 这个用例正是为了防住「把 current/total 放进去重键」——那样等于没去重。
-        let mut d = ProgressDedup { last: None };
-        assert!(d.should_emit("映射球员头像…", 51));
-        assert!(!d.should_emit("映射球员头像…", 51)); // 同百分比：计数变了也不重复发
-        assert!(!d.should_emit("映射球员头像…", 51));
-        assert!(d.should_emit("映射球员头像…", 52));
-        assert!(d.should_emit("读取现有映射…", 52)); // 百分比相同但阶段名变了：要发
-    }
-
-    #[test]
-    fn sync_group_snapshot_fills_cache_from_mapping_not_by_reparsing() {
-        // 自动同步：把阶段4写下的 config.xml 备份到该档快照位置，并立即刷新快照缓存。
-        // 缓存内容必须来自**传入的映射**，而不是回读刚写出的文件。
-        // 这里故意让盘上的 config.xml 与传入映射不一致：若实现退回「重解析」，缓存里会是盘上那份。
-        let tmp = tempfile::tempdir().unwrap();
-        let img = tmp.path().join("pack");
-        std::fs::create_dir_all(&img).unwrap();
-        xml_parser::write_xml(
-            &[MappingEntry {
-                uid: "r-9999".into(),
-                ethnicity: "Asian".into(),
-                image: "stale".into(),
-            }],
-            &img,
-            false,
-        )
-        .unwrap();
-        let mapping = vec![MappingEntry {
-            uid: "r-1001".into(),
-            ethnicity: "SpanMed".into(),
-            image: "img1".into(),
-        }];
-        let snap_path = tmp.path().join("档1").join("snap.xml");
-        let cache = Mutex::new(None);
-        let (logger, _rx) = ChannelLogger::channel();
-        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &mapping, &cache, &logger);
-
-        let got = cache.lock().unwrap();
-        let c = got.as_ref().expect("快照缓存应被填充");
-        assert_eq!(c.entries, mapping, "缓存必须直填传入映射，而不是回读文件");
-        assert_eq!(c.xml_path, snap_path.to_str().unwrap(), "缓存路径即快照预览查询的比对键");
-        // 快照文件本身仍是「盘上 config.xml 的副本」（拷贝语义不变，与缓存内容无关），
-        // 且写入会自动补建缺失的父目录。
-        assert!(snap_path.is_file(), "快照文件应已生成（父目录一并补建）");
-        let copied = xml_parser::parse_xml_entries(&snap_path).unwrap();
-        assert_eq!(copied[0].uid, "r-9999", "快照文件是 config.xml 的拷贝");
-    }
-
-    #[test]
-    fn sync_group_snapshot_without_config_xml_keeps_cache_untouched() {
-        // 包内没有 config.xml（替换成功时不会发生）：不生成快照、也不动缓存里已有的数据。
-        let tmp = tempfile::tempdir().unwrap();
-        let img = tmp.path().join("pack");
-        std::fs::create_dir_all(&img).unwrap();
-        let snap_path = tmp.path().join("档1").join("graphics_pack_snapshot.xml");
-        let cache = Mutex::new(Some(SnapshotCache {
-            xml_path: "old_snapshot.xml".into(),
-            entries: Vec::new(),
-        }));
-        let (logger, _rx) = ChannelLogger::channel();
-        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &[], &cache, &logger);
-
-        assert!(!snap_path.is_file());
-        let got = cache.lock().unwrap();
-        assert_eq!(got.as_ref().unwrap().xml_path, "old_snapshot.xml");
-    }
-
-    #[test]
-    fn running_guard_resets_when_the_thread_panics() {
-        // start_replace 的线程体 panic 时，running 也必须复位：否则界面全局禁用，
-        // 也无法再发起新的替换。
-        let flag = Arc::new(AtomicBool::new(true));
-        let guard = RunningGuard(Arc::clone(&flag));
-        let joined = std::thread::spawn(move || {
-            let _guard = guard; // 与生产线程同形：守卫只挂在栈上
-            panic!("模拟流水线 panic");
-        })
-        .join();
-        assert!(joined.is_err());
-        assert!(!flag.load(Ordering::SeqCst), "panic 后 running 未复位");
-    }
-
-    #[test]
-    fn wipe_if_poisoned_keeps_healthy_cache_and_unpoisons_the_broken_one() {
-        // 未中毒的缓存原样保留：panic 若发生在不持锁的流水线里，「扫描RTF」的成果不该跟着一起丢。
-        let healthy = Mutex::new(vec![1, 2, 3]);
-        assert!(!wipe_if_poisoned(&healthy));
-        assert_eq!(*healthy.lock().unwrap(), vec![1, 2, 3]);
-
-        // 中毒的缓存作废，并且必须 clear_poison：中毒会永久粘在 Mutex 上，
-        // 不作废的话之后每条命令的 lock().unwrap() 都会 panic（界面解禁了但一调就炸）。
-        let broken = Arc::new(Mutex::new(vec![1]));
-        let holder = Arc::clone(&broken);
-        let _ = std::thread::spawn(move || {
-            let _g = holder.lock().unwrap();
-            panic!("中毒现场");
-        })
-        .join();
-        assert!(broken.is_poisoned());
-        assert!(wipe_if_poisoned(&broken));
-        assert!(broken.lock().unwrap().is_empty(), "中毒的缓存应被清空");
-        assert!(!broken.is_poisoned(), "清空后应解除中毒");
-    }
-
-    // ---------------- save_and_replace（P3-2）的可纯测部分 ----------------
-    // 命令本体依赖 State（Tauri 托管，单测不可构造），故把查找/命名/避让做成近纯函数覆盖。
-
-    #[test]
-    fn expand_naming_supports_uid_and_index_placeholders() {
-        // 默认模板
-        assert_eq!(expand_naming("{uid}_{index}", "p123", 1), "p123_1");
-        // 字面量与占位符混排
-        assert_eq!(expand_naming("gen-{uid}__{index}.v2", "p1", 12), "gen-p1__12.v2");
-        // 未知占位符按字面量保留（不猜、不报错）
-        assert_eq!(expand_naming("{uid}-{seq}-{index}", "p1", 2), "p1-{seq}-2");
-        // 没有配对右括号：剩余内容原样
-        assert_eq!(expand_naming("{uid}x{", "p1", 3), "p1x{");
-        // 无占位符：纯字面量
-        assert_eq!(expand_naming("static", "p1", 5), "static");
-    }
-
-    #[test]
-    fn count_existing_only_counts_uid_prefixed_files() {
-        let tmp = tempfile::tempdir().unwrap(); // TempDir 必须先绑定变量
-        let dir = tmp.path().join("_generated");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("p123_1.png"), b"x").unwrap();
-        std::fs::write(dir.join("p123_2.png"), b"x").unwrap();
-        std::fs::write(dir.join("p123.png"), b"x").unwrap(); // 无 `_` 前缀：不算
-        std::fs::write(dir.join("p12_3.png"), b"x").unwrap(); // 其他 uid 的前缀：不算
-        std::fs::create_dir_all(dir.join("p123_9")).unwrap(); // 同名目录：不算
-        assert_eq!(count_existing(&dir, "p123"), 2);
-        assert_eq!(count_existing(&dir, "nobody"), 0);
-    }
-
-    #[test]
-    fn next_free_target_counts_then_skips_collisions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("_generated");
-        std::fs::create_dir_all(&dir).unwrap();
-        // 空目录：从 1 起
-        assert_eq!(next_free_target(&dir, "{uid}_{index}", "p1").unwrap(), dir.join("p1_1.png"));
-        // 已有 p1_1 与 p1_3（计数=2 → index=3 撞上 p1_3）：递增避让到 p1_4，
-        // 计数与避让两道保障在同一条路径上都生效。
-        std::fs::write(dir.join("p1_1.png"), b"x").unwrap();
-        std::fs::write(dir.join("p1_3.png"), b"x").unwrap();
-        assert_eq!(next_free_target(&dir, "{uid}_{index}", "p1").unwrap(), dir.join("p1_4.png"));
-        // 模板不含 {index}：目标名恒定，已存在时递增也腾不出新名字 → 显式报错，绝不静默覆盖旧图
-        std::fs::write(dir.join("fixed.png"), b"x").unwrap();
-        let err = next_free_target(&dir, "fixed", "p1").unwrap_err();
-        assert!(err.contains("命名模板"), "报错应指引补 {{index}}：{err}");
-    }
-
-    #[test]
-    fn find_tmp_image_matches_by_stem_regardless_of_extension() {
-        let tmp = tempfile::tempdir().unwrap(); // TempDir 必须先绑定变量
-        let imgtmp = tmp.path().join(".imgtmp");
-        std::fs::create_dir_all(&imgtmp).unwrap();
-        // 扩展名不写死：按 file_stem 匹配（服务商响应决定扩展名）
-        std::fs::write(imgtmp.join("abc.webp"), b"x").unwrap();
-        std::fs::write(imgtmp.join("other.png"), b"x").unwrap();
-        assert_eq!(find_tmp_image(&imgtmp, "abc").unwrap(), imgtmp.join("abc.webp"));
-        // 不存在的 id：报错含「生成图中不存在」
-        let err = find_tmp_image(&imgtmp, "missing").unwrap_err();
-        assert!(err.contains("生成图中不存在"), "实际报错：{err}");
-        // 临时目录整个不存在：读目录失败也给出可懂的中文报错
-        let gone = tempfile::tempdir().unwrap();
-        let empty = gone.path().join(".imgtmp");
-        let err2 = find_tmp_image(&empty, "abc").unwrap_err();
-        assert!(err2.contains("临时目录"), "实际报错：{err2}");
-    }
-}
-
-// ===================== AI 文生图命令（实现统一在 image_ai；与既有命令同居本文件）=====================
+// ---------------- ⑦ AI 文生图 ----------------
 
 #[tauri::command]
 pub fn get_image_ai_state(state: State<'_, AppState>) -> Result<Config, String> {
@@ -1871,8 +1667,18 @@ pub async fn generate_image(
         None => format!("{provider}/{model}"),
     };
     let started = Instant::now();
+    // 提交前留痕：谁 + 这条要发的参数。队列那条链路在 gen_queue::run_entry 里同样打一行，
+    // 两处格式一致，排查时按「提交生图 / 队列任务开始」直接筛。
+    log::info!(
+        target: "image_ai",
+        "提交生图：{} | {}",
+        image_ai::person_summary(&req),
+        image_ai::request_summary(&req)
+    );
     // 单张直发不展示阶段：空回调（阶段进度只有队列批处理会呈现在界面上）。
-    match image_ai::generate(&state.data_dir, &cfg, &key, req, &|_| {}).await {
+    // 单张没有取消入口，给一个永不复位的令牌即可（generate 只读它）。
+    let no_cancel = image_ai::CancelToken::new();
+    match image_ai::generate(&state.data_dir, &cfg, &key, req, &|_| {}, &no_cancel).await {
         Ok(result) => {
             state.logger.info(
                 "image_ai",
@@ -2053,16 +1859,16 @@ pub fn save_and_replace(
     })
 }
 
-// ---------------- 批量生成队列（image_ai_queue::run_queue 承担实际调度） ----------------
+// 批量生成队列（gen_queue::run_queue 承担实际调度）
 
 /// add_to_queue 的纯主体：先整批校验（不合规则原样返回 Err、队列不变），通过后才并入队列。
 /// 抽成 pub(crate) 是为了让「整批拒绝时队列不变」这条契约可被单测直接钉住（命令层的 State 无法构造）。
 pub(crate) fn add_to_queue_inner(
     cfg: &image_ai::Config,
-    queue: &Mutex<image_ai_queue::QueueState>,
-    entries: Vec<image_ai_queue::QueueEntry>,
-) -> Result<Vec<image_ai_queue::QueueEntry>, image_ai::ImageGenError> {
-    image_ai_queue::validate_entries(cfg, &entries)?;
+    queue: &Mutex<gen_queue::QueueState>,
+    entries: Vec<gen_queue::QueueEntry>,
+) -> Result<Vec<gen_queue::QueueEntry>, image_ai::ImageGenError> {
+    gen_queue::validate_entries(cfg, &entries)?;
     let mut q = queue.lock().unwrap();
     q.add(entries);
     Ok(q.snapshot())
@@ -2073,8 +1879,8 @@ pub(crate) fn add_to_queue_inner(
 #[tauri::command]
 pub fn add_to_queue(
     state: State<'_, AppState>,
-    entries: Vec<image_ai_queue::QueueEntry>,
-) -> Result<Vec<image_ai_queue::QueueEntry>, image_ai::ImageGenError> {
+    entries: Vec<gen_queue::QueueEntry>,
+) -> Result<Vec<gen_queue::QueueEntry>, image_ai::ImageGenError> {
     // 先 clone 出 cfg（语句末即释放）再锁 queue，保持全仓单一锁序 image → queue，避免反序加锁。
     let cfg = state.image.lock().unwrap().clone();
     add_to_queue_inner(&cfg, &state.queue, entries)
@@ -2085,7 +1891,7 @@ pub fn add_to_queue(
 pub fn remove_from_queue(
     state: State<'_, AppState>,
     ids: Vec<String>,
-) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+) -> Result<Vec<gen_queue::QueueEntry>, String> {
     let mut q = state.queue.lock().unwrap();
     q.remove(&ids);
     Ok(q.snapshot())
@@ -2093,32 +1899,47 @@ pub fn remove_from_queue(
 
 /// 清空队列，返回空快照。
 #[tauri::command]
-pub fn clear_queue(state: State<'_, AppState>) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+pub fn clear_queue(state: State<'_, AppState>) -> Result<Vec<gen_queue::QueueEntry>, String> {
     let mut q = state.queue.lock().unwrap();
     q.clear();
     Ok(q.snapshot())
 }
 
+/// 队列串行提交：一条跑完再发下一条。提交即计费，多线并行会在用户没点确认时翻倍账单；
+/// settings.concurrency 无 UI 入口、也未经产品确认，故不参与实际调度。
+const QUEUE_CONCURRENCY: u32 = 1;
+
 /// 启动批量生成：校验通过后把队列交给后台异步任务，命令本身立即返回。
 /// 进度经事件推送（gen:queue:progress / gen:queue:finished），前端另行 query_queue 拉快照。
 #[tauri::command]
-pub async fn start_queue(app: AppHandle, state: State<'_, AppState>) -> Result<(), image_ai::ImageGenError> {
+pub async fn start_queue(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Option<Vec<String>>,
+) -> Result<(), image_ai::ImageGenError> {
     // 出锁前把后台任务需要的全部数据 clone 下来：std Mutex 绝不跨 await 持有。
     // 锁序固定为 image → image_keys → queue（与 generate_image 的 image → image_keys 同序）；
     // 每把锁都在各自语句末尾即释放，不与下一把嵌套持有——全仓单序可排除交叉加锁的死锁面。
     let cfg = state.image.lock().unwrap().clone();
-    let concurrency = cfg.settings.concurrency;
     let keys = state.image_keys.lock().unwrap().clone();
     // queue 最后锁：重入检查与逐条 Key 校验都在这一层内完成（与在跑状态同源）。
     {
         let q = state.queue.lock().unwrap();
         // 已有任务在跑（存在 Running 条目）：拒绝重入。
-        if q.entries.iter().any(|e| e.status == image_ai_queue::QueueStatus::Running) {
+        if q.entries.iter().any(|e| e.status == gen_queue::QueueStatus::Running) {
             return Err(image_ai::ImageGenError::internal("队列正在执行中"));
         }
-        // 逐条校验 Queued 条目的 Key，任一缺失就整批不启动（跑一半才失败会白白烧掉前几条配额）；
+        // 逐条校验**本次要跑**的条目 Key，任一缺失就整批不启动（跑一半才失败会白白烧掉前几条配额）；
         // 免 Key 协议（本地 ComfyUI）直接放行，口径与 generate_image 一致。
-        for e in q.entries.iter().filter(|e| e.status == image_ai_queue::QueueStatus::Queued) {
+        // 只校验选中项：未选中的条目这次不提交，它们的 Key 缺不缺与本次无关。
+        let allow: Option<std::collections::HashSet<&str>> =
+            ids.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        for e in q
+            .entries
+            .iter()
+            .filter(|e| e.status == gen_queue::QueueStatus::Queued)
+            .filter(|e| allow.as_ref().is_none_or(|a| a.contains(e.id.as_str())))
+        {
             let needs_key = cfg.provider(&e.req.provider_id).map(|p| p.kind.needs_key()).unwrap_or(true);
             if !needs_key {
                 continue;
@@ -2129,15 +1950,26 @@ pub async fn start_queue(app: AppHandle, state: State<'_, AppState>) -> Result<(
             }
         }
     }
-    let sink: Arc<dyn image_ai_queue::EventSink> = Arc::new(image_ai_queue::AppEventSink(app));
+    let sink: Arc<dyn gen_queue::EventSink> = Arc::new(gen_queue::AppEventSink(app));
     let queue = Arc::clone(&state.queue);
     let data_dir = state.data_dir.clone();
-    let executor: Arc<dyn image_ai_queue::GenExecutor> = Arc::new(image_ai_queue::RealExecutor);
+    let executor: Arc<dyn gen_queue::GenExecutor> = Arc::new(gen_queue::RealExecutor);
     // 真实睡眠：重试退避经 spawn_blocking 睡（不阻塞异步运行时）。
-    let sleeper: Arc<dyn image_ai_queue::Sleeper> = Arc::new(image_ai_queue::RealSleeper);
+    let sleeper: Arc<dyn gen_queue::Sleeper> = Arc::new(gen_queue::RealSleeper);
     tauri::async_runtime::spawn(async move {
         let (finished, failed, total) =
-            image_ai_queue::run_queue(queue, data_dir, cfg, keys, concurrency, executor, sleeper, sink).await;
+            gen_queue::run_queue(
+                queue,
+                data_dir,
+                cfg,
+                keys,
+                QUEUE_CONCURRENCY,
+                ids,
+                executor,
+                sleeper,
+                sink,
+            )
+            .await;
         log::info!(
             target: "image_ai",
             "批量生成队列结束：成功 {finished}，失败 {failed}，共 {total}"
@@ -2146,16 +1978,307 @@ pub async fn start_queue(app: AppHandle, state: State<'_, AppState>) -> Result<(
     Ok(())
 }
 
-/// 请求取消：尚未启动的条目将被判「已取消」，在跑的等它自然收尾（见 run_queue）。
+/// 请求取消：只对「尚未提交」的请求生效——未派发的条目直接判「已取消」，在跑的那次请求
+/// 已提交即已计费，等它返回并把结果落盘、记画廊。见 gen_queue::run_queue 的取消口径。
+///
+/// 【只落本批次的条目】`cancel_pending` 只碰 `active`（本批实际派发的 id）里的排队条目：
+/// 用户没勾选、没参与本批的排队条目要原样留在队列里，不能被一起标成「已取消」。
+///
+/// 【为什么把未派发条目在这里就落终态】串行下调度循环要等手里的任务收尾才轮到下一条（可能
+/// 数分钟），若由它来标，用户点了取消却一直看到「排队中」。此处标完直接把快照回传，前端
+/// 立刻刷新；调度循环随后仍会按 id 走一遍取消分支，重复标注是幂等的。
 #[tauri::command]
-pub fn cancel_queue(state: State<'_, AppState>) -> Result<(), String> {
-    state.queue.lock().unwrap().cancel = true;
-    state.logger.info("image_ai", "用户请求取消批量生成");
-    Ok(())
+pub fn cancel_queue(state: State<'_, AppState>) -> Result<Vec<gen_queue::QueueEntry>, String> {
+    let (snap, marked) = {
+        let mut q = state.queue.lock().unwrap();
+        q.cancel.cancel();
+        let marked = q.cancel_pending();
+        (q.snapshot(), marked)
+    };
+    state.logger.info(
+        "image_ai",
+        format!("用户请求取消批量生成（本批次未派发 {marked} 条）"),
+    );
+    Ok(snap)
+}
+
+/// 写回队列条目的生成参数（手动确认用）：只改 Queued 条目，状态/uid/name 不动。
+/// 参数合法性不在这里判：启动前 `validate_entries` 会整批拦下不合规条目。
+#[tauri::command]
+pub fn update_queue_entries(
+    state: State<'_, AppState>,
+    entries: Vec<gen_queue::QueueEditArg>,
+) -> Result<Vec<gen_queue::QueueEntry>, String> {
+    let mut q = state.queue.lock().unwrap();
+    // 整批在一次持锁内写完：别的 IPC 读不到「改了一半」的中间态。
+    let applied = gen_queue::apply_queue_edits(&mut q.entries, &entries);
+    log::info!(target: "image_ai", "手动确认写回队列参数：{applied} 条");
+    Ok(q.snapshot())
 }
 
 /// 查询队列全量快照（条目状态/图片/错误都从这里拉）。
 #[tauri::command]
-pub fn query_queue(state: State<'_, AppState>) -> Result<Vec<image_ai_queue::QueueEntry>, String> {
+pub fn query_queue(state: State<'_, AppState>) -> Result<Vec<gen_queue::QueueEntry>, String> {
     Ok(state.queue.lock().unwrap().snapshot())
+}
+
+// ---------------- ⑧ 单元测试 ----------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image_ai::gen_queue::{QueueEntry, QueueState, QueueStatus};
+    use crate::logger::ChannelLogger;
+
+    #[test]
+    fn scan_rtf_core_parses_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let rtf = dir.path().join("list.rtf");
+        std::fs::write(
+            &rtf,
+            "| UID       | Nat  | 2nd Nat | Name          |    |    |   |\n\
+             | 2000472008| ESP  | USA     | Pepe Sáenz    | 1  | 12 | 1 |\n\
+             | 2002161479| BRA  |         | José·Milhomem | 1  | 16 | 3 |\n",
+        )
+        .unwrap();
+        let logger = ChannelLogger::channel().0;
+        let (summary, data, _) = scan_rtf_core(rtf.to_str().unwrap(), &logger, &mut |_, _| {}).unwrap();
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.newgan, 2); // 两条 UID 均带 r- 前缀
+        assert!(!summary.detailed); // 基础名单无拓展信息
+        assert_eq!(summary.format, "基础名单");
+        assert_eq!(summary.language, "English");
+        assert_eq!(data.len(), 2);
+        // 非法 RTF → Err，文案带「RTF 格式不合法」
+        let bad = dir.path().join("bad.rtf");
+        std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
+        let err = scan_rtf_core(bad.to_str().unwrap(), &logger, &mut |_, _| {}).err().unwrap();
+        assert!(err.contains("RTF 格式不合法"), "{err}");
+    }
+
+    #[test]
+    fn progress_dedup_keys_on_status_and_value_only() {
+        // 替换流水线阶段内部逐项上报：计数每项都在变，但同一百分比只该发一条事件。
+        // 这个用例正是为了防住「把 current/total 放进去重键」——那样等于没去重。
+        let mut d = ProgressDedup { last: None };
+        assert!(d.should_emit("映射球员头像…", 51));
+        assert!(!d.should_emit("映射球员头像…", 51)); // 同百分比：计数变了也不重复发
+        assert!(!d.should_emit("映射球员头像…", 51));
+        assert!(d.should_emit("映射球员头像…", 52));
+        assert!(d.should_emit("读取现有映射…", 52)); // 百分比相同但阶段名变了：要发
+    }
+
+    #[test]
+    fn running_guard_resets_when_the_thread_panics() {
+        // start_replace 的线程体 panic 时，running 也必须复位：否则界面全局禁用，
+        // 也无法再发起新的替换。
+        let flag = Arc::new(AtomicBool::new(true));
+        let guard = RunningGuard(Arc::clone(&flag));
+        let joined = std::thread::spawn(move || {
+            let _guard = guard; // 与生产线程同形：守卫只挂在栈上
+            panic!("模拟流水线 panic");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(!flag.load(Ordering::SeqCst), "panic 后 running 未复位");
+    }
+
+    #[test]
+    fn wipe_if_poisoned_keeps_healthy_cache_and_unpoisons_the_broken_one() {
+        // 未中毒的缓存原样保留：panic 若发生在不持锁的流水线里，「扫描RTF」的成果不该跟着一起丢。
+        let healthy = Mutex::new(vec![1, 2, 3]);
+        assert!(!wipe_if_poisoned(&healthy));
+        assert_eq!(*healthy.lock().unwrap(), vec![1, 2, 3]);
+
+        // 中毒的缓存作废，并且必须 clear_poison：中毒会永久粘在 Mutex 上，
+        // 不作废的话之后每条命令的 lock().unwrap() 都会 panic（界面解禁了但一调就炸）。
+        let broken = Arc::new(Mutex::new(vec![1]));
+        let holder = Arc::clone(&broken);
+        let _ = std::thread::spawn(move || {
+            let _g = holder.lock().unwrap();
+            panic!("中毒现场");
+        })
+        .join();
+        assert!(broken.is_poisoned());
+        assert!(wipe_if_poisoned(&broken));
+        assert!(broken.lock().unwrap().is_empty(), "中毒的缓存应被清空");
+        assert!(!broken.is_poisoned(), "清空后应解除中毒");
+    }
+
+    #[test]
+    fn sync_group_snapshot_fills_cache_from_mapping_not_by_reparsing() {
+        // 自动同步：把阶段4写下的 config.xml 备份到该档快照位置，并立即刷新快照缓存。
+        // 缓存内容必须来自**传入的映射**，而不是回读刚写出的文件。
+        // 这里故意让盘上的 config.xml 与传入映射不一致：若实现退回「重解析」，缓存里会是盘上那份。
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("pack");
+        std::fs::create_dir_all(&img).unwrap();
+        xml_parser::write_xml(
+            &[MappingEntry {
+                uid: "r-9999".into(),
+                ethnicity: "Asian".into(),
+                image: "stale".into(),
+            }],
+            &img,
+            false,
+        )
+        .unwrap();
+        let mapping = vec![MappingEntry {
+            uid: "r-1001".into(),
+            ethnicity: "SpanMed".into(),
+            image: "img1".into(),
+        }];
+        let snap_path = tmp.path().join("档1").join("snap.xml");
+        let cache = Mutex::new(None);
+        let (logger, _rx) = ChannelLogger::channel();
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &mapping, &cache, &logger);
+
+        let got = cache.lock().unwrap();
+        let c = got.as_ref().expect("快照缓存应被填充");
+        assert_eq!(c.entries, mapping, "缓存必须直填传入映射，而不是回读文件");
+        assert_eq!(c.xml_path, snap_path.to_str().unwrap(), "缓存路径即快照预览查询的比对键");
+        // 快照文件本身仍是「盘上 config.xml 的副本」（拷贝语义不变，与缓存内容无关），
+        // 且写入会自动补建缺失的父目录。
+        assert!(snap_path.is_file(), "快照文件应已生成（父目录一并补建）");
+        let copied = xml_parser::parse_xml_entries(&snap_path).unwrap();
+        assert_eq!(copied[0].uid, "r-9999", "快照文件是 config.xml 的拷贝");
+    }
+
+    #[test]
+    fn sync_group_snapshot_without_config_xml_keeps_cache_untouched() {
+        // 包内没有 config.xml（替换成功时不会发生）：不生成快照、也不动缓存里已有的数据。
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("pack");
+        std::fs::create_dir_all(&img).unwrap();
+        let snap_path = tmp.path().join("档1").join("graphics_pack_snapshot.xml");
+        let cache = Mutex::new(Some(SnapshotCache {
+            xml_path: "old_snapshot.xml".into(),
+            entries: Vec::new(),
+        }));
+        let (logger, _rx) = ChannelLogger::channel();
+        sync_group_snapshot(&snap_path, img.to_str().unwrap(), &[], &cache, &logger);
+
+        assert!(!snap_path.is_file());
+        let got = cache.lock().unwrap();
+        assert_eq!(got.as_ref().unwrap().xml_path, "old_snapshot.xml");
+    }
+
+    // save_and_replace 的可纯测部分：命令本体依赖 State（单测不可构造），故把查找/命名/避让做成近纯函数覆盖。
+
+    #[test]
+    fn expand_naming_supports_uid_and_index_placeholders() {
+        // 默认模板
+        assert_eq!(expand_naming("{uid}_{index}", "p123", 1), "p123_1");
+        // 字面量与占位符混排
+        assert_eq!(expand_naming("gen-{uid}__{index}.v2", "p1", 12), "gen-p1__12.v2");
+        // 未知占位符按字面量保留（不猜、不报错）
+        assert_eq!(expand_naming("{uid}-{seq}-{index}", "p1", 2), "p1-{seq}-2");
+        // 没有配对右括号：剩余内容原样
+        assert_eq!(expand_naming("{uid}x{", "p1", 3), "p1x{");
+        // 无占位符：纯字面量
+        assert_eq!(expand_naming("static", "p1", 5), "static");
+    }
+
+    #[test]
+    fn count_existing_only_counts_uid_prefixed_files() {
+        let tmp = tempfile::tempdir().unwrap(); // TempDir 必须先绑定变量
+        let dir = tmp.path().join("_generated");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("p123_1.png"), b"x").unwrap();
+        std::fs::write(dir.join("p123_2.png"), b"x").unwrap();
+        std::fs::write(dir.join("p123.png"), b"x").unwrap(); // 无 `_` 前缀：不算
+        std::fs::write(dir.join("p12_3.png"), b"x").unwrap(); // 其他 uid 的前缀：不算
+        std::fs::create_dir_all(dir.join("p123_9")).unwrap(); // 同名目录：不算
+        assert_eq!(count_existing(&dir, "p123"), 2);
+        assert_eq!(count_existing(&dir, "nobody"), 0);
+    }
+
+    #[test]
+    fn next_free_target_counts_then_skips_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("_generated");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 空目录：从 1 起
+        assert_eq!(next_free_target(&dir, "{uid}_{index}", "p1").unwrap(), dir.join("p1_1.png"));
+        // 已有 p1_1 与 p1_3（计数=2 → index=3 撞上 p1_3）：递增避让到 p1_4，
+        // 计数与避让两道保障在同一条路径上都生效。
+        std::fs::write(dir.join("p1_1.png"), b"x").unwrap();
+        std::fs::write(dir.join("p1_3.png"), b"x").unwrap();
+        assert_eq!(next_free_target(&dir, "{uid}_{index}", "p1").unwrap(), dir.join("p1_4.png"));
+        // 模板不含 {index}：目标名恒定，已存在时递增也腾不出新名字 → 显式报错，绝不静默覆盖旧图
+        std::fs::write(dir.join("fixed.png"), b"x").unwrap();
+        let err = next_free_target(&dir, "fixed", "p1").unwrap_err();
+        assert!(err.contains("命名模板"), "报错应指引补 {{index}}：{err}");
+    }
+
+    #[test]
+    fn find_tmp_image_matches_by_stem_regardless_of_extension() {
+        let tmp = tempfile::tempdir().unwrap(); // TempDir 必须先绑定变量
+        let imgtmp = tmp.path().join(".imgtmp");
+        std::fs::create_dir_all(&imgtmp).unwrap();
+        // 扩展名不写死：按 file_stem 匹配（服务商响应决定扩展名）
+        std::fs::write(imgtmp.join("abc.webp"), b"x").unwrap();
+        std::fs::write(imgtmp.join("other.png"), b"x").unwrap();
+        assert_eq!(find_tmp_image(&imgtmp, "abc").unwrap(), imgtmp.join("abc.webp"));
+        // 不存在的 id：报错含「生成图中不存在」
+        let err = find_tmp_image(&imgtmp, "missing").unwrap_err();
+        assert!(err.contains("生成图中不存在"), "实际报错：{err}");
+        // 临时目录整个不存在：读目录失败也给出可懂的中文报错
+        let gone = tempfile::tempdir().unwrap();
+        let empty = gone.path().join(".imgtmp");
+        let err2 = find_tmp_image(&empty, "abc").unwrap_err();
+        assert!(err2.contains("临时目录"), "实际报错：{err2}");
+    }
+
+    // ---------------- 批量队列的命令层契约 ----------------
+
+    /// 造一条干净的排队条目（id 留空：由 QueueState::add 统一补发）。
+    /// 本助手随用例从队列单测迁到此处——「整批拒绝时队列不变」是命令层的契约，
+    /// 队列模块只负责 `validate_entries` 本身。
+    fn queue_entry(uid: &str, name: &str) -> QueueEntry {
+        QueueEntry {
+            id: String::new(),
+            uid: uid.into(),
+            name: name.into(),
+            req: image_ai::GenRequest {
+                provider_id: "openai".into(),
+                model: "gpt-image-1".into(),
+                prompt: "一张脸".into(),
+                size: "1024x1024".into(),
+                uid: Some(uid.into()),
+                name: Some(name.into()),
+                // 前端提交的请求不带能力快照（由 validate_entries / generate 用服务商配置回填）。
+                ..image_ai::test_req_base()
+            },
+            status: QueueStatus::Queued,
+            images: vec![],
+            error: String::new(),
+            error_kind: None,
+            attempts: 0,
+        }
+    }
+
+    #[test]
+    fn add_to_queue_inner_rejects_whole_batch_and_leaves_queue_unchanged() {
+        // 命令层契约（add_to_queue_inner）：整批校验失败时队列必须原样不动——合法条目也不得并入。
+        let cfg = image_ai::Config::builtin();
+        let queue = Mutex::new(QueueState::default());
+        // 预置一条既有条目，证明失败不会动到既有内容。
+        queue.lock().unwrap().add(vec![queue_entry("u0", "已有")]);
+        let before = queue.lock().unwrap().snapshot();
+
+        let mut bad = queue_entry("u2", "乙");
+        bad.req.n = 99;
+        let batch = vec![queue_entry("u1", "甲"), bad];
+        let err = add_to_queue_inner(&cfg, &queue, batch).unwrap_err();
+        assert_eq!(err.kind, image_ai::GenErrorKind::InvalidParam);
+
+        let after = queue.lock().unwrap().snapshot();
+        assert_eq!(after.len(), before.len(), "整批拒绝时队列条目数不变");
+        assert_eq!(after[0].uid, "u0", "既有条目原样保留");
+        assert!(
+            after.iter().all(|e| e.uid != "u1"),
+            "坏条目之外的合法条目也不得被并入队列"
+        );
+    }
 }

@@ -6,7 +6,7 @@
 //!
 //! Endpoint：`POST https://api.siliconflow.cn/v1/images/generations`（Bearer 鉴权）。
 //! 请求体（官方「创建图片生成请求」逐字）：
-//! - 恒发：`model` / `prompt` / `image_size`（`宽x高`，小写 `x`，原样透传不转换）；
+//! - 恒发：`model` / `prompt` / `image_size`（小写 `x` 分隔，原样透传不转换）；
 //! - `negative_prompt`；`seed`(0–9999999999)；`num_inference_steps`(1–100，默认 20)；
 //! - `batch_size`(1–4，**仅 Kwai-Kolors/Kolors 适用**)；`guidance_scale`(0–20，**仅 Kolors 适用**)；
 //! - `output_format`(png/jpeg，值随用户选择，未选默认 png)。
@@ -19,7 +19,7 @@
 //! （见 [`crate::image_ai::reconcile_builtin_providers`]）。
 
 use super::{validate_model_caps, GenStage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{
+use crate::image_ai::types::{
     from_http_status, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig, ProviderKind,
 };
 use std::future::Future;
@@ -243,7 +243,7 @@ mod tests {
             prompt: "一张东亚球员的脸".into(),
             size: m.capabilities.sizes[0].clone(),
             caps: Some(m.capabilities.clone()),
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 
@@ -357,7 +357,7 @@ mod tests {
             serde_json::from_str(r#"{"code":20012,"message":"invalid token","data":""}"#).unwrap();
         let err = parse_images(&v).unwrap_err();
         assert_eq!(err.message, "服务商返回错误：invalid token");
-        assert_eq!(err.kind, crate::image_ai::GenErrorKind::Provider);
+        assert_eq!(err.kind, crate::image_ai::types::GenErrorKind::Provider);
 
         let v: serde_json::Value = serde_json::from_str(r#"{"images":[]}"#).unwrap();
         assert_eq!(parse_images(&v).unwrap_err().message, "images 数组为空");

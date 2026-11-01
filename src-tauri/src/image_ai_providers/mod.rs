@@ -22,7 +22,9 @@ pub(crate) mod openai;
 pub(crate) mod siliconflow;
 pub(crate) mod volcano;
 
-use crate::image_ai::{Capabilities, GenRequest, ImageGenError, ProviderKind, SizeRules};
+use crate::image_ai::types::{
+    Capabilities, GenRequest, GenStage, ImageGenError, ProviderKind, SizeRules,
+};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -50,7 +52,7 @@ pub struct ProviderOutcome {
 // 为什么放在族目录：张数/提示词/尺寸的解释口径由协议族共同拥有，留在应用层会让每个调用点
 // 各自复刻一份；收口到 Provider 后，generate 与入队校验都只经 for_kind(...).validate。
 
-/// 解析 `宽*高`/`宽x高` 尺寸并按模型自由尺寸规则校验；0 值字段表示该约束不检查。
+/// 解析 宽×高（小写 `x`）/「宽*高」两种写法并按模型自由尺寸规则校验；0 值字段表示该约束不检查。
 pub(crate) fn validate_size(size: &str, rules: &SizeRules) -> Result<(), ImageGenError> {
     let caps: Vec<u32> = size
         .split(['*', 'x'])
@@ -60,7 +62,7 @@ pub(crate) fn validate_size(size: &str, rules: &SizeRules) -> Result<(), ImageGe
         [w, h] if *w > 0 && *h > 0 => (*w, *h),
         _ => {
             return Err(ImageGenError::invalid_param(format!(
-                "尺寸「{size}」格式不正确，应为 宽*高（如 1280*1280）"
+                "尺寸「{size}」格式不正确，应为 宽×高 或 宽*高（如 1280*1280）"
             )))
         }
     };
@@ -238,31 +240,12 @@ pub(crate) fn output_format(req: &GenRequest) -> &'static str {
     }
 }
 
-/// 生成阶段：适配器在执行链上按序上报（同步两段 Submitting→Downloading；异步三段
-/// Submitting→Polling→Downloading），供队列把「当前项正在做什么」推给前端。
-/// 【为什么由适配器上报】阶段是协议内部时序，应用层无从推断（同步/异步分支只在适配器内）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum GenStage {
-    Submitting,
-    Polling,
-    Downloading,
-}
-
-impl GenStage {
-    /// 前端契约字面量（对应 `QueueProgress.stage`）。
-    pub fn as_str(self) -> &'static str {
-        match self {
-            GenStage::Submitting => "submitting",
-            GenStage::Polling => "polling",
-            GenStage::Downloading => "downloading",
-        }
-    }
-}
-
 /// 统一适配器：一次 async 调用内含 POST → 解析 →（b64 解码 / URL 立即下载）；
 /// 异步厂商在此调用内含 submit → poll → fetch 全流程。
 /// `progress` 为阶段回调：适配器只上报、不感知去重（去重由队列调用方按「阶段」完成）。
+/// 【不接收取消令牌】适配器只在请求发出前受取消约束（那一次检查在
+/// [`crate::image_ai::generate`] 里做）；一次 `generate` 内的多个 HTTP 往返属于「已提交的
+/// 同一次请求」，中途停下只会留下「钱已扣、图未存」的半成品，故此处没有中断点。
 pub trait ImageProvider: Send + Sync {
     fn generate<'a>(
         &'a self,
@@ -292,7 +275,7 @@ pub fn for_kind(kind: ProviderKind) -> Box<dyn ImageProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_ai::GenErrorKind;
+    use crate::image_ai::types::GenErrorKind;
 
     fn gen_req() -> GenRequest {
         GenRequest {
@@ -301,7 +284,7 @@ mod tests {
             prompt: "一张脸".into(),
             size: "1024x1024".into(),
             // 校验用例显式传 caps 参数，请求侧快照留空即可。
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 

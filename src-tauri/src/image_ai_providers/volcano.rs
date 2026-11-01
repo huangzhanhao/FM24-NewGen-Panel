@@ -35,7 +35,7 @@
 //! prompt 官方仅给软建议（中文 ≤300 字 / 英文 ≤600 词），非硬限，故不设字符上限拦截。
 
 use super::{validate_model_caps, FetchedImage, GenStage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{
+use crate::image_ai::types::{
     classify_provider_error, from_http_status, Capabilities, GenRequest, ImageGenError, ModelInfo,
     ProviderConfig, ProviderKind, SizeRules,
 };
@@ -310,7 +310,7 @@ mod tests {
             prompt: "一张东亚球员的脸".into(),
             size: m.capabilities.sizes[0].clone(),
             caps: Some(m.capabilities.clone()),
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 

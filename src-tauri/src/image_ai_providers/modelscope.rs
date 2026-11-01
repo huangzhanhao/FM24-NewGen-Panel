@@ -13,7 +13,7 @@
 //! 【关键坑】提交回执里的 `task_status` 是假象，真正的图必须拿 `task_id` 去任务端点轮询；
 //! 缺 `X-ModelScope-Task-Type` 头会报 task not found。
 //!
-//! 请求体：恒发 `model` / `prompt` / `size`（`宽x高`）；门控追加 `negative_prompt` / `seed` /
+//! 请求体：恒发 `model` / `prompt` / `size`（尺寸串原样透传，内置预设为小写 `x` 分隔）；门控追加 `negative_prompt` / `seed` /
 //! `steps`(1–100) / `guidance`。**无 `n`**（单张）。
 //!
 //! 【内置目录】`Qwen/Qwen-Image-2.1`（默认）、`Qwen-Image-2.1-Turbo`、`Qwen/Qwen-Image`、
@@ -23,7 +23,7 @@
 //! （见 [`crate::image_ai::reconcile_builtin_providers`]）。
 
 use super::{validate_model_caps, FetchedImage, GenStage, ImageProvider, ProviderOutcome};
-use crate::image_ai::{
+use crate::image_ai::types::{
     classify_provider_error, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig,
     ProviderKind,
 };
@@ -418,7 +418,7 @@ mod tests {
             prompt: "一张东亚球员的脸".into(),
             size: m.capabilities.sizes[0].clone(),
             caps: Some(m.capabilities.clone()),
-            ..crate::image_ai::test_req_base()
+            ..crate::image_ai::types::test_req_base()
         }
     }
 

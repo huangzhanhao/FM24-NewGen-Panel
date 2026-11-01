@@ -13,9 +13,8 @@ mod assets; // 编译期内嵌的只读映射表（国籍翻译、config.xml 模
 mod commands; // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper; // 核心算法：球员 → 头像图片的映射
 mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（FolderList 来自 templates，不硬编码）
-mod image_ai; // AI 文生图：契约/配置/模板渲染/生成编排/画廊记录（协议见 image_ai_providers，命令在 commands.rs）
+mod image_ai; // AI 文生图：契约/配置/模板渲染/生成编排/画廊记录/批量队列（协议见 image_ai_providers，命令在 commands.rs）
 mod image_ai_providers; // AI 文生图适配器族（openai/volcano/dashscope/siliconflow/modelscope/comfyui 协议适配）
-mod image_ai_queue; // AI 文生图批量生成队列（条目状态机/并发调度/事件 Seam；命令在 commands.rs）
 mod json_store; // JSON 配置的原子读写
 mod logger; // 日志系统（log 门面 + 官方插件管道；自研内存缓冲与批量事件见模块头）
 mod paging; // 通用分页契约（日志/名单/快照预览共用 total+items）
@@ -302,7 +301,7 @@ pub fn run() {
                 snapshot_cache: Arc::new(Mutex::new(None)), // 快照解析缓存（「读取快照」/替换收尾写入；初始为空）
                 image: Arc::new(Mutex::new(image_cfg)),
                 image_keys: Arc::new(Mutex::new(image_keys)),
-                queue: Arc::new(Mutex::new(image_ai_queue::QueueState::default())), // 批量生成队列（条目 + cancel 标志）
+                queue: Arc::new(Mutex::new(image_ai::gen_queue::QueueState::default())), // 批量生成队列（条目 + cancel 标志）
                 data_dir, // 便携数据目录（标准规则在其下 rules/）
             });
 
@@ -363,6 +362,7 @@ pub fn run() {
             commands::remove_from_queue, // 批量生成：按 id 移除条目
             commands::clear_queue,     // 批量生成：清空队列
             commands::start_queue,     // 批量生成：启动队列（后台异步跑 run_queue）
+            commands::update_queue_entries, // 批量生成：手动确认后写回条目参数（只改 Queued）
             commands::cancel_queue,    // 批量生成：请求取消（未启动条目判「已取消」）
             commands::query_queue      // 批量生成：查询队列全量快照
         ])

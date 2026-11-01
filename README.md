@@ -249,11 +249,20 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       ├── profile_manager.rs   # ← core/ProfileManager.py（档/组 CRUD、浏览预览、激活快照交换）
 │       ├── face_mapper.rs       # ← core/FaceMapper.py（标准路由 + 三模式映射）
 │       ├── replace_flow.rs      # ← services/replace_service.py（替换流水线：分段计时 + 阶段内进度折算）
-│       ├── image_ai.rs          # AI 生图配置与 CRUD（服务商 / 模型 / 能力声明）
-│       ├── image_ai_queue.rs    # AI 生成队列（会话内存态，不落盘）
-│       ├── image_ai_providers/  # 各服务商适配器：openai / volcano / dashscope / siliconflow / modelscope（唯一外部 API 接触面）
+│       ├── image_ai/            # AI 生图（分层模块树：L0 契约 → L3 应用）
+│       │   ├── mod.rs           # 门面：mod 声明 + 显式重导出（零业务逻辑）
+│       │   ├── types.rs         # L0 契约：IPC / 落盘 DTO、错误分类、serde 辅助
+│       │   ├── config.rs        # L1 配置：生命周期 / 内置归并 / CRUD / data 路径
+│       │   ├── keys.rs          # L1 安全：服务商 Key 的机器绑定密文存储
+│       │   ├── gallery.rs       # L1 仓储：画廊记录 + 图片/记录双淘汰闸门 + 查询
+│       │   ├── prompt.rs        # L2 领域：模板渲染 / 词库回落 / 变量组装
+│       │   ├── postprocess.rs   # L2 领域：四角白底裁圆角
+│       │   ├── validate.rs      # L2 领域：两层准入校验
+│       │   ├── generate.rs      # L3 应用：单次生成编排
+│       │   └── gen_queue.rs     # L3 应用：生成队列（会话内存态，不落盘）
+│       ├── image_ai_providers/  # 各服务商适配器：openai / volcano / dashscope / siliconflow / modelscope / localcomfyui（唯一网络接触面）
 │       ├── logger.rs            # ← core/NewGanLogManager.py（官方 log 插件管道 + 内存环形缓冲/批量事件）
-│       └── commands.rs          # ← services/* + 对话框原语（28 个 Tauri 命令）
+│       └── commands.rs          # ← services/* + 对话框原语（52 个 Tauri 命令）
 ├── tests/testing_data/          # RTF 测试样本（不入库）
 ├── .cargo/config.toml           # Cargo 构建配置（target-dir 指向根目录 target/）
 ├── package.json / vite.config.ts / svelte.config.js / tsconfig.json
@@ -282,7 +291,7 @@ pnpm install
 pnpm tauri dev
 
 # 3) 测试与检查
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 133 项）
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 256 项）
 pnpm test                                          # vitest 前端单测
 pnpm check                                         # svelte-check 类型检查
 

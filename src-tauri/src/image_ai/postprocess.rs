@@ -1,8 +1,7 @@
 //! 生成图后处理：落盘前把四角裁成圆角（恒输出 RGBA PNG）。
 //!
-//! 【为什么不再只认白角】文生图拿不到真 alpha，圆角只能由后处理给。旧版靠提示词让模型
-//! 把角外画成白底再裁白；提示词去掉那句之后，模型输出的是满幅方图，四角没有任何白弧，
-//! 只认白就等于不裁角。现在半径取「固定比例」与「实测白弧」的较大值：
+//! 【为什么不能只认白角】文生图拿不到真 alpha，圆角只能由后处理给：模型输出多为满幅方图、
+//! 四角没有白弧，只认白等于不裁角。半径取「固定比例」与「实测白弧」的较大值：
 //! - 固定值 = round(短边 × `RADIUS_RATIO`)，满幅方图也能得到圆角；
 //! - 白弧实测沿用 flood fill（近白 min 通道 ≥ 228、限本角象限），半径超过短边 1/4 视为
 //!   场景级白色、不采信，避免顺着白区吃进大片内容。
@@ -104,7 +103,7 @@ pub(super) fn round_corners(bytes: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
-    /// 合成「内容铺满、四角圆弧外为白」：旧模板下模型的真实输出形态（白弧只在四角）。
+    /// 合成「内容铺满、四角圆弧外为白」：模型画了白弧时的真实输出形态（白弧只在四角）。
     fn rounded_white_corner_sample(size: u32, radius: u32) -> image::RgbaImage {
         let mut img = image::RgbaImage::from_pixel(size, size, image::Rgba([20, 30, 40, 255]));
         let rr = (radius as i64) * (radius as i64);
@@ -135,7 +134,7 @@ mod tests {
 
     #[test]
     fn round_corners_cuts_white_arcs_and_full_bleed_squares() {
-        // ① 模型画了白角（旧模板）：实测半径 22 > 固定 10，按 22 裁，宽高不变。
+        // ① 模型画了白角：实测半径 22 > 固定 10，按 22 裁，宽高不变。
         let sample = rounded_white_corner_sample(100, 20);
         let out = image::load_from_memory(
             &round_corners(&encode_as(&sample, image::ImageFormat::Png)).unwrap(),
@@ -152,7 +151,7 @@ mod tests {
         assert_eq!(out.get_pixel(23, 0)[3], 255);
         assert_eq!(*out.get_pixel(50, 50), image::Rgba([20, 30, 40, 255]));
 
-        // ② 满幅方图（提示词不再要求圆角）：没有白弧也要按固定比例裁出圆角。
+        // ② 满幅方图：没有白弧也要按固定比例裁出圆角。
         let plain = image::RgbaImage::from_pixel(100, 100, image::Rgba([10, 20, 30, 255]));
         let out = image::load_from_memory(
             &round_corners(&encode_as(&plain, image::ImageFormat::Png)).unwrap(),

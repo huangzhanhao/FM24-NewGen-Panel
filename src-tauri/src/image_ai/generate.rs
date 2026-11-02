@@ -21,7 +21,7 @@ pub fn new_id() -> String {
 /// → 落盘 `.imgtmp` → 写画廊记录并按上限裁剪。记录写入与图片裁剪失败只告警，不掩盖已成功落盘的生成。
 ///
 /// # 参数
-/// - `data_dir`：应用数据目录（`.imgtmp` 与 `gallery.json` 都在其下）；
+/// - `data_dir`：应用数据目录（`.imgtmp` 及其中的 `gallery.json` 都在其下）；
 /// - `cfg`：生效配置（服务商/模型与两道淘汰闸门上限取自此处）；
 /// - `key`：API Key 明文，只在本会话内存（密文随服务商行落盘；本地 ComfyUI 免鉴权，传空串）；
 /// - `req`：生成请求；本函数回填内部字段 base_url、caps 并门控 call_mode；
@@ -122,12 +122,12 @@ mod tests {
     use super::*;
     use crate::image_ai::types::GenErrorKind;
 
-    /// 未提交即取消：`validate_for_generate` 之后、发 HTTP 之前那次检查命中 ⇒ 直接返回
-    /// `Cancelled`，**零计费、零落盘**。这是「取消不花钱」的唯一分界点：一旦请求发出，
-    /// 服务端已计费，本次调用就必须等结果（不再中断），故本用例锁住「没发出去」这一侧。
+    /// 未提交即取消：发 HTTP 前那次检查命中 ⇒ 直接返回 `Cancelled`，**零计费、零落盘**。
+    /// 这是「取消不花钱」的唯一分界点——请求一旦发出即已计费，本次调用必须等结果，
+    /// 故本用例锁住「没发出去」这一侧。
     ///
-    /// 【用 openai/gpt-image-1】内置目录里的合规模型，能干净地过 `validate_for_generate`，
-    /// 让用例只考察取消那一跳；`key` 传空串即可——本路径永远走不到发请求那一步（也因此不触网）。
+    /// 【用 openai/gpt-image-1】内置合规模型能干净地过 `validate_for_generate`，让用例只
+    /// 考察取消那一跳；`key` 传空串即可——本路径走不到发请求那一步（也因此不触网）。
     #[test]
     fn generate_cancelled_before_submit_returns_cancelled_without_touching_disk() {
         // TempDir 必须先绑定到变量再使用（临时目录随句柄 drop 删除）。
@@ -157,10 +157,10 @@ mod tests {
         let err = res.expect_err("已取消的请求不该返回成功结果");
         assert_eq!(err.kind, GenErrorKind::Cancelled);
 
-        // 【怎么证明一个请求都没发出去】走磁盘痕迹反证：gallery.json 只在拿到图片字节之后
-        // （record_gallery）才写，.imgtmp 也是在 `adapter.generate(...)` 返回之后才 create_dir_all。
-        // 故「无 gallery.json 且 .imgtmp 不存在/为空」⇒ 执行链没越过 adapter.generate 的成功分支，
-        // 也就不可能发生过 HTTP 提交（本用例全程无网）。
+        // 【怎么证明一个请求都没发出去】走磁盘痕迹反证：gallery.json 只在拿到图片字节后才写
+        //（record_gallery），.imgtmp 也在 `adapter.generate(...)` 返回后才 create_dir_all。
+        // 故「无 gallery.json 且 .imgtmp 不存在/为空」⇒ 执行链没越过 generate 的成功分支，
+        // 也不可能发生过 HTTP 提交（本用例全程无网）。
         assert!(
             !crate::image_ai::gallery_path(dir.path()).exists(),
             "未提交即取消不该留下画廊记录"

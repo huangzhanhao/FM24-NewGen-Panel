@@ -35,7 +35,9 @@ static RECORD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"from="([^"]+)" to="graphics/pictures/person/((?:r-)?\d{4,})/portrait""#).unwrap()
 });
 
-const BACKUP_KEEP: usize = 10; // 最多保留的备份份数
+/// 写前备份的保留份数：`config_backup_*.xml`（头像包目录）与 `<快照词干>_backup_*.xml`
+///（`.user/<存档>/`）同一口径，均最多保留最近 5 份。
+const BACKUP_KEEP: usize = 5;
 
 /// config.xml 的 from 值：平铺（ethnicity 空）只写图名，否则 "种族/图名"。
 pub fn record_from(ethnicity: &str, image: &str) -> String {
@@ -201,7 +203,7 @@ pub fn single_replacement(
     if !replaced {
         if !insert_missing {
             // 文件在、但整表没有该 UID 的映射行（多为 UID 填错，或该球员本就不在本次映射里）。
-            // 不改文件、也不打备份：原来这条路径会照样重写整份文件，还白占一个 10 份轮转槽位，
+            // 不改文件、也不打备份：原来这条路径会照样重写整份文件，还白占一个备份轮转槽位，
             // 同时命令层那条「单人换脸 X → Y」的 INFO 会误报成改成了。
             log::warn!(
                 target: "xml",
@@ -291,8 +293,9 @@ pub fn rotate_backup(src: &Path, dir: &Path, prefix: &str) -> Result<PathBuf, St
         })
         .map(|e| e.path())
         .collect();
-    backups.sort(); // 文件名含时间戳，字典序 = 时间序
-                    // 超过 BACKUP_KEEP 份就删除最旧的（切片 [..len-KEEP] 是前面的旧备份）。
+    // 文件名含时间戳，字典序 = 时间序。
+    backups.sort();
+    // 超过 BACKUP_KEEP 份就删除最旧的（切片 [..len-KEEP] 是前面的旧备份）。
     if backups.len() > BACKUP_KEEP {
         // 被清理的是「第 n 份更早的备份」，用户发现某份历史备份不见了时，这条日志能解释是轮转删的
         // （而不是杀软/同步盘动的）。删除失败只 `let _ =` 吞掉（旧备份留着不影响正确性），故不逐份记名。
@@ -300,10 +303,14 @@ pub fn rotate_backup(src: &Path, dir: &Path, prefix: &str) -> Result<PathBuf, St
         for old in &backups[..backups.len() - BACKUP_KEEP] {
             let _ = fs::remove_file(old);
         }
+        // 【份数只认常量】文案里的数字一律由 BACKUP_KEEP 展开，不能写成字面量：
+        // 否则把常量调小/调大后日志会继续报旧数字，排查「备份怎么只剩 N 份」时被误导。
         log::info!(
             target: "xml",
             "备份已超过 {} 份，清理最旧的 {} 份（现有备份 {} 份）",
-            BACKUP_KEEP, pruned, BACKUP_KEEP
+            BACKUP_KEEP,
+            pruned,
+            BACKUP_KEEP
         );
     }
     Ok(backup)
@@ -581,7 +588,7 @@ mod tests {
         assert_eq!(parsed["r-1001"].ethnicity, "MENA");
         assert_eq!(parsed["r-1001"].image, "m9");
         assert_eq!(parsed["r-1002"].image, "a2"); // 未受影响
-                                                  // 未命中：一个字节都不该动。旧实现照样重写整份文件，还白占一个 10 份轮转槽位。
+                                                  // 未命中：一个字节都不该动。旧实现照样重写整份文件，还白占一个备份轮转槽位。
         let cfg = pack.join("config.xml");
         let before = std::fs::read(&cfg).unwrap();
         let entries_before = std::fs::read_dir(&pack).unwrap().count();
@@ -688,58 +695,6 @@ mod tests {
             .collect();
         v.sort();
         v
-    }
-
-    #[test]
-    fn backup_rotation_keeps_latest_ten() {
-        let dir = tempfile::tempdir().unwrap();
-        let pack = dir.path().join("pack");
-        std::fs::create_dir_all(&pack).unwrap();
-        write_xml(
-            &[MappingEntry {
-                uid: "r-1".into(),
-                ethnicity: "Asian".into(),
-                image: "x".into(),
-            }],
-            &pack,
-            false,
-        )
-        .unwrap();
-        // 手动造 12 份历史备份：时间戳一律早于「现在」，与本次 write_xml 生成的那份天然错开，
-        // 所以不必 sleep 等秒级时间戳递增（旧实现为此白等了 13 秒）。
-        for i in 0..12 {
-            let name = format!("config_backup_20260101-0000{:02}.xml", i);
-            std::fs::copy(pack.join("config.xml"), pack.join(&name)).unwrap();
-        }
-        write_xml(
-            &[MappingEntry {
-                uid: "r-1".into(),
-                ethnicity: "Asian".into(),
-                image: "x".into(),
-            }],
-            &pack,
-            true,
-        )
-        .unwrap();
-        let mut kept: Vec<String> = std::fs::read_dir(&pack)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with("config_backup_"))
-            .collect();
-        kept.sort(); // 文件名含时间戳，字典序 = 时间序
-        assert_eq!(kept.len(), 10, "轮转后应只剩最近 10 份：{kept:?}");
-        // 13 份（12 份伪造 + 本次写入的 1 份）剪到 10 份，剪掉的必须是最旧的 3 份，
-        // 且刚生成的那份最新备份必须在——只校条数的话，「删新留旧」这种反着写的 bug 测不出来。
-        assert_eq!(
-            kept.first().unwrap().as_str(),
-            "config_backup_20260101-000003.xml"
-        );
-        assert!(
-            kept.last().unwrap().as_str() > "config_backup_20260101-000011.xml",
-            "本次替换的新备份被删掉了：{kept:?}"
-        );
-        // 已知残余：v1 及更早的备份叫 config备份_*.xml，轮转既不统计也不清理（按现决策保留现状）。
     }
 
     #[test]

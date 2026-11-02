@@ -1,7 +1,7 @@
 //! FM（Football Manager）名单 RTF 扫描器：识别导出视图的列结构，再把每一行解析成记录。
 //!
 //! 【模块职责】
-//! 只负责两件事：识别名单属于哪种列结构，以及把每行解析成 `PlayerRecord`。写数据库、加载翻译表、
+//! 只负责两件事：识别名单属于哪种列结构，以及把每行解析成 `PlayerRecord`。写数据库、加载对照表、
 //! 界面展示都不在这里，由调用方（commands 层）完成。
 //!
 //! 【使用步骤与生命周期】
@@ -19,8 +19,9 @@
 //! - ExtPlayer / ExtStaff 拓展名单：至少 18 列，前 7 列与 Basic 相同，第 8-18 列依次为肤色、头像、
 //!   是新生球员、性别、年龄、身高、俱乐部、所在地（球员）或偏好工作（职员）、能力、潜力、R.C.A；
 //!   第 19 列起是用户自己添加的列。
-//! 国籍的权威来源是 nat_translation.json（显示文本 → 码）与 nat_codes.json（码全集）：解析时统一
-//! 换成三字码。两个表都查不到的值判为非法，直接丢弃该行并记日志（用户可据日志自行增删翻译表）。
+//! 国籍的权威来源是国籍对照表（`data/nationalities.json`，`nationality` 模块；出厂默认来自内嵌的
+//! nat_translation.json + nat_codes.json）：解析时统一换成三字码。查不到的值判为非法，直接丢弃该行
+//! 并记日志（用户可据日志在应用的「国籍对照表」里增补映射）。
 //!
 //! 【行号与列号的计算方式】
 //! 每个单元格向量的第 0 个位置固定存放“行号”，所以表格的第 k 列正好落在下标 k（下标 0 留给了
@@ -36,19 +37,21 @@
 //! 还是“所在地”（用来区分职员还是球员），具体见 `header_format`。
 //! 判断完格式后，还会抽查前 20 条数据行，要求至少有 1 条符合该格式，避免表头和数据行错位的文件
 //! 被悄悄解析成空名单。
-//! 数据语言不看表头（英文拓展名单的表头是中英混排的），而是拿数据行的国籍列去查翻译表：命中哪个
+//! 数据语言不看表头（英文拓展名单的表头是中英混排的），而是拿数据行的国籍列去查对照表：命中哪个
 //! 语言节点就判为哪种语言；一个都没命中时默认 English（例如国籍已经是三字码，无需再判断）。
 //!
 //! 【错误处理的分工】
 //! detect 严格：整份文件级别的问题（没有表头、表头不合法、没有一条合法数据行）都会报错，错误信息
 //! 直接展示给用户，同时写入 Error 日志。
 //! parse 也严格：行级问题（国籍查不到、字段不合法）会丢弃该行并逐行记 Warn 日志，便于用户核对并
-//! 增删翻译表；整份文件是否合法已经在 detect 阶段检查过了。
+//! 增删对照表；整份文件是否合法已经在 detect 阶段检查过了。
 use crate::logger::LogSink;
+use crate::nationality::NationalityTable;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// 随机人 UID 的固定前缀。Replace 流程和前端都靠它区分随机人记录和原生记录，修改这个前缀会造成
 /// 不兼容的破坏性变更。
@@ -125,7 +128,7 @@ const PLAYER_BASED_HEADERS: [&str; 2] = ["based", "所在地"];
 /// 表头第 15 列用于判断职员的关键字（真实表头是「偏好工作」或「Preferred Job」）。
 const STAFF_JOB_HEADERS: [&str; 2] = ["preferred job", "偏好工作"];
 
-/// 名单的列结构。数据语言不在这里（它根据国籍列查翻译表判断），见 `RtfScanner::language`。
+/// 名单的列结构。数据语言不在这里（它根据国籍列查对照表判断），见 `RtfScanner::language`。
 ///
 /// 序列化身份：该枚举直接 derive Serialize（camelCase 变体名）作为前端业务判定的协议码
 /// （basic/extPlayer/extStaff），前端不得再拿 label 的中文文案做判定——
@@ -235,7 +238,7 @@ pub struct RosterCounts {
     pub kept: usize,
     /// 按「仅随机人」口径过滤掉的行数（不是错误，是筛选）。
     pub filtered: usize,
-    /// 校验失败被跳过的行数（多为国籍不在翻译表里，逐行有 Warn）。
+    /// 校验失败被跳过的行数（多为国籍不在对照表里，逐行有 Warn）。
     pub dropped: usize,
     /// 表头之后「编号列根本不是纯数字」而被整行忽略的行数（历史上既无计数也无日志）。
     pub stray: usize,
@@ -299,24 +302,36 @@ enum RowVerdict {
 
 /// 扫描器状态：保存 `detect_format` 得到的识别结果，供后面的解析阶段使用。
 ///
-/// 使用顺序是“先识别、后解析”：只有 `detect_format` 成功后（`is_valid` 被置为 true），
-/// `parse_roster` 才能调用，否则会直接报错。它只保存识别结论、不缓存文件内容，是普通的值类型，
-/// 可以放心传递。
+/// 使用顺序是「先识别、后解析」：`detect_format` 成功后（`is_valid` = true）才允许 `parse_roster`。
+/// 只保存识别结论与一份国籍表快照，不缓存文件内容，可放心传递。
 pub struct RtfScanner {
     pub is_valid: bool,    // parse_roster 的入口校验：没识别过就解析会直接报错
     pub language: String,  // "English" / "简体中文" / "Unknown"（未识别时）；供摘要展示
     pub format: RtfFormat, // 列结构的判断结果；parse 按它取列组装，commands 层直接展示
+    /// 国籍表快照：构造时取一次，整轮识别/解析共用。
+    /// 不逐行查全局表——用户中途保存不该让同一轮解析前后出现两套口径。
+    nat: Arc<NationalityTable>,
 }
 
 impl RtfScanner {
     /// 创建一个空状态：尚未识别（`is_valid = false`），语言为 `"Unknown"`，结构取默认值 `Basic`。
     ///
     /// 必须先用 `detect_format` 识别成功，`parse_roster` 才会放行。
+    /// 【测试专用】取进程内当前表（单测里是出厂默认）；生产的两条路径（扫描命令 / 替换流水线）
+    /// 都用 [`with_nationality`](Self::with_nationality) 传入刚读盘的对照表，保证本轮口径固定。
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_nationality(crate::nationality::current())
+    }
+
+    /// 用指定国籍表构造扫描器：命令入口把刚读盘的表直接交给本轮扫描，测试也可注入自定义表
+    /// 验证「改表 → 扫描结果随之变化」，不依赖进程级当前表。
+    pub fn with_nationality(nat: Arc<NationalityTable>) -> Self {
         Self {
             is_valid: false,
             language: "Unknown".into(),
             format: RtfFormat::default(),
+            nat,
         }
     }
 
@@ -373,20 +388,20 @@ impl RtfScanner {
             None => return Err("RTF 格式不合法：未识别到表头行".into()),
         };
         // 抽查数据行：按表头判断出的格式校验行结构和字段，至少要有 1 条合法才放行。
-        // 顺便用翻译表判断语言：国籍值在哪个语言节点里作为显示文本命中，就是哪种语言。
+        // 顺便用对照表判断语言：国籍值在哪个语言节点里作为显示文本命中，就是哪种语言。
         let mut valid = 0usize;
         let mut first_rejection: Option<String> = None;
-        let mut language: Option<&'static str> = None;
+        let mut language: Option<String> = None;
         for (row_no, cells) in rows.take(DETECT_LINE_LIMIT) {
-            match classify_row(&cells, format) {
+            match classify_row(&cells, format, &self.nat) {
                 RowVerdict::Data => {
                     valid += 1;
                     if language.is_none() {
-                        // 主国籍、第二国籍都查一遍；已是三字码的值解析出的语言为 None，会自然跳过。
+                        // 主国籍、第二国籍都查一遍；已是三字码的值解析不出语言，会自然跳过。
                         language = [NAT_COL, SEC_NAT_COL]
                             .iter()
                             .filter_map(|&col| cells.get(col))
-                            .find_map(|nat| resolve_nationality(nat).and_then(|(lang, _)| lang));
+                            .find_map(|nat| self.nat.language_of(nat).map(str::to_string));
                     }
                 }
                 RowVerdict::NotDataRow => {}
@@ -405,7 +420,7 @@ impl RtfScanner {
             });
         }
         self.format = format;
-        self.language = language.unwrap_or("English").into();
+        self.language = language.unwrap_or_else(|| crate::nationality::EN_LANGUAGE.to_string());
         self.is_valid = true;
         Ok(())
     }
@@ -414,8 +429,8 @@ impl RtfScanner {
     ///
     /// * `keep_only_newgen = true` 时只保留带 r- 前缀（随机人）的记录，Replace 流程用它取目标；
     ///   扫描展示时传 false。
-    /// * 国籍必须能在 nat_translation.json（显示文本）或 nat_codes.json（国籍码）里查到，否则该行
-    ///   判为非法：丢弃并逐行记 Warn 日志，便于用户据日志增删翻译表（国籍错会连累后续抽图，需严格）。
+    /// * 国籍必须能在国籍对照表（显示文本）或码全集（国籍码）里查到，否则该行判为非法：
+    ///   丢弃并逐行记 Warn 日志，便于用户据日志增删对照表（国籍错会连累后续抽图，需严格）。
     /// * 其它行级问题（字段不合法、列数不符）同样丢行并记日志；整份文件是否合法已在 detect 阶段检查。
     /// 【仅测试】生产的两条路径（「扫描RTF」命令、替换流水线）都要报进度，一律走 parse_roster_progress；
     /// 留这个无进度版只是让测试少写一个空回调，故标 cfg(test) 免得在发布构建里报 dead_code。
@@ -495,11 +510,11 @@ impl RtfScanner {
                 );
                 return Err("名单解析被取消".into());
             }
-            match classify_row(&cells, self.format) {
+            match classify_row(&cells, self.format, &self.nat) {
                 RowVerdict::Data => {
                     let record = match self.format {
-                        RtfFormat::Basic => parse_basic_row(&cells),
-                        _ => parse_ext_row(&cells, self.format),
+                        RtfFormat::Basic => parse_basic_row(&cells, &self.nat),
+                        _ => parse_ext_row(&cells, self.format, &self.nat),
                     };
                     // 过滤只看 uid：带 r- 前缀的就是随机人。
                     if record.uid.starts_with(NEWGAN_UID_PREFIX) || !keep_only_newgen {
@@ -689,7 +704,7 @@ fn header_hit(cell: &str, words: &[&str]) -> bool {
 /// 必须用同一套标准，否则检测时认可的行在解析时可能被丢掉，或者解析时混入检测没见过的行。
 /// 格式由表头判断决定（这里不再按行内内容分流）；第 1 列是纯数字仍然是数据行的唯一标志
 /// （表头同一列是「编号/UID」文字）。
-fn classify_row(cells: &[String], format: RtfFormat) -> RowVerdict {
+fn classify_row(cells: &[String], format: RtfFormat, nat: &NationalityTable) -> RowVerdict {
     let Some(uid) = cells.get(UID_COL) else {
         return RowVerdict::NotDataRow;
     };
@@ -703,15 +718,15 @@ fn classify_row(cells: &[String], format: RtfFormat) -> RowVerdict {
         };
     }
     match format {
-        RtfFormat::Basic => classify_basic_row(cells),
-        _ => classify_ext_row(cells),
+        RtfFormat::Basic => classify_basic_row(cells, nat),
+        _ => classify_ext_row(cells, nat),
     }
 }
 
 /// Basic 行的校验：列数正好 7 列（允许末尾有空列——FM 会按视图宽度补齐空单元格；如果第 8 列起
 /// 有内容，说明数据行与表头判断出的基础结构不符），再校验国籍和三个数值码。
 /// 校验顺序与列顺序一致，报错定位到最靠前的坏字段。
-fn classify_basic_row(cells: &[String]) -> RowVerdict {
+fn classify_basic_row(cells: &[String], nat: &NationalityTable) -> RowVerdict {
     if cells.len() < BASIC_FIELD_COUNT + 1
         || cells[(BASIC_FIELD_COUNT + 1)..]
             .iter()
@@ -725,10 +740,10 @@ fn classify_basic_row(cells: &[String]) -> RowVerdict {
             ),
         };
     }
-    if let Some(v) = invalid_nationality(cells, NAT_COL, "国籍", false) {
+    if let Some(v) = invalid_nationality(cells, NAT_COL, "国籍", false, nat) {
         return v;
     }
-    if let Some(v) = invalid_nationality(cells, SEC_NAT_COL, "第二国籍", true) {
+    if let Some(v) = invalid_nationality(cells, SEC_NAT_COL, "第二国籍", true, nat) {
         return v;
     }
     if let Some(v) = invalid_code(cells, HAIR_LENGTH_COL, "头发长度码", HAIR_LENGTH_RANGE) {
@@ -748,7 +763,7 @@ fn classify_basic_row(cells: &[String]) -> RowVerdict {
 ///
 /// 为什么允许肤色和 R.C.A 为空：FM 对未加载的对象会把整段属性导出成空白（实测 ext_staff_short_chn
 /// 的 37 行肤色与 R.C.A 全为空），空值原样入库；只有非空时才校验，防止列错位的文本混进来。
-fn classify_ext_row(cells: &[String]) -> RowVerdict {
+fn classify_ext_row(cells: &[String], nat: &NationalityTable) -> RowVerdict {
     if cells.len() < EXT_FIELD_COUNT + 1 {
         return RowVerdict::Rejected {
             field: "列数",
@@ -758,10 +773,10 @@ fn classify_ext_row(cells: &[String]) -> RowVerdict {
             ),
         };
     }
-    if let Some(v) = invalid_nationality(cells, NAT_COL, "国籍", false) {
+    if let Some(v) = invalid_nationality(cells, NAT_COL, "国籍", false, nat) {
         return v;
     }
-    if let Some(v) = invalid_nationality(cells, SEC_NAT_COL, "第二国籍", true) {
+    if let Some(v) = invalid_nationality(cells, SEC_NAT_COL, "第二国籍", true, nat) {
         return v;
     }
     if let Some(v) = invalid_code(cells, HAIR_LENGTH_COL, "头发长度码", HAIR_LENGTH_RANGE) {
@@ -793,15 +808,16 @@ fn invalid_nationality(
     col: usize,
     field: &'static str,
     allow_empty: bool,
+    nat: &NationalityTable,
 ) -> Option<RowVerdict> {
     let value = cells.get(col).map(String::as_str).unwrap_or("");
-    if is_valid_nationality(value, allow_empty) {
+    if is_valid_nationality(value, allow_empty, nat) {
         return None;
     }
     Some(RowVerdict::Rejected {
         field,
         detail: format!(
-            "第 {col} 列「{value}」不是 nat_translation.json 收录的国籍显示文本，也不是 nat_codes.json 收录的国籍码"
+            "第 {col} 列「{value}」不是国籍对照表收录的国籍全称，也不是对照表收录的国籍码（可在「国籍对照表」中增补）"
         ),
     })
 }
@@ -843,44 +859,14 @@ fn is_valid_code(value: &str, min: u32, max: u32) -> bool {
                 .unwrap_or(false))
 }
 
-/// 判断一个值是否已经是国籍码：直接查 nat_codes.json 的码全集。
-/// 三位码与两位特例 "SC" 都收录在其中，命中即视为「已是目标形态」，无需再翻译。
-fn is_nationality_code(nat: &str) -> bool {
-    crate::assets::NAT_CODES
-        .iter()
-        .any(|code| code.as_str() == nat)
-}
-
-/// 国籍是否合法：必须能在权威表里查到——要么是 nat_translation.json 收录的显示文本，要么是
-/// nat_codes.json 收录的国籍码。两者都查不到一律判非法（国籍错会连累后续抽图，必须在前置环节拦下）。
+/// 国籍是否合法：必须能在对照表里查到——要么是某语言收录的国籍全称/别名，要么是收录的国籍码。
+/// 两者都查不到一律判非法（国籍错会连累后续抽图，必须在前置环节拦下）。
 /// 空值按 `allow_empty` 处理（第二国籍允许为空）。
-fn is_valid_nationality(nat: &str, allow_empty: bool) -> bool {
-    if nat.is_empty() {
+fn is_valid_nationality(value: &str, allow_empty: bool, nat: &NationalityTable) -> bool {
+    if value.is_empty() {
         return allow_empty;
     }
-    resolve_nationality(nat).is_some()
-}
-
-/// 解析一个国籍值，返回（语言节点, 三字码）：
-/// - 命中翻译表某语言节点的「显示文本」（键）→ 返回该语言节点名与映射出的三字码；
-/// - 值本身已是国籍码（在 nat_codes.json 的码全集里，如三位码或两位特例 "SC"）→ 语言返回 None，
-///   码取原值；
-/// - 空值或彻底无法识别 → None。
-fn resolve_nationality(nat: &str) -> Option<(Option<&'static str>, String)> {
-    if nat.is_empty() {
-        return None;
-    }
-    // 先按显示文本查：在哪个语言节点里命中，就同时拿到语言和对应的码。
-    for (lang, table) in crate::assets::NAT_TRANSLATION.iter() {
-        if let Some(code) = table.get(nat) {
-            return Some((Some(lang.as_str()), code.clone()));
-        }
-    }
-    // 再看是不是已经是国籍码（查 nat_codes.json 全集，含 "SC" 特例）。
-    if is_nationality_code(nat) {
-        return Some((None, nat.to_string()));
-    }
-    None
+    nat.resolve(value).is_some()
 }
 
 /// 判断是否为随机人：标志里包含“是”或“Yes”就是随机人（正向判断），uid 会加上 r- 前缀。
@@ -892,11 +878,11 @@ fn is_newgan(flag: &str) -> bool {
 
 /// 组装 Basic 行。视图本身就按 is newgen 过滤过，所以 uid 无条件加上 r- 前缀；
 /// 国籍两列就地查表转成三字码。
-fn parse_basic_row(cells: &[String]) -> PlayerRecord {
+fn parse_basic_row(cells: &[String], nat: &NationalityTable) -> PlayerRecord {
     PlayerRecord {
         uid: format!("{NEWGAN_UID_PREFIX}{}", cells[UID_COL]),
-        primary_nat: resolve_nat(&cells[NAT_COL]),
-        sec_nat: resolve_nat(&cells[SEC_NAT_COL]),
+        primary_nat: resolve_nat(&cells[NAT_COL], nat),
+        sec_nat: resolve_nat(&cells[SEC_NAT_COL], nat),
         name: cells[NAME_COL].clone(),
         hair_length: cells[HAIR_LENGTH_COL].clone(),
         hair_color: cells[HAIR_COLOR_COL].clone(),
@@ -909,7 +895,7 @@ fn parse_basic_row(cells: &[String]) -> PlayerRecord {
 /// 组装拓展行。是否随机人按标志正向判断（包含“是”或“Yes”）；人员类别由格式与第 11 列
 /// 当场折叠，第 15 列按格式写入 `based` 或 `preferred_job`；第 19 列起的用户自定义列原文
 /// 放进 `extra_fields`；国籍两列就地查表转成三字码。
-fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
+fn parse_ext_row(cells: &[String], format: RtfFormat, nat: &NationalityTable) -> PlayerRecord {
     let is_player = format == RtfFormat::ExtPlayer;
     let flag = cells[EXT_NEWGAN_FLAG_COL].as_str();
     let uid = if is_newgan(flag) {
@@ -919,8 +905,8 @@ fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
     };
     PlayerRecord {
         uid,
-        primary_nat: resolve_nat(&cells[NAT_COL]),
-        sec_nat: resolve_nat(&cells[SEC_NAT_COL]),
+        primary_nat: resolve_nat(&cells[NAT_COL], nat),
+        sec_nat: resolve_nat(&cells[SEC_NAT_COL], nat),
         name: cells[NAME_COL].clone(),
         hair_length: cells[HAIR_LENGTH_COL].clone(),
         hair_color: cells[HAIR_COLOR_COL].clone(),
@@ -954,10 +940,10 @@ fn parse_ext_row(cells: &[String], format: RtfFormat) -> PlayerRecord {
 
 // ---------------- 国籍翻译 ----------------
 
-/// 把国籍列的值解析成三字码：命中翻译表就换成码，是 nat_codes.json 里的码则原样保留。
+/// 把国籍列的值解析成三字码：命中对照表就换成码，本身已是码则原样保留。
 /// 未收录的值在 classify 阶段已被判为非法行，不会走到这里；空值返回空串。
-fn resolve_nat(value: &str) -> String {
-    resolve_nationality(value)
+fn resolve_nat(value: &str, nat: &NationalityTable) -> String {
+    nat.resolve(value)
         .map(|(_, code)| code)
         .unwrap_or_else(|| value.to_string())
 }
@@ -1174,15 +1160,42 @@ mod tests {
         let logger = ChannelLogger::channel();
         let mut s = RtfScanner::new();
         s.detect_format(&path, &logger.0).unwrap();
-        // 中文国籍在组装记录时直接查翻译表转成三字码，无需额外的翻译步骤。
+        // 中文国籍在组装记录时直接查对照表转成三字码，无需额外的翻译步骤。
         let data = s.parse_roster(&path, true, &logger.0).unwrap();
         assert_eq!(data[0].primary_nat, "USA");
         assert!(warn_messages(&logger.1).is_empty());
     }
 
     #[test]
+    fn custom_nationality_table_drives_scan() {
+        // 同一条中文国籍：出厂默认不收录「火星」，注入自定义对照表后必须解析成 ESP。
+        // 这条守住「扫描使用的是当前/注入的对照表」——改表后不重启、不重建全局状态也能生效。
+        let sample = "\
+| 编号      | 国籍/地区籍 | 第二国籍 | 姓名             |    |    |   |
+| 2000472008| 火星       |          | 火星人           | 1  | 12 | 1 |
+";
+        let doc = crate::nationality::NationalityDoc {
+            languages: vec!["English".into(), "简体中文".into()],
+            mappings: vec![crate::nationality::NationalityMapping {
+                code: "ESP".into(),
+                language: "简体中文".into(),
+                name: "火星".into(),
+            }],
+        };
+        let table = Arc::new(NationalityTable::from_doc(doc).unwrap());
+        let path = write_rtf(sample);
+        let logger = ChannelLogger::channel();
+        let mut s = RtfScanner::with_nationality(table);
+        s.detect_format(&path, &logger.0).unwrap();
+        assert_eq!(s.language, "简体中文");
+        let data = s.parse_roster(&path, true, &logger.0).unwrap();
+        assert_eq!(data[0].primary_nat, "ESP");
+        assert!(warn_messages(&logger.1).is_empty());
+    }
+
+    #[test]
     fn unrecognized_nationality_drops_row_and_logs() {
-        // 国籍必须能在 nat_translation.json 或 nat_codes.json 里查到，否则整行丢弃并记 WARNING；
+        // 国籍必须能在国籍对照表（全称或码）里查到，否则整行丢弃并记 WARNING；
         // 这里用一个表里肯定没有的虚构国名来验证这条严格路径。
         let sample = "\
 | 编号      | 国籍/地区籍 | 第二国籍 | 姓名        |    |    |   |
@@ -1490,7 +1503,7 @@ mod tests {
 
     #[test]
     fn nationality_form_checks() {
-        // 只有 nat_translation.json 收录的显示文本、或 nat_codes.json 收录的国籍码才算合法。
+        // 只有对照表收录的显示文本、或收录的国籍码才算合法。
         // "SC" 在码全集里，按码原样保留；没收录的 "Atlantis" 直接丢行并记警告。
         let sample = "\
 | UID       | Nat      | 2nd Nat | Name           |    |    |   |
@@ -1622,8 +1635,8 @@ mod tests {
                 "{name}"
             );
             assert!(
-                data.iter().all(|r| is_nationality_code(&r.primary_nat)),
-                "{name}: 国籍应全部是 nat_codes.json 里的码"
+                data.iter().all(|r| s.nat.is_code(&r.primary_nat)),
+                "{name}: 国籍应全部是国籍对照表收录的码"
             );
         }
     }
@@ -1631,7 +1644,7 @@ mod tests {
     #[test]
     fn real_player_ext_files() {
         // 4 份球员拓展名单：第一行都是路易斯·迪亚斯（标志为否/No，uid 不带前缀）；short 版国籍是
-        // 因列宽被截断的别名（哥伦比），翻译表已收录，转换结果与 long 版一致。
+        // 因列宽被截断的别名（哥伦比），对照表已收录，转换结果与 long 版一致。
         for (name, language, club, based, gender) in [
             (
                 "ext_player_long.rtf",
@@ -1735,7 +1748,7 @@ mod tests {
             assert_eq!(data[1].uid, "r-1915576430");
             assert_eq!(data[2].uid, "r-1915576");
         }
-        // test_wrong_ethnicity.rtf：含一个编造的非法国籍码（不在 nat_translation.json / nat_codes.json），
+        // test_wrong_ethnicity.rtf：含一个编造的非法国籍码（不在国籍对照表里），
         // 按严格口径该行被丢弃（夹具 29 行 → 保留 28 行）。
         if let Some(f) = real_rtf("test_wrong_ethnicity.rtf") {
             let logger = ChannelLogger::channel().0;

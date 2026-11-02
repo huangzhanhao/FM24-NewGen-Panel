@@ -1,14 +1,14 @@
 //! 服务商 API Key 的密文存储：机器指纹派生主密钥 + AES-256-GCM 封装。
 //!
-//! 【威胁模型】只防“配置文件被转发 / 备份 / 上传后 Key 以明文泄露”。主密钥由固定盐与
+//! 【威胁模型】只防「配置文件被转发 / 备份 / 上传后 Key 以明文泄露」。主密钥由固定盐与
 //! 机器指纹派生、不落盘，因此文件拷到另一台机器或另一个系统账户就解不开——代价是
 //! 换机 / 重装系统后要重填（用户已接受）。同一账户下的恶意程序、逆向二进制取出盐与算法
-//! 不在防护范围内，不为它做任何额外努力。
+//! 不在防护范围内，不为它做额外努力。
 //!
 //! 【算法】ring 的 AES-256-GCM：一次调用完成加密与完整性校验，不必自己管 IV 长度、
 //! 填充与 tag 校验。主密钥 = SHA-256(固定盐 ‖ 机器指纹)。
 //!
-//! 【容错口径】解密失败不是错误，是“未配置”：换机、重装、换账户、手改文件都会走到这里。
+//! 【容错口径】解密失败不是错误，是「未配置」：换机、重装、换账户、手改文件都会走到这里。
 //! 调用方丢掉该条并记 warn，**绝不阻断启动**。
 
 use base64::Engine as _;
@@ -32,7 +32,7 @@ fn key_fingerprint() -> &'static str {
     CACHE.get_or_init(read_key_fingerprint)
 }
 
-/// 三平台取机器标识；任一环节失败都回落到空串（退化为“同目录混淆密文”），不阻断启动。
+/// 三平台取机器标识；任一环节失败都回落到空串（退化为「同目录混淆密文」），不阻断启动。
 fn read_key_fingerprint() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -109,7 +109,7 @@ fn key_master_key() -> [u8; 32] {
     key
 }
 
-/// 加密一把 Key。空串不该走到这里（清空是“字段置 None”）。
+/// 加密一把 Key。空串不该走到这里（清空是「字段置 None」）。
 pub fn seal_key(key: &str) -> Result<SealedKey, String> {
     let mut nonce_bytes = [0u8; KEY_NONCE_LEN];
     SystemRandom::new()
@@ -132,7 +132,7 @@ pub fn seal_key(key: &str) -> Result<SealedKey, String> {
     })
 }
 
-/// 解密；任何一步不成立都返回 None（调用方按“未配置”处理）。
+/// 解密；任何一步不成立都返回 None（调用方按「未配置」处理）。
 pub fn open_key(sealed: &SealedKey) -> Option<String> {
     let nonce_vec = base64::engine::general_purpose::STANDARD
         .decode(sealed.nonce.as_bytes())

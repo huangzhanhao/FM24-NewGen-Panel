@@ -316,7 +316,10 @@ fn pick_from_dirs(
             if !duplicates {
                 dealt.entry(dir.clone()).or_default().push(stem.clone());
             }
-            return Some(PickedImage { dir: dir.clone(), stem });
+            return Some(PickedImage {
+                dir: dir.clone(),
+                stem,
+            });
         }
         passed += pool.len();
     }
@@ -628,7 +631,11 @@ mod tests {
             .filter(|d| d.contains('/'))
             .map(String::as_str)
             .collect();
-        assert_eq!(multi_level.len(), 64, "应新增 32 条 WF/* + 18 男职员 + 14 女职员");
+        assert_eq!(
+            multi_level.len(),
+            64,
+            "应新增 32 条 WF/* + 18 男职员 + 14 女职员"
+        );
         assert!(
             multi_level
                 .iter()

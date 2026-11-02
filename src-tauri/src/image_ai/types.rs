@@ -63,14 +63,14 @@ impl GenStage {
 
 /// 取消令牌：队列与执行链共享的「请停止」标志。
 ///
-/// 【为什么是原子布尔而非通道】取消只要单向信号、不携带数据；读侧是「每个检查点看一眼」，
-/// 原子读最轻。`Arc` 让 `QueueState` 与正在跑的任务共享**同一个**标志——若分成「队列的
-/// 取消位」和「任务侧的取消位」两套状态，就会出现「队列已判取消、任务仍按旧的 false 派发」。
+/// 【为什么是原子布尔而非通道】取消只要单向信号、不携带数据，读侧是「每个检查点看一眼」，
+/// 原子读最轻。`Arc` 让 `QueueState` 与正在跑的任务共享**同一个**标志——分成「队列的取消位」
+/// 和「任务侧的取消位」两套状态，就会出现「队列已判取消、任务仍按旧的 false 派发」。
 ///
 /// 【语义：只拦「还没提交」的请求】取消在三个点各查一次——队列派发前（不派发新条目）、
-/// 重试退避结束后（不再发起这次新的提交）、以及 [`generate`](super::generate) 发 HTTP 之前；
-/// **一旦请求已经发出，就不再中断它**：那笔调用已在服务端计费，等本次请求返回、结果照常落盘
-/// 并记入画廊，比「钱花了、图也没留下」更有价值。
+/// 重试退避结束后（不再发起新的提交）、以及 [`generate`](super::generate) 发 HTTP 之前；
+/// **一旦请求已发出就不再中断**：那笔调用已计费，等它返回、结果照常落盘并记画廊，
+/// 比「钱花了、图也没留下」更有价值。
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
@@ -173,9 +173,9 @@ impl ImageGenError {
     }
 
     /// 把文案里可能回显的 API Key 抹成 `[redacted]`。
-    /// 【为什么需要】厂商的 401 响应常把被拒的 Key 抄进 message，而这条文案会写进
-    /// data/newgan.log；用户贴日志求助时等于把 Key 公开。Key 含引号/反斜杠时日志里
-    /// 可能是 JSON 转义形态，两种拼写都要换。
+    /// 【为什么需要】厂商 401 响应常把被拒的 Key 抄进 message，而文案会写进
+    /// data/newgan.log；用户贴日志求助等于把 Key 公开。Key 含引号/反斜杠时日志里可能是
+    /// JSON 转义形态，两种拼写都要换。
     pub fn scrub(&mut self, key: &str) {
         let key = key.trim();
         if key.is_empty() {
@@ -282,7 +282,7 @@ pub fn classify_provider_error(
 // ---- 模型能力集：SizeRules（自由尺寸规则）/ Capabilities（UI 显隐与适配器发参依据） ---
 
 /// 自由尺寸规则：只约束**不在 `sizes` 预设里的自定义值**（见 `validate_model_caps`），每条 0 = 不检查。
-/// 尺寸字符串为 宽×高（小写 `x`）/「宽*高」形态；各模型区间由内置目录逐模型声明，取值逐字对齐官方文档。
+/// 尺寸字符串为 `宽x高`（小写 x）/ `宽*高` 形态；各模型区间由内置目录逐模型声明，取值逐字对齐官方文档。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SizeRules {
@@ -672,7 +672,10 @@ pub fn person_summary(req: &GenRequest) -> String {
 /// 一行式参数摘要（日志用）：只列非空项，默认值不占位，末尾带提示词字数。
 /// 【为什么记字数而不记全文】提示词可能上千字，日志里刷屏；长度足以识别「模板没渲染出来」这类问题。
 pub fn request_summary(req: &GenRequest) -> String {
-    let mut parts = vec![format!("{}/{}", req.provider_id, req.model), req.size.clone()];
+    let mut parts = vec![
+        format!("{}/{}", req.provider_id, req.model),
+        req.size.clone(),
+    ];
     if req.n != 1 {
         parts.push(format!("n={}", req.n));
     }
@@ -712,7 +715,7 @@ pub struct GenRequest {
     /// 反向提示词：模型不支持时适配器整条省略
     #[serde(default)]
     pub negative_prompt: String,
-    /// 尺寸字符串：sizes 预设值，或 宽×高（小写 `x`）/「宽*高」形态的自定义值
+    /// 尺寸字符串：sizes 预设值，或 `宽x高`（小写 x）/ `宽*高` 形态的自定义值
     pub size: String,
     /// 单次生成张数（缺省 1；上限由模型 max_n 校验）
     #[serde(default = "one")]
@@ -852,9 +855,9 @@ pub struct GenResult {
 
 // ---- 画廊记录契约：GalleryRecord（持久记录）/ GalleryItem（查询期现算存在性） ---------
 
-/// 一条画廊记录：持久保存在 `data_dir/gallery.json`，与 `.imgtmp` 图片字节是两条独立
-/// 生命周期。除 id/ts 外字段均可缺省（兼容老文件与字段演进）；ts 为 now_ts 格式，
-/// 字典序即时间序，淘汰与排序据此判新旧。
+/// 一条画廊记录：持久保存在 `data_dir/.imgtmp/gallery.json`（启动清理只删图片、保留本文件），
+/// 与图片字节是两条独立生命周期。除 id/ts 外字段均可缺省（兼容老文件与字段演进）；
+/// ts 为 now_ts 格式，字典序即时间序，淘汰与排序据此判新旧。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GalleryRecord {
@@ -874,11 +877,17 @@ pub struct GalleryRecord {
     pub negative_prompt: String,
     #[serde(default)]
     pub template_id: String,
+    /// 「另存为 / 保存并替换」把该图落盘到的绝对路径；从未保存过为 None（不写进 JSON）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_path: Option<String>,
+    /// 保存落点的文件名（含扩展名，如 `2002046242_1.png`）；从未保存过为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_name: Option<String>,
 }
 
 /// 画廊查询返回项：记录本体 + **查询期现算**的存在性（绝不写回 gallery.json）。
 /// path 为现算出的 `.imgtmp` 实际路径（扩展名随厂商返回格式变化），图片已被会话清理时为 None；
-/// 前端据此渲染真图或占位。
+/// 前端据此渲染真图或占位。记录里的 `savedPath`/`savedName` 则是保存动作落下的持久字段。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GalleryItem {

@@ -1,13 +1,12 @@
-//! 画廊记录（`data_dir/gallery.json`）+ 两套独立淘汰闸门 + 查询。
+//! 画廊记录（`.imgtmp/gallery.json`）+ 两套独立淘汰闸门 + 查询。
 //!
-//! 记录持久、图片仅存活于会话临时目录（.imgtmp，启动即清），生命周期独立，淘汰拆成两条互不
-//! 越界的闸门：记录闸门只删 gallery.json 的行、图片闸门只删 .imgtmp 的字节。禁止引入
-//! 「删记录行 + 连带删图」的一体实现——那会让一条闸门越界影响另一条。
+//! 【生命周期】记录与图片同处 `.imgtmp`（聚合布局），但彼此独立：启动清理只删图片、
+//! gallery.json 跨会话保留；淘汰分两条互不越界的闸门——记录闸门只删行、图片闸门只删字节。
+//! 禁止引入「删行 + 连带删图」的一体实现，否则一条闸门会越界影响另一条。
 //!
-//! 【并发】gallery.json 是「read → push → save」的非原子读改写：批量并发下各任务读到同一份
-//! 旧表再整体覆盖写，后写者会丢先写者刚追加的行（json_store::save 的 tmp+rename 只保单文件
-//! 不损坏，不防丢更新）。故用一把模块级互斥把 gallery.json 的 I/O 串行化；互斥只覆盖同步
-//! fs 段、绝不跨 await；不碰 gallery.json 的 enforce_image_limit 不参与加锁。
+//! 【并发】gallery.json 是「read → push → save」的非原子读改写：并发下后写者会覆盖先写者
+//! 刚追加的行（tmp+rename 只保单文件不损坏，不防丢更新）。故用模块级互斥把 I/O 串行化；
+//! 互斥只覆盖同步 fs 段、绝不跨 await；不碰 gallery.json 的 enforce_image_limit 不参与加锁。
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,10 +19,21 @@ use crate::json_store::{self, LoadError};
 use super::config::tmp_dir;
 use super::types::{GalleryItem, GalleryRecord, GenImage, GenRequest};
 
-/// 画廊记录文件：落在 data/ 根、**不在** `.imgtmp` 内——`.imgtmp` 启动即清，
-/// 记录必须留在这里才能跨会话存活。
+/// 画廊记录文件名。它与临时图片共用 `.imgtmp`，故启动清理、图片淘汰、路径扫描都必须
+/// 按名字放行它——否则一条会话清理就会把全部记录删掉。
+pub(super) const GALLERY_FILE: &str = "gallery.json";
+
+/// 画廊记录文件：`{data_dir}/.imgtmp/gallery.json`。
 pub fn gallery_path(d: &Path) -> PathBuf {
-    d.join("gallery.json")
+    tmp_dir(d).join(GALLERY_FILE)
+}
+
+/// 原子写画廊清单（必要时补建 `.imgtmp`：首次生成前目录还不存在）。
+fn write_gallery(path: &Path, recs: &[GalleryRecord]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建画廊目录失败: {e}"))?;
+    }
+    json_store::save(path, &recs)
 }
 
 /// 画廊记录时间戳：`%Y-%m-%d %H:%M:%S`（字典序即时间序）。
@@ -71,17 +81,34 @@ pub fn record_gallery(
                 prompt: req.prompt.clone(),
                 negative_prompt: req.negative_prompt.clone(),
                 template_id: req.template_id.clone().unwrap_or_default(),
+                saved_path: None,
+                saved_name: None,
             });
         }
-        json_store::save(&path, &recs)?;
+        write_gallery(&path, &recs)?;
     }
     // 裁剪另起一次加锁（不嵌套，避免 std Mutex 重入死锁）；只裁行、不碰图。
     enforce_gallery_limit(data_dir, limit)
 }
 
-/// 图片淘汰闸门：`.imgtmp` 内最多保留 mtime 最新的 limit 个文件，超出删除。
-/// 【只碰图片字节】按 mtime 判新旧，不读不写 gallery.json——记录可多于图片（图片被删后
-/// 记录仍在，查询期现算为「无图」）。limit==0 = 不裁剪（与记录闸门同口径，互不换算）。
+/// 保存落点回写：把「另存为 / 保存并替换」的目标路径与文件名写进对应记录（按图 id 匹配）。
+/// 记录已被淘汰或不存在时静默跳过；失败只告警，不阻断保存链路。
+pub fn record_saved_image(data_dir: &Path, image_id: &str, saved: &Path) -> Result<(), String> {
+    let _guard = GALLERY_IO.lock().unwrap();
+    let path = gallery_path(data_dir);
+    let mut recs = read_gallery_inner(&path);
+    let Some(rec) = recs.iter_mut().find(|r| r.id == image_id) else {
+        return Ok(());
+    };
+    rec.saved_path = Some(saved.to_string_lossy().to_string());
+    rec.saved_name = saved.file_name().map(|n| n.to_string_lossy().to_string());
+    write_gallery(&path, &recs)
+}
+
+/// 图片淘汰闸门：`.imgtmp` 内最多保留 mtime 最新的 limit 个**图片**，超出删除。
+/// 【只碰图片字节】按 mtime 判新旧，不读写 gallery.json——记录可多于图片（图被删后记录仍在，
+/// 查询期现算为「无图」）。`gallery.json`（含 `.corrupt` 备份）与图片同目录，必须显式跳过，
+/// 否则记录会被当成「最旧的一张图」删掉。limit==0 = 不裁剪（与记录闸门同口径）。
 pub fn enforce_image_limit(data_dir: &Path, limit: usize) -> Result<(), String> {
     if limit == 0 {
         return Ok(());
@@ -92,7 +119,7 @@ pub fn enforce_image_limit(data_dir: &Path, limit: usize) -> Result<(), String> 
     let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
     for entry in rd.flatten() {
         let p = entry.path();
-        if !p.is_file() {
+        if !p.is_file() || is_gallery_file(&entry.file_name()) {
             continue;
         }
         // 取不到 mtime 的文件不参与裁剪：宁可少删，不可误删新旧不明的图片。
@@ -130,7 +157,13 @@ pub fn enforce_gallery_limit(data_dir: &Path, limit: usize) -> Result<(), String
     // ts 为 "%Y-%m-%d %H:%M:%S"，字典序即时间序；升序后旧的聚在前，裁剪结果确定。
     recs.sort_by(|a, b| a.ts.cmp(&b.ts));
     recs.drain(..recs.len() - limit);
-    json_store::save(&path, &recs)
+    write_gallery(&path, &recs)
+}
+
+/// 是否是画廊记录文件（含损坏备份）：会话清理、图片淘汰、路径扫描都要放行它。
+pub(super) fn is_gallery_file(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name == GALLERY_FILE || name == format!("{GALLERY_FILE}.corrupt")
 }
 
 /// 组装画廊查询结果（最新在前）：逐条现算图片是否仍在 `.imgtmp`。
@@ -142,7 +175,7 @@ pub fn load_gallery_items(data_dir: &Path) -> Vec<GalleryItem> {
     if let Ok(rd) = fs::read_dir(tmp_dir(data_dir)) {
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.is_file() {
+            if p.is_file() && !is_gallery_file(&entry.file_name()) {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                     by_stem.insert(stem.to_string(), p);
                 }
@@ -206,6 +239,8 @@ mod tests {
             prompt: "p".into(),
             negative_prompt: "n".into(),
             template_id: String::new(),
+            saved_path: None,
+            saved_name: None,
         }
     }
 
@@ -347,7 +382,9 @@ mod tests {
 
     #[test]
     fn gallery_record_round_trips_all_fields() {
-        let r = gallery_rec("id1", 0);
+        let mut r = gallery_rec("id1", 0);
+        r.saved_path = Some(r"C:\pack\_generated\2002046242_1.png".into());
+        r.saved_name = Some("2002046242_1.png".into());
         let s = serde_json::to_string(&r).unwrap();
         for key in [
             "\"id\"",
@@ -358,6 +395,8 @@ mod tests {
             "\"prompt\"",
             "\"negativePrompt\"",
             "\"templateId\"",
+            "\"savedPath\"",
+            "\"savedName\"",
         ] {
             assert!(s.contains(key), "序列化缺少字段 {key}: {s}");
         }
@@ -370,11 +409,42 @@ mod tests {
         assert_eq!(back.prompt, r.prompt);
         assert_eq!(back.negative_prompt, r.negative_prompt);
         assert_eq!(back.template_id, r.template_id);
+        assert_eq!(back.saved_path, r.saved_path);
+        assert_eq!(back.saved_name, r.saved_name);
         // 除 id/ts 外均可缺省：精简输入（旧文件）也能解析
         let sparse: GalleryRecord = serde_json::from_str(r#"{"id":"x","ts":"t"}"#).unwrap();
         assert_eq!(sparse.uid, None);
         assert!(sparse.model.is_empty());
         assert!(sparse.template_id.is_empty());
+        // 未保存过的记录不落 savedPath/savedName 两个键（旧文件不受字段演进影响）
+        let raw = serde_json::to_string(&gallery_rec("未保存", 0)).unwrap();
+        assert!(!raw.contains("savedPath"), "{raw}");
+        assert!(!raw.contains("savedName"), "{raw}");
+    }
+
+    #[test]
+    fn record_saved_image_writes_target_path_and_name() {
+        // 保存动作（另存为 / 保存并替换）后：对应记录带上绝对路径与文件名，其它行不动；
+        // 未知 id（记录已被淘汰）静默跳过，不清空既有清单。
+        let dir = tempfile::tempdir().unwrap();
+        let recs = vec![gallery_rec("a", 0), gallery_rec("b", 1)];
+        write_gallery(&gallery_path(dir.path()), &recs).unwrap();
+        let target = Path::new("pack")
+            .join("_generated")
+            .join("2002046242_1.png");
+
+        record_saved_image(dir.path(), "b", &target).unwrap();
+        let after = load_gallery(dir.path());
+        let b = after.iter().find(|r| r.id == "b").unwrap();
+        assert_eq!(
+            b.saved_path.as_deref(),
+            Some(target.to_string_lossy().as_ref())
+        );
+        assert_eq!(b.saved_name.as_deref(), Some("2002046242_1.png"));
+        let a = after.iter().find(|r| r.id == "a").unwrap();
+        assert!(a.saved_path.is_none(), "未保存过的行不应被顺手写入");
+        record_saved_image(dir.path(), "missing", &target).unwrap();
+        assert_eq!(load_gallery(dir.path()).len(), 2, "未知 id 不得改动清单");
     }
 
     #[test]

@@ -9,9 +9,11 @@
   import { appStore, applySnapshot, markRosterFilled, markSnapshotRead, runTask, tip } from "../../stores/app.svelte";
   import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
+  import NationalityEditor from "./NationalityEditor.svelte";
 
   let integrity = $state<IntegrityResult | null>(null); // null = 未检查
   let ruleEditor = $state<{ openEditor: () => void } | null>(null); // 规则编辑对话框实例
+  let nationalityEditor = $state<{ openEditor: () => void } | null>(null); // 国籍对照表对话框实例
 
   // 展示态统一取自 store getter：核心规则单点维护，busy / browseMode 全局一致
   const snap = $derived(appStore.displaySnapshot);
@@ -281,21 +283,36 @@
         </p>
       {/if}
     {/if}
-    <!-- 标准规则入口：顶部分隔线另起一行，打开规则编辑对话框（RuleEditor） -->
+    <!-- 可编辑数据入口：标准规则（RuleEditor）与国籍对照表（NationalityEditor）同居一行，
+         两者都是 json 配置，只是打开不同的编辑对话框 -->
     <div class="rule-row">
-      <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy} use:tip={t.setup.ruleConfigHint}
-        >{t.setup.ruleConfigBtn}</button
-      >
-      <span class="note">{t.setup.ruleConfigNote}</span>
+      <div class="rule-actions">
+        <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy} use:tip={t.setup.ruleConfigHint}
+          >{t.setup.ruleConfigBtn}</button
+        >
+        <button
+          class="btn"
+          onclick={() => nationalityEditor?.openEditor()}
+          disabled={busy}
+          use:tip={t.setup.nationalityConfigHint}>{t.setup.nationalityConfigBtn}</button
+        >
+      </div>
     </div>
   </div>
 {/if}
 
 <RuleEditor bind:this={ruleEditor} />
+<NationalityEditor bind:this={nationalityEditor} />
 
 <style>
   /* 完整性详情长句：贴在状态胶囊行下方的弱化说明（与 .statusline 的行距同档） */
   .sub-note {
     margin: var(--sp-2) 0 0;
+  }
+  /* 规则配置 / 国籍对照表两个按钮同排；间距比 .rule-row 的通用 gap 更紧凑 */
+  .rule-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
   }
 </style>

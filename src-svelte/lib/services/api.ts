@@ -8,7 +8,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, GalleryItem, GenImage, GenRequest, SaveReplaceResult, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
-  PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
+  NationalityDoc, PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
@@ -52,6 +52,10 @@ export const api = {
   readRuleFile: (name: 'standard2' | 'standard3') => invoke<string>('read_rule_file', { name }),
   // 保存标准规则文件（保存时后端先按该标准 schema 校验）。
   saveRuleFile: (name: 'standard2' | 'standard3', content: string) => invoke<void>('save_rule_file', { name, content }),
+  // 读取国籍对照表（data/nationalities.json 的用户副本；缺失时返回出厂默认）。
+  getNationalities: () => invoke<NationalityDoc>('get_nationalities'),
+  // 保存国籍对照表：后端校验（码格式/语言归属/同语言全称唯一）后原子写盘并立即生效。
+  saveNationalities: (doc: NationalityDoc) => invoke<NationalityDoc>('save_nationalities', { doc }),
   // 按给定的缺失目录名在头像包内批量补齐目录结构。
   createMissingDirs: (imgDir: string, names: string[]) => invoke<void>('create_missing_dirs', { imgDir, names }),
   // startReplace 的参数包在 { args: params } 里，对应 Rust 端函数参数名 args: ReplaceArgs。

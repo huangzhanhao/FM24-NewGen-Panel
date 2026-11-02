@@ -17,6 +17,7 @@ mod image_ai; // AI 文生图：契约/配置/模板渲染/生成编排/画廊�
 mod image_ai_providers; // AI 文生图适配器族（openai/volcano/dashscope/siliconflow/modelscope/comfyui 协议适配）
 mod json_store; // JSON 配置的原子读写
 mod logger; // 日志系统（log 门面 + 官方插件管道；自研内存缓冲与批量事件见模块头）
+mod nationality; // 国籍对照表（三字码 ↔ 各语言全称；出厂默认 + data/nationalities.json 用户副本）
 mod paging; // 通用分页契约（日志/名单/快照预览共用 total+items）
 mod paths; // 路径规范化工具
 mod profile_manager; // 存档（Profile）与头像包（组）管理
@@ -280,6 +281,16 @@ pub fn run() {
             if let Err(e) = templates::ensure_user_files(&data_dir) {
                 logger.warn("rules", format!("导出标准规则默认文件失败: {e}"));
             }
+            // 5.6) 国籍对照表：同上，导出 data/nationalities.json 并安装为进程内当前表。
+            // 【损坏不阻断启动】改坏 json 时用出厂默认继续跑、错误进日志；
+            // 打开「国籍对照表」编辑器或扫描/替换会再次读盘并给出明确报错。
+            if let Err(e) = nationality::ensure_user_file(&data_dir) {
+                logger.warn("nationality", format!("导出国籍对照表默认文件失败: {e}"));
+            }
+            match nationality::load(&data_dir) {
+                Ok(table) => nationality::install(std::sync::Arc::new(table)),
+                Err(e) => logger.warn("nationality", format!("读取国籍对照表失败，本次使用出厂默认：{e}")),
+            }
 
             // 6) app.manage(...) 把全局状态交给 Tauri 托管：之后任何命令函数只需在参数里写
             //    State<'_, AppState>，Tauri 就会自动把这个状态传进去。
@@ -330,6 +341,8 @@ pub fn run() {
             commands::preview_profile, // 预览指定存档（下拉浏览展示，不切换当前档）
             commands::read_rule_file,  // 读取标准规则文件内容（规则编辑对话框）
             commands::save_rule_file,  // 保存标准规则文件（先校验 schema 再原子写回）
+            commands::get_nationalities, // 读取国籍对照表（三字码 ↔ 各语言全称，编辑器数据源）
+            commands::save_nationalities, // 保存国籍对照表（校验 + 原子写盘 + 立即生效）
             commands::preflight_replace, // 发起前预检：本次会不会清空本档既有映射（需要就先弹确认）
             commands::start_replace,   // 启动批量替换（后台线程）
             commands::cancel_replace,  // 请求取消正在进行的替换

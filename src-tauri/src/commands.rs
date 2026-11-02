@@ -17,6 +17,7 @@ use crate::facepack_scanner::{self, IntegrityResult, PackScan, PackSig};
 use crate::image_ai::{self, gen_queue, Config};
 use crate::json_store;
 use crate::logger::{LogPage, LogSink, Logger};
+use crate::nationality::{self, NationalityDoc};
 use crate::profile_manager::ProfileManager;
 use crate::replace_flow::{self, Outcome, ReplaceParams};
 use crate::rtf_scanner::{PlayerRecord, RosterCounts, RosterSummary, RtfScanner};
@@ -453,10 +454,12 @@ fn layout_label(standard: u8, config: &RuleConfig) -> String {
 /// 「N 个人 → N 张脸」，行消失了必须在日志里看得见，否则用户以为名单本来就只有这么短。
 fn scan_rtf_core(
     rtf_path: &str,
+    nat: Arc<nationality::NationalityTable>,
     logger: &impl LogSink,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(RosterSummary, Vec<PlayerRecord>, RosterCounts), String> {
-    let mut scanner = RtfScanner::new();
+    // 用调用方刚读盘的那份表构造扫描器：本轮解析与「国籍对照表当前版本」严格一致。
+    let mut scanner = RtfScanner::with_nationality(nat);
     scanner.detect_format(Path::new(rtf_path), logger)?;
     // filter=false：展示全量名单（替换流程才按「仅随机人」过滤）；按钮无取消入口，故传恒 false 的标志。
     let (data, counts) =
@@ -510,10 +513,13 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
     if rtf.is_empty() {
         return Err("请先选择 RTF 名单".into());
     }
+    // 扫描前重读国籍对照表：手改 data/nationalities.json 后无需重启；文件改坏时直接报错，
+    // 不拿上一次的表静默解析出一份缺行的名单。
+    let nat = nationality::refresh(&state.data_dir)?;
     // 进度以「数据行」为单位（解析前先数一遍行数拿到分母，见 parse_roster_progress）。
     let mut progress = TaskProgress::new(&app, "扫描RTF");
     let t = Instant::now(); // 解析耗时（识别 + 全量解析），与替换流水线同一段同口径
-    let (summary, data, counts) = scan_rtf_core(&rtf, &*state.logger, &mut |done, total| progress.report(done, total))?;
+    let (summary, data, counts) = scan_rtf_core(&rtf, nat, &*state.logger, &mut |done, total| progress.report(done, total))?;
     *state.rtf_cache.lock().unwrap() = data; // 名单预览（query_players）直接读这份缓存（全字段）
     state.logger.info(
         "scan",
@@ -859,7 +865,9 @@ pub fn start_replace(app: AppHandle, state: State<'_, AppState>, args: ReplaceAr
         return Err("请先选择 RTF 名单".into());
     }
     let mode = Mode::parse(&args.mode)?;
-    // 加载标准规则配置（data/rules/standardN.json，用户改坏 json → 报错中止，错误含文件路径）。
+    // 加载国籍对照表与标准规则配置（都是用户可编辑 json，改坏 → 报错中止且错误含路径）。
+    // 对照表 Arc 交给 ReplaceParams：本轮解析固定用这份表，不受之后并发的保存影响。
+    let nationality_table = nationality::refresh(&state.data_dir)?;
     let rule_config = RuleConfig::load(&state.data_dir)?;
     // 「扫描头像」缓存命中同一目录**且目录签名一致**时才复用其索引（避免重复扫盘）；
     // 切组即失效；签名不一致（包内图片被增删改名）也重扫——宁可慢几秒，也不拿过期索引
@@ -876,6 +884,7 @@ pub fn start_replace(app: AppHandle, state: State<'_, AppState>, args: ReplaceAr
         // 保留/覆写的判据是本档本组的存档快照，不是包里的 live config.xml（live 全档共享，会残留别档内容）。
         source_xml: snapshot_path.clone(),
         rule_config,
+        nationality: nationality_table,
     };
     // 句柄交给 ctx（Arc::clone 只涨引用计数）；running 守卫一起搬进线程，返回（正常或 unwind）时复位。
     let ctx = ReplaceCtx {
@@ -1492,6 +1501,45 @@ pub fn save_rule_file(state: State<'_, AppState>, name: String, content: String)
     Ok(())
 }
 
+/// 读取国籍对照表（编辑器数据源）：入口先重读盘，手改 data/nationalities.json 后打开编辑器即见。
+/// 读不出来（json 损坏）只记警告并返回当前生效表（启动时已回退默认），不阻断打开编辑器修复。
+/// 【注意】此时编辑器看到的是生效表而非磁盘内容，点保存会覆盖损坏文件；原文已由
+/// json_store::load 备份为 `nationalities.json.corrupt`，可据此找回。
+#[tauri::command]
+pub fn get_nationalities(state: State<'_, AppState>) -> NationalityDoc {
+    match nationality::refresh(&state.data_dir) {
+        Ok(table) => table.doc(),
+        Err(e) => {
+            state.logger.warn(
+                "nationality",
+                format!("读取国籍对照表失败，编辑器显示当前生效表：{e}"),
+            );
+            nationality::current().doc()
+        }
+    }
+}
+
+/// 保存国籍对照表：校验（码格式 / 语言归属 / 同语言全称唯一 / 至少一条）→ 原子写盘 →
+/// 换成进程内当前表，下一次扫描、替换、提示词预览即用新映射，无需重启。
+/// 校验或写盘失败时原文件保持不变，错误文案由前端直接弹窗展示。
+/// 【不重算既有产物】刻意不刷 `rtf_cache`、不回写 config.xml：重解析上万行会让保存卡住，
+/// 也不该悄悄改写已生成的映射。改表后需重新「扫描RTF」/「替换头像」才见新口径。
+#[tauri::command]
+pub fn save_nationalities(
+    state: State<'_, AppState>,
+    doc: NationalityDoc,
+) -> Result<NationalityDoc, String> {
+    let table = nationality::save_doc(&state.data_dir, doc)?;
+    let saved = table.doc();
+    let (codes, mappings) = (table.code_count(), table.mapping_count());
+    nationality::install(Arc::new(table));
+    state.logger.info(
+        "nationality",
+        format!("国籍对照表已保存：{codes} 个国籍码、{mappings} 条映射"),
+    );
+    Ok(saved)
+}
+
 /// 读取预览图片字节：WebView 无权读本地磁盘，故由 Rust 读出并以二进制响应（ArrayBuffer）返回，前端转 blob URL 显示。
 #[tauri::command]
 pub fn read_image(path: String) -> Result<tauri::ipc::Response, String> {
@@ -1712,6 +1760,11 @@ pub fn save_generated_image(
         return Err("源图片已失效（临时目录已清理）".into());
     }
     json_store::copy_atomic(&src, Path::new(&target_path))?;
+    // 保存落点（路径 + 文件名）回写画廊记录，让「另存为」也有可追溯的最终位置。
+    // 失败只告警——文件已安全落盘，不能因记录写不进去就报保存失败。
+    if let Err(e) = image_ai::record_saved_image(&state.data_dir, &image_id, Path::new(&target_path)) {
+        state.logger.warn("image_ai", format!("保存落点写入画廊记录失败（{image_id}）: {e}"));
+    }
     state.logger.info("image_ai", format!("生成图另存：{target_path}"));
     Ok(target_path)
 }
@@ -1836,6 +1889,10 @@ pub fn save_and_replace(
     // ⑤ 目标路径：命名模板展开 + 同名避让（见 next_free_target）；生成图统一 png。
     let target = next_free_target(&gen_dir, &pattern, &uid)?;
     json_store::copy_atomic(&src, &target)?;
+    // ⑤.5 保存落点回写画廊记录（路径 + 文件名）。失败只告警，不阻断保存/替换。
+    if let Err(e) = image_ai::record_saved_image(&state.data_dir, &image_id, &target) {
+        state.logger.warn("image_ai", format!("保存落点写入画廊记录失败（{image_id}）: {e}"));
+    }
     // ⑥ 复用单人换脸全链：互斥/快照归位/改 config.xml/同步 mapping_cache 与存档快照全部继承。
     //    命中与否必须上报：图片已安全落盘，但没命中＝映射一行都没改，报「成功」会让用户
     //    以为换上了，回头在名单/快照预览里找不到新头像（replaced=false 由前端换成警告文案）。
@@ -2042,7 +2099,9 @@ mod tests {
         )
         .unwrap();
         let logger = ChannelLogger::channel().0;
-        let (summary, data, _) = scan_rtf_core(rtf.to_str().unwrap(), &logger, &mut |_, _| {}).unwrap();
+        let nat = nationality::current();
+        let (summary, data, _) =
+            scan_rtf_core(rtf.to_str().unwrap(), Arc::clone(&nat), &logger, &mut |_, _| {}).unwrap();
         assert_eq!(summary.total, 2);
         assert_eq!(summary.newgan, 2); // 两条 UID 均带 r- 前缀
         assert!(!summary.detailed); // 基础名单无拓展信息
@@ -2052,8 +2111,39 @@ mod tests {
         // 非法 RTF → Err，文案带「RTF 格式不合法」
         let bad = dir.path().join("bad.rtf");
         std::fs::write(&bad, "乱七八糟没有数据行").unwrap();
-        let err = scan_rtf_core(bad.to_str().unwrap(), &logger, &mut |_, _| {}).err().unwrap();
+        let err = scan_rtf_core(bad.to_str().unwrap(), nat, &logger, &mut |_, _| {})
+            .err()
+            .unwrap();
         assert!(err.contains("RTF 格式不合法"), "{err}");
+    }
+
+    #[test]
+    fn scan_rtf_core_uses_provided_nationality_table() {
+        // 命令核心必须把传入的对照表交给扫描器：同一行「火星」在出厂默认下非法，
+        // 注入自定义表后应解析成 ESP。防止未来改回 RtfScanner::new()。
+        let dir = tempfile::tempdir().unwrap();
+        let rtf = dir.path().join("list.rtf");
+        std::fs::write(
+            &rtf,
+            "| 编号      | 国籍/地区籍 | 第二国籍 | 姓名   |    |    |   |\n\
+             | 2000472008| 火星       |          | 火星人 | 1  | 12 | 1 |\n",
+        )
+        .unwrap();
+        let doc = NationalityDoc {
+            languages: vec!["English".into(), "简体中文".into()],
+            mappings: vec![nationality::NationalityMapping {
+                code: "ESP".into(),
+                language: "简体中文".into(),
+                name: "火星".into(),
+            }],
+        };
+        let table = Arc::new(nationality::NationalityTable::from_doc(doc).unwrap());
+        let logger = ChannelLogger::channel().0;
+        let (summary, data, _) =
+            scan_rtf_core(rtf.to_str().unwrap(), table, &logger, &mut |_, _| {}).unwrap();
+        assert_eq!(summary.language, "简体中文");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].primary_nat, "ESP");
     }
 
     #[test]

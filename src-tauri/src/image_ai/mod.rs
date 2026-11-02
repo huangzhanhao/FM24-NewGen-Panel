@@ -33,10 +33,9 @@ mod validate;
 
 pub mod gen_queue;
 
-// 【为什么下面几组重导出带 allow(unused_imports)】本文件是门面：重导出面刻意宽于 crate 内部
-// 当前用量——它是 `crate::image_ai::X` 这套既有调用面的稳定契约（含仅由单测/本模块内部消费的
-// 条目）。`mod image_ai` 本身是私有模块，因此「内部未使用」的条目会被 lint 判为未使用导入，
-// 但删掉它们就破坏了拆分前后逐字不变的调用面。
+// 【为什么下面几组重导出带 allow(unused_imports)】门面重导出面刻意宽于 crate 内部用量——它是
+// `crate::image_ai::X` 这套既有调用面的稳定契约（含仅由单测/本模块消费的条目）。`mod image_ai`
+// 私有，故「内部未使用」会被 lint 判为未使用导入，但删掉就破坏了拆分前后逐字不变的调用面。
 #[allow(unused_imports)] // 见上：门面契约面宽于内部用量
 pub use config::{
     providers_path, remove_provider, remove_template, templates_path, tmp_dir, upsert_provider,
@@ -47,7 +46,7 @@ pub use config::{
 #[allow(unused_imports)] // 见上：门面契约面宽于内部用量
 pub use gallery::{
     enforce_gallery_limit, enforce_image_limit, gallery_path, load_gallery_items, now_ts,
-    record_gallery,
+    record_gallery, record_saved_image,
 };
 
 // ---- 生成编排 ---------------------------------------------------------------------------------

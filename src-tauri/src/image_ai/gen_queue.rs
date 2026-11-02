@@ -13,11 +13,11 @@
 //!
 //! 【锁纪律】队列状态是 `Arc<Mutex<QueueState>>`（std Mutex）：所有读写都是
 //! 「短锁」（lock → 改 → 立即 unlock），锁内绝不 await，仿 commands.rs 的既有纪律。
-//! 【并发控制】不引新依赖：用 `Arc<Mutex<u8>>` 占位计数 + 主循环 50ms 轮询空位
+//! 【并发控制】不引新依赖：`Arc<Mutex<u8>>` 占位计数 + 主循环 50ms 轮询空位
 //! （等待用 `spawn_blocking + thread::sleep`，与 dashscope 轮询同款）。
 
-use crate::image_ai;
 use super::types::{CancelToken, GenStage};
+use crate::image_ai;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,8 +33,8 @@ const SLOT_POLL: Duration = Duration::from_millis(50);
 
 /// 单条任务的最大尝试次数（1 次首发 + 2 次重试）。仅对 `retryable` 错误重试。
 /// 【单条目最坏墙钟口径】= 尝试数 × 单次尝试耗时 + 退避之和；单次尝试耗时随厂商不同
-/// （异步厂商含 submit + 轮询预算 + 在途 GET，见 dashscope 轮询处注释），退避由
-/// [`backoff_delay`] 给出（2s + 4.25s，若带 `Retry-After` 则各档可到 30s 上限）。
+/// （异步厂商含 submit + 轮询预算 + 在途 GET，见 dashscope 轮询处），退避见
+/// [`backoff_delay`]（2s + 4.25s，带 `Retry-After` 时各档可到 30s 上限）。
 const MAX_ATTEMPTS: u32 = 3;
 
 /// 重试退避纯函数：`2s × 2^n`（n = 已重试次数，从 0 起）+ 确定性抖动，单次上限 30s；
@@ -293,9 +293,9 @@ impl Sleeper for RealSleeper {
 /// 入队前的整批校验：逐条做厂商无关完整性 + 协议约束校验，任一条不合规则整批拒绝。
 /// 【为什么放这里】「不合规入队即失败、从不发出 HTTP」是队列的准入契约；add_to_queue 在取
 /// queue 锁之前调用本函数，保证不合规时队列内容完全不变。
-/// 【为什么只调两个既有函数】两层校验的口径（完整性 + 协议约束）已由 `validate_complete` 与
-/// `validate_for_generate` 各自收口；此处重复查询服务商/模型并自组探针等于把同一份判据抄第二份，
-/// 一旦 `generate` 调整探针形状就会与入队校验悄悄分叉。
+/// 【为什么只调两个既有函数】两层口径已由 `validate_complete` 与 `validate_for_generate`
+/// 各自收口；此处重查服务商/模型并自组探针等于抄第二份判据，`generate` 一改探针形状就会
+/// 与入队校验悄悄分叉。
 pub fn validate_entries(
     cfg: &image_ai::Config,
     entries: &[QueueEntry],
@@ -317,12 +317,12 @@ pub struct QueueEditArg {
 ///
 /// 【为什么这里不校验参数合法性】写回的只是「用户在原有表单里核对过的那份参数」，一份坏参数
 /// 不会悄悄发出去：`start_queue` 之前的 [`validate_entries`] 会整批拦下不合规条目，执行期
-/// `validate_for_generate` 再按厂商能力位判一次。在这里另抄一套硬性下限等于养第二份判据——
-/// 前端放行而后端拒绝只会变成「确认点不动、又看不出哪项错」的死路。
+/// `validate_for_generate` 再按厂商能力位判一次。另抄一套硬性下限等于养第二份判据——前端放行
+/// 而后端拒绝只会变成「确认点不动、又看不出哪项错」的死路。
 /// 【整批一次性写入】调用方（`update_queue_entries`）持队列锁跑完整个批次，对本进程其他 IPC
 /// 而言这批写回是原子的：不会出现「改了一半」被 `query_queue` 读到的中间态。
-/// 【身份字段】`uid`/`name`/`template_id` 以入队时的值为准（前端传空即保留队列原值）：
-/// 它们决定画廊归属，不属于这次可改的生成参数。
+/// 【身份字段】`uid`/`name`/`template_id` 以入队时的值为准（前端传空即保留队列原值），它们
+/// 决定画廊归属，不属于这次可改的生成参数。
 pub fn apply_queue_edits(entries: &mut [QueueEntry], edits: &[QueueEditArg]) -> usize {
     let is_blank = |v: &Option<String>| v.as_deref().unwrap_or("").trim().is_empty();
     let mut applied = 0usize;
@@ -396,9 +396,9 @@ struct EntryCtx {
 /// - 并发上限 `concurrency`（0 视为 1）：主循环派发即占位（[`SlotGuard`] 计数），任务收尾由
 ///   `Drop` 释放（panic 也照样释放）；空位不足时 50ms 轮询等待。占位在派发侧而非任务开头——
 ///   spawn 到任务真正起跑之间有调度窗口，若等任务自己占位，主循环会在窗口里超发。
-/// - cancel==true 时：尚未派发的条目直接置 Failed(「已取消」)，在跑的等它自然收尾。
-///   开跑时先把 cancel 复位 false（上一次运行遗留的标志不该取消这一次）。取消同样对
-///   「执行期重试」生效：退避结束后不再发起新一次重试（见任务体内重试循环）。
+/// - 取消令牌在开跑时先复位（上一轮遗留的标志不该取消这一轮），置位后：尚未派发的条目直接置
+///   Failed(「已取消」)，在跑的等它自然收尾。取消同样对「执行期重试」生效：退避结束后不再发起
+///   新一次重试（见任务体内重试循环）。
 /// - 每条任务开始/成功/失败都发 `gen:queue:progress`；全部收尾后发 `gen:queue:finished`。
 ///   事件里的 `current` 是**已完成数**（终态条目累计，非派发序号）；运行中另有阶段事件
 ///   （`stage` = submitting/polling/downloading），由适配器回调触发、按「阶段」去重。
@@ -422,8 +422,9 @@ pub async fn run_queue(
         let mut st = state.lock().unwrap();
         st.cancel.reset();
         let cancel = st.cancel.clone();
-        let allow: Option<std::collections::HashSet<&str>> =
-            only.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        let allow: Option<std::collections::HashSet<&str>> = only
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         let ids: Vec<String> = st
             .entries
             .iter()
@@ -508,7 +509,9 @@ pub async fn run_queue(
         let slot = SlotGuard::acquire(&in_flight);
         handles.push((
             handle_id,
-            tauri::async_runtime::spawn(async move { run_entry(&task_ctx, id, uid, req, slot).await }),
+            tauri::async_runtime::spawn(
+                async move { run_entry(&task_ctx, id, uid, req, slot).await },
+            ),
         ));
     }
 
@@ -522,7 +525,7 @@ pub async fn run_queue(
             Err(_) => {
                 // 任务 panic：兜底只针对**本次 Err 对应的那一条 id**（handle 收集时已带上 id）——
                 // 任务 panic 时 JoinHandle 收不到返回值，无法从结果里拿 id。并发 > 1 时兄弟条目
-                // 仍在正常跑，若扫全部 Running 会把它们一并误标 Failed(Internal) 并多计 completed
+                // 仍在正常跑，扫全部 Running 会把它们一并误标 Failed(Internal) 并多计 completed
                 // （进度可显示「已完成 > 总数」）。找不到或已非 Running（兄弟已自行收尾）则不计数。
                 let marked = {
                     let mut st = state.lock().unwrap();
@@ -608,7 +611,11 @@ async fn run_entry(
         });
     };
 
-    let key = ctx.keys.get(&req.provider_id).map(|s| s.as_str()).unwrap_or("");
+    let key = ctx
+        .keys
+        .get(&req.provider_id)
+        .map(|s| s.as_str())
+        .unwrap_or("");
     // 失败行标签：有球员名带名（日志里一眼认出是谁），没有则只记 uid。
     let label = match req.name.as_deref().filter(|n| !n.trim().is_empty()) {
         Some(name) => format!("{name}（{uid}）"),
@@ -637,7 +644,14 @@ async fn run_entry(
         }
         let executed = ctx
             .executor
-            .execute(&ctx.data_dir, &ctx.cfg, key, &req, &progress_cb, &ctx.cancel)
+            .execute(
+                &ctx.data_dir,
+                &ctx.cfg,
+                key,
+                &req,
+                &progress_cb,
+                &ctx.cancel,
+            )
             .await
             // 厂商 401 常把被拒的 Key 抄进 message，而这条文案会进日志（用户贴日志
             // 求助时等于公开）：在留痕/展示之前统一抹掉，单点覆盖全部适配器。
@@ -939,7 +953,7 @@ mod tests {
     }
 
     /// 睡眠替身：记录每次退避时长、绝不真睡（否则重试测试会真等数秒到分钟）。
-    /// 记录序列同时用于断言「退避公式」与「是否根本不重试（序列为空）」。
+    /// 记录序列同时用于断言「退避公式」与「是否根本不重试（序列为空）」；
     /// hook 在每次「睡觉」时执行，供「退避期间触发取消」这类时序测试注入副作用。
     #[derive(Default)]
     struct RecordingSleeper {
@@ -1093,26 +1107,48 @@ mod tests {
     #[test]
     fn run_queue_only_runs_selected_entries() {
         // 按勾选启动：只跑传进来的 id，其余排队条目必须原样留在队列里（下一批还能跑）。
-        let h = Harness::new(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+        let h = Harness::new(vec![
+            entry("u1", "甲"),
+            entry("u2", "乙"),
+            entry("u3", "丙"),
+        ]);
         let ids: Vec<String> = h.snapshot().iter().map(|e| e.id.clone()).collect();
         let stub = Arc::new(StubExecutor::new(vec![]));
-        let (finished, failed, total) =
-            h.run_only(Arc::clone(&stub) as Arc<dyn GenExecutor>, vec![ids[1].clone()]);
+        let (finished, failed, total) = h.run_only(
+            Arc::clone(&stub) as Arc<dyn GenExecutor>,
+            vec![ids[1].clone()],
+        );
 
-        assert_eq!((finished, failed, total), (1, 0, 1), "总数只含本次提交的条目");
+        assert_eq!(
+            (finished, failed, total),
+            (1, 0, 1),
+            "总数只含本次提交的条目"
+        );
         assert_eq!(
             h.statuses(),
-            vec![QueueStatus::Queued, QueueStatus::Success, QueueStatus::Queued],
+            vec![
+                QueueStatus::Queued,
+                QueueStatus::Success,
+                QueueStatus::Queued
+            ],
             "未选中的条目保持排队"
         );
-        assert_eq!(*stub.calls.lock().unwrap(), vec!["u2"], "只有选中的那条被执行");
+        assert_eq!(
+            *stub.calls.lock().unwrap(),
+            vec!["u2"],
+            "只有选中的那条被执行"
+        );
     }
 
     #[test]
     fn run_queue_marks_terminal_state_and_backfills_images() {
         // 场景一：全成功。并发 1 与 0（缺省归一为 1，避免除零/挂起）两种输入断言一致。
         for concurrency in [1, 0] {
-            let h = Harness::new(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+            let h = Harness::new(vec![
+                entry("u1", "甲"),
+                entry("u2", "乙"),
+                entry("u3", "丙"),
+            ]);
             // 上一次运行遗留的取消标志：run 开始时必须复位，否则这批全被误杀。
             h.state.lock().unwrap().cancel.cancel();
             let stub = Arc::new(StubExecutor::new(vec![]));
@@ -1141,7 +1177,11 @@ mod tests {
         }
 
         // 场景二：中间条目以厂商错误收尾，前后条目照常跑完（批次不因单条失败中断）。
-        let h = Harness::new(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+        let h = Harness::new(vec![
+            entry("u1", "甲"),
+            entry("u2", "乙"),
+            entry("u3", "丙"),
+        ]);
         let stub = Arc::new(StubExecutor::new(vec![
             Ok(blank_result()),
             Err(image_ai::ImageGenError::new(
@@ -1206,7 +1246,11 @@ mod tests {
     fn run_queue_cancel_stops_dispatch_and_retry_but_keeps_submitted_result() {
         // 场景一：尚未派发的条目直接判「已取消」。首条执行期间置位取消——并发 1 下 u2/u3 必在
         // 派发前看到标志，断言因此确定（在跑的 u1 已提交，等它自然收尾）。
-        let h = Harness::new(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+        let h = Harness::new(vec![
+            entry("u1", "甲"),
+            entry("u2", "乙"),
+            entry("u3", "丙"),
+        ]);
         let stub = Arc::new(StubExecutor::new(vec![]));
         {
             let st = Arc::clone(&h.state);
@@ -1226,7 +1270,11 @@ mod tests {
             assert_eq!(e.error_kind, Some(image_ai::GenErrorKind::Cancelled));
             assert_eq!(e.attempts, 0, "从未执行过的取消条目 attempts 保持 0");
         }
-        assert_eq!(*stub.calls.lock().unwrap(), vec!["u1"], "只有 u1 真正执行过");
+        assert_eq!(
+            *stub.calls.lock().unwrap(),
+            vec!["u1"],
+            "只有 u1 真正执行过"
+        );
 
         // 场景二：退避期间取消 ⇒ 不再发起这次重试（一次重试即一次新的派发）；
         // attempts 保留已真实发生的 1 次，不回零也不虚增。
@@ -1245,7 +1293,11 @@ mod tests {
 
         assert_eq!((finished, failed, total), (0, 1, 1));
         assert_eq!(stub.calls.lock().unwrap().len(), 1, "取消后不得再发起重试");
-        assert_eq!(h.slept(), vec![Duration::from_millis(2000)], "退避发生过一次");
+        assert_eq!(
+            h.slept(),
+            vec![Duration::from_millis(2000)],
+            "退避发生过一次"
+        );
         let snap = h.snapshot();
         assert_eq!(snap[0].status, QueueStatus::Failed);
         assert_eq!(snap[0].error, "已取消");
@@ -1280,7 +1332,11 @@ mod tests {
     fn run_queue_records_active_batch_and_spares_unselected_queue() {
         // run_queue 必须把「本批次实际派发的条目 id」写进 QueueState.active：cancel_queue 只落
         // 这批 id，未参与本批次的排队条目必须原样留在队列里。这里把该写入做成断言。
-        let h = Harness::new(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+        let h = Harness::new(vec![
+            entry("u1", "甲"),
+            entry("u2", "乙"),
+            entry("u3", "丙"),
+        ]);
         let ids: Vec<String> = h.snapshot().iter().map(|e| e.id.clone()).collect();
         let stub = Arc::new(StubExecutor::new(vec![]));
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1307,7 +1363,11 @@ mod tests {
             "active 必须记录本批次派发的 id，且不含未勾选的丙"
         );
         let snap = h.snapshot();
-        assert_eq!(snap[0].status, QueueStatus::Success, "已派发即已提交，取消不中断");
+        assert_eq!(
+            snap[0].status,
+            QueueStatus::Success,
+            "已派发即已提交，取消不中断"
+        );
         assert_eq!(snap[1].status, QueueStatus::Failed);
         assert_eq!(snap[1].error, "已取消");
         assert_eq!(snap[1].error_kind, Some(image_ai::GenErrorKind::Cancelled));
@@ -1577,7 +1637,11 @@ mod tests {
         let h = Harness::new(vec![entry("panic", "甲"), entry("ok", "乙")]);
         let (finished, failed, total) =
             run_with_timeout(&h, Arc::new(PanicFirst), 1, Duration::from_secs(15));
-        assert_eq!((finished, failed, total), (1, 1, 2), "panic 计失败，兄弟仍应跑完");
+        assert_eq!(
+            (finished, failed, total),
+            (1, 1, 2),
+            "panic 计失败，兄弟仍应跑完"
+        );
         assert_eq!(h.statuses(), [QueueStatus::Failed, QueueStatus::Success]);
         // panic 兜底文案只落在本条；兄弟的回填与计数不受影响。
         assert_eq!(h.snapshot()[0].error, "任务异常退出");
@@ -1640,8 +1704,6 @@ mod tests {
 
     // ===================== 入队整批校验（不合规即整批拒绝） =====================
 
-    // ===================== 入队整批校验（不合规即整批拒绝） =====================
-
     #[test]
     fn validate_entries_rejects_whole_batch_on_one_bad_entry() {
         let cfg = image_ai::Config::builtin();
@@ -1666,7 +1728,11 @@ mod tests {
         // 队列里 3 条排队，但本批次只派发了「甲」：取消只能落甲。乙丙是用户没勾选的排队条目，
         // 被一起标成「已取消」就等于凭空弄丢了他们没参与本批的任务。
         let mut q = QueueState::default();
-        q.add(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+        q.add(vec![
+            entry("u1", "甲"),
+            entry("u2", "乙"),
+            entry("u3", "丙"),
+        ]);
         let ids: Vec<String> = q.entries.iter().map(|e| e.id.clone()).collect();
         q.active = vec![ids[0].clone()];
 
@@ -1678,9 +1744,16 @@ mod tests {
             Some(image_ai::GenErrorKind::Cancelled),
             "已取消带 Cancelled 类别（前端据此隐藏「重试本条」）"
         );
-        assert_eq!(q.entries[0].attempts, 0, "从未执行过的取消条目 attempts 保持 0");
+        assert_eq!(
+            q.entries[0].attempts, 0,
+            "从未执行过的取消条目 attempts 保持 0"
+        );
         for e in &q.entries[1..] {
-            assert_eq!(e.status, QueueStatus::Queued, "未参与本批次的排队条目照常排队");
+            assert_eq!(
+                e.status,
+                QueueStatus::Queued,
+                "未参与本批次的排队条目照常排队"
+            );
             assert!(e.error.is_empty());
             assert!(e.error_kind.is_none());
         }
@@ -1703,7 +1776,11 @@ mod tests {
     #[test]
     fn apply_queue_edits_writes_queued_only() {
         let mut q = QueueState::default();
-        q.add(vec![entry("u1", "甲"), entry("u2", "乙"), entry("u3", "丙")]);
+        q.add(vec![
+            entry("u1", "甲"),
+            entry("u2", "乙"),
+            entry("u3", "丙"),
+        ]);
         // 场景构造：甲排队（应被改）、乙在跑、丙已成功；另有一条不存在的 id。
         q.entries[1].status = QueueStatus::Running;
         q.entries[2].status = QueueStatus::Success;
@@ -1731,7 +1808,11 @@ mod tests {
         assert_eq!(q.entries[0].req.prompt, "新提示词");
         assert_eq!(q.entries[0].req.size, "512x512");
         assert_eq!(q.entries[0].req.n, 2);
-        assert_eq!(q.entries[0].req.uid.as_deref(), Some("u1"), "uid 保留入队时的值");
+        assert_eq!(
+            q.entries[0].req.uid.as_deref(),
+            Some("u1"),
+            "uid 保留入队时的值"
+        );
         assert_eq!(q.entries[0].req.name.as_deref(), Some("甲"));
         assert_eq!(q.entries[0].status, QueueStatus::Queued, "写参数不动状态");
         assert_eq!(q.entries[1].req.prompt, "一张脸", "在跑条目原样");

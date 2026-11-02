@@ -373,7 +373,9 @@ async function loadGalleryRecords() {
         url = '';
       }
     }
-    recs.push({ id: it.id, path: it.path ?? '', url, imageAvailable: it.imageAvailable, removable: false });
+    // savedPath/savedName 来自 GalleryItem（Rust 的 #[serde(flatten)] 把记录字段平铺到顶层）；
+    // 后端对从未保存过的记录省略该键，这里统一收敛成 null，渲染端只判空。
+    recs.push({ id: it.id, path: it.path ?? '', url, imageAvailable: it.imageAvailable, removable: false, savedPath: it.savedPath ?? null, savedName: it.savedName ?? null });
   }
   imageaiStore.records = recs;
 }

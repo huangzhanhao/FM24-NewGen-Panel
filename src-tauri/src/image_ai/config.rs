@@ -26,7 +26,8 @@ pub fn providers_path(d: &Path) -> PathBuf {
 pub fn templates_path(d: &Path) -> PathBuf {
     d.join("prompts").join("templates.json")
 }
-/// 会话临时图片目录：`{data_dir}/.imgtmp`，每次启动清空重建（见 `Config::prepare_session`）。
+/// 会话临时图片目录：`{data_dir}/.imgtmp`，每次启动清理其中的图片（保留 gallery.json，见
+/// `Config::prepare_session`）。
 pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
 }
@@ -168,13 +169,29 @@ impl Config {
         Ok(())
     }
 
-    /// 启动会话准备：清空并重建临时图片目录（等价退出清理且抗崩溃）。
+    /// 启动会话准备：清空上一次会话的临时图片并补建目录。
+    /// 【为什么不再整目录 remove_dir_all】`gallery.json` 住在 `.imgtmp`（聚合布局）且跨会话保留，
+    /// 整目录删除会抹掉全部画廊历史；故逐项清理，只放行记录文件（含 `.corrupt` 备份）。
+    /// 【注意】放行判定走 [`super::gallery::is_gallery_file`]，不要另写一份：以后再有需要
+    /// 跨会话保留的文件只改那一处，漏改这里就会被静默删除。
     pub fn prepare_session(d: &Path) -> Result<(), String> {
         let tmp = tmp_dir(d);
-        if tmp.exists() {
-            fs::remove_dir_all(&tmp).map_err(|e| format!("清理临时目录失败: {e}"))?;
+        fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        let entries = fs::read_dir(&tmp).map_err(|e| format!("清理临时目录失败: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("清理临时目录失败: {e}"))?;
+            if super::gallery::is_gallery_file(&entry.file_name()) {
+                continue;
+            }
+            let p = entry.path();
+            let removed = if p.is_dir() {
+                fs::remove_dir_all(&p)
+            } else {
+                fs::remove_file(&p)
+            };
+            removed.map_err(|e| format!("清理临时文件失败（{}）: {e}", p.display()))?;
         }
-        fs::create_dir_all(&tmp).map_err(|e| e.to_string())
+        Ok(())
     }
 
     /// 持久化服务商与设置（CRUD 命令收尾调用）。
@@ -194,7 +211,7 @@ impl Config {
     }
 
     /// 回前端前的视图：抹掉全部 Key 密文。
-    /// 【必须走这里】有 5 个命令会整体返回 Config；前端只认 keysSet 布尔，
+    /// 【必须走这里】有多个命令会整体返回 Config；前端只认 keysSet 布尔，
     /// 不需要也不该拿到密文。逐处清空必然漏，收口成一个方法。
     pub fn public_view(&self) -> Self {
         let mut out = self.clone();

@@ -3,8 +3,9 @@
 //! 【嵌入方式】include_str! 在编译时把文件内容读成字符串常量，打包后不依赖外部文件；
 //! 需要按结构使用的（规则 json、国籍表）再用 LazyLock 在首次访问时解析一次、全局共享。
 //!
-//! 【双层来源】本文件只提供「出厂默认」；用户机器上的可编辑副本在 <data>/rules/standardN.json，
-//! 由 templates::ensure_user_files 首次启动时导出（已存在不覆盖），用哪份由 RuleConfig::load 决定。
+//! 【双层来源】本文件只提供「出厂默认」；用户机器上的可编辑副本在 <data>/rules/standardN.json
+//! 与 <data>/nationalities.json，由 templates::ensure_user_files / nationality::ensure_user_file
+//! 首次启动时导出（已存在不覆盖），用哪份分别由 RuleConfig::load / nationality::load 决定。
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -19,10 +20,11 @@ pub const IMAGE_AI_RAW: &str = include_str!("../assets/image_ai.json");
 pub const IMAGE_AI_TEMPLATES_RAW: &str = include_str!("../assets/image_ai_templates.json");
 
 // ---------------- 国籍对照表（基础数据，非标准规则） ----------------
-/// 语言 → {国籍显示文本: 三字码}。rtf_scanner 解析名单时按数据语言查它，把各语言的国籍显示文本
-/// 归一化成三字码（如「美国」/"U.S.A." → "USA"）；detect 判断数据语言也靠它——国籍值命中哪个
-/// 语言节点就是哪种语言。内层同时收录全称与简称/截断别名（如「美国」与列宽截断的「阿根」）。
-/// 新增语言（德语、法语…）只需在 JSON 顶层加一个同名节点，扫描器按名单语言自动查表。
+/// 语言 → {国籍显示文本: 三字码}，本文件只作**出厂默认**：启动时转成 `data/nationalities.json`
+/// 的用户副本（见 nationality 模块），之后以用户副本为准。
+/// 扫描器解析名单时按数据语言查当前表，把各语言的国籍显示文本归一化成三字码
+/// （如「美国」/"U.S.A." → "USA"）；detect 判断数据语言也靠它——国籍值命中哪个语言节点就是哪种语言。
+/// 内层同时收录全称与简称/截断别名（如「美国」与列宽截断的「阿根」）。
 pub static NAT_TRANSLATION: LazyLock<HashMap<String, HashMap<String, String>>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../assets/nat_translation.json"))
         .expect("nat_translation.json 格式错误")
@@ -39,27 +41,6 @@ pub static NAT_CODES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let parsed: Codes = serde_json::from_str(include_str!("../assets/nat_codes.json"))
         .expect("nat_codes.json 格式错误");
     parsed.codes
-});
-
-/// 国籍三字码 → 简体中文规范名（由 [`NAT_TRANSLATION`] 的「简体中文」节点反查而来）。
-/// 同一码有多个译名（如「阿尔巴」/「阿尔巴尼亚」同为 ALB）：取**最长**者为规范名，
-/// 长度相同再按字典序取小，保证反查结果与 HashMap 迭代顺序无关（可复现）。
-/// 供 AI 文生图把 `primaryNat`（如 "COL"）转成可写进提示词的中文国名。
-pub static NAT_CN_BY_CODE: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let mut m: HashMap<String, String> = HashMap::new();
-    let Some(table) = NAT_TRANSLATION.get("简体中文") else {
-        return m;
-    };
-    for (name, code) in table {
-        let better = match m.get(code) {
-            None => true,
-            Some(cur) => (name.chars().count(), name) > (cur.chars().count(), cur),
-        };
-        if better {
-            m.insert(code.clone(), name.clone());
-        }
-    }
-    m
 });
 
 /// config.xml 固定头尾模板，[players] 为占位符：xml_parser 生成文件时把映射行填进该位置，

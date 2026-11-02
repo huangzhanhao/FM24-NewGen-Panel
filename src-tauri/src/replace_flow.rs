@@ -11,6 +11,7 @@
 use crate::face_mapper::{FaceMapper, MapStep, Mode};
 use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::LogSink;
+use crate::nationality::NationalityTable;
 use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner};
 use crate::templates::{RuleConfig, IMPLEMENTED_STANDARDS};
 use crate::xml_parser::{self, MappingEntry};
@@ -86,6 +87,9 @@ pub struct ReplaceParams {
     pub source_xml: Option<PathBuf>,
     /// 标准规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
     pub rule_config: RuleConfig,
+    /// 本轮使用的国籍对照表（命令层由 nationality::refresh 读盘得到；测试可注入自定义表，
+    /// 用于验证「改对照表 → 替换结果随之变化」）。解析阶段用它构造扫描器，整轮固定一份。
+    pub nationality: Arc<NationalityTable>,
 }
 
 /// 流水线最终结果：成功 / 被取消 / 失败（带错误信息）。
@@ -295,7 +299,8 @@ fn parse_stage(
 ) -> Result<(Vec<PlayerRecord>, RosterSummary), RunResult> {
     progress("识别 RTF 格式…", 0, 0, 0);
     let t_detect = Instant::now();
-    let mut scanner = RtfScanner::new();
+    // 用本轮参数携带的对照表：扫描命令与本轮替换共享同一份「刚读盘」的快照。
+    let mut scanner = RtfScanner::with_nationality(Arc::clone(&params.nationality));
     if let Err(e) = scanner.detect_format(Path::new(&params.rtf_path), logger) {
         return Err(failed(&e));
     }
@@ -619,6 +624,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
@@ -652,6 +658,52 @@ mod tests {
             !logs.iter().any(|l| l.level == "ERROR"),
             "happy path 不应有 ERROR 级日志：{logs:?}"
         );
+    }
+
+    #[test]
+    fn custom_nationality_table_drives_replace() {
+        // 名单写「火星」：带进自定义对照表后解析得到 ESP，经标准二 Ethnics（ESP→SpanMed）
+        // 落到 SpanMed 目录。验证「改表 → 解析 → 抽图 → 写 config.xml」整条链路随之变化。
+        let (_dir, rtf, img) = setup();
+        fs::write(
+            &rtf,
+            "| 编号      | 国籍/地区籍 | 第二国籍 | 姓名   |    |    |   |\n\
+             | 2000472008| 火星       |          | Pepe   | 1  | 12 | 1 |\n",
+        )
+        .unwrap();
+        let doc = crate::nationality::NationalityDoc {
+            languages: vec!["English".into(), "简体中文".into()],
+            mappings: vec![crate::nationality::NationalityMapping {
+                code: "ESP".into(),
+                language: "简体中文".into(),
+                name: "火星".into(),
+            }],
+        };
+        let params = ReplaceParams {
+            rtf_path: rtf,
+            img_dir: img.clone(),
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
+            pre_scan: None,
+            source_xml: None,
+            rule_config: RuleConfig::builtin(),
+            nationality: Arc::new(NationalityTable::from_doc(doc).unwrap()),
+        };
+        let cancel = AtomicBool::new(false);
+        let (logger, _log_rx) = ChannelLogger::channel();
+        let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
+        assert_eq!(result.outcome, Outcome::Finished);
+        assert_eq!(result.rtf_data.len(), 1);
+        assert_eq!(result.rtf_data[0].primary_nat, "ESP");
+        assert_eq!(result.mapping.len(), 1);
+        assert_eq!(result.mapping[0].ethnicity, "SpanMed");
+        // 产物 config.xml 同样落在 SpanMed 目录下（写盘用的是同一份映射结果）。
+        let xml = xml_parser::parse_xml(Path::new(&img).join("config.xml").as_path()).unwrap();
+        assert_eq!(xml["r-2000472008"].ethnicity, "SpanMed");
+        assert!(!xml["r-2000472008"].image.is_empty());
     }
 
     /// 「生成」模式本轮抽不出任何映射的现场：名单正常，但包里一张图也没有。
@@ -692,6 +744,7 @@ mod tests {
             pre_scan: None,
             source_xml: Some(snap.to_path_buf()),
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         }
     }
 
@@ -766,6 +819,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -825,6 +879,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -859,6 +914,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -880,6 +936,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -936,6 +993,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // Generate 模式不读判据
             rule_config,
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -999,6 +1057,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -1057,6 +1116,7 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
+            nationality: NationalityTable::builtin_shared(),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();

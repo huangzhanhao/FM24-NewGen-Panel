@@ -28,7 +28,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 - **单个球员微调**：结果区切到 `单人微调`，输入 UID 回车 → 预览当前头像与球员信息 → 选一张图点 `替换`，只改写这一条映射。
 - **AI 生成头像**（可选，需自备 API Key）：独立工作台。顶部一条配置条（服务商 / 模型 / Key / 状态灯）；左栏是**单个球员**的档案卡，把年龄、位置、种族、肤色、发长、发色、身高、俱乐部、CA、PA 逐项列出来——扫一眼就知道提示词变量会不会填错；右栏按该球员渲染提示词正文（可编辑）+ 依**模型能力集**显隐的参数区 + 结果画廊。多人走名单工具行的 `加入队列`，队列坞常驻台底、顶栏 ③ 上有数量角标。服务商支持 OpenAI 兼容协议与阿里云百炼（DashScope），各自可用的参数与尺寸约束由服务商按模型声明。
 - **规则可视化编辑**：`规则配置` 对话框直接查看、修改并保存标准规则 json（国籍→目录映射、FolderList 等），保存时自动做结构校验。
-- **自动备份**：每次写入 `config.xml` 前生成 `config_backup_YYYYMMDD-HHMMSS.xml`，每个头像包目录最多保留最近 10 份；覆盖**档景快照**（`.user/<存档>/` 下）前同样先备份旧的 `<快照词干>_backup_...xml`，也是一次留 10 份——档景是「保留/覆写」模式的判据源，写坏了没有第二份可对照。早期版本备份名为 `config备份_...`，这类历史文件不会被计入或清理，可手动删除。
+- **自动备份**：每次写入 `config.xml` 前生成 `config_backup_YYYYMMDD-HHMMSS.xml`，每个头像包目录最多保留最近 5 份；覆盖**档景快照**（`.user/<存档>/` 下）前同样先备份旧的 `<快照词干>_backup_...xml`，每份快照也最多保留最近 5 份——档景是「保留/覆写」模式的判据源，写坏了没有第二份可对照。早期版本备份名为 `config备份_...`，这类历史文件不会被计入或清理，可手动删除。
 - **进度与取消**：解析 / 扫盘 / 映射 / 写文件全部在 Rust 后台线程执行，扫盘按一级目录并行，进度经事件流推送；执行中界面保持流畅，可随时 `取消`。
 - **应用内日志**：状态栏常驻状态与迷你进度，`日志` 按钮带错误角标；抽屉内可按级别筛选、只看某一级、一键打开日志文件；日志文件 10 MB × 3 份滚动。
 - **完整性检查与一键创建**：`检查完整性` 按规则 json 的目录清单判定头像包归属哪个标准、缺哪些目录，缺失时一键批量创建（执行替换前仍兜底校验）。
@@ -220,12 +220,13 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │   ├── main.ts / App.svelte / app.css
 │   └── lib/
 │       ├── types.ts / api.ts / dialog.ts   # IPC 类型与封装、统一错误弹窗
+│       ├── rules.ts             # 规则文件纯数据层：解析收窄 / 规则形态 / 目录引用 / 配置体检
 │       ├── text.ts              # 全局文案（所有用户可见文字统一维护，默认中文）
 │       ├── actions.ts / icons.ts           # Svelte actions、内联 SVG 图标
 │       ├── stores/              # app / log / ui / imageai（runes 状态）
 │       └── components/
 │           ├── layout/          # Sidebar（作用域）/ TopNav（三工作台导航）/ StatusBar / LogDrawer
-│           ├── setup/           # SetupCard（路径与规则）/ RuleEditor
+│           ├── setup/           # SetupCard（路径与规则）/ RuleEditor（结构化规则工作台）/ NationalityEditor（国籍对照表）
 │           ├── replace/         # ReplacePanel（批量执行）/ PlayerViewer（单人微调）
 │           ├── results/         # PlayersTable / RosterSnapshotTabs / SnapshotPreview / TablePager
 │           ├── imageai/         # ImageAiPanel / SourcePlayerCard / GenSettingsCard / ProviderDialog
@@ -240,6 +241,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │   └── src/
 │       ├── main.rs / lib.rs     # 入口 + Tauri Builder 装配（含便携数据目录与 v1 迁移）
 │       ├── assets.rs            # 编译期加载映射表与标准规则出厂默认
+│       ├── nationality.rs       # 国籍对照表：三字码 ↔ 各语言全称（内置默认 + data/nationalities.json 用户副本）
 │       ├── json_store.rs        # JSON 原子读写 + 损坏回退
 │       ├── paths.rs             # 路径规范化（目录 key / 快照短命名）
 │       ├── facepack_scanner.rs  # 头像包扫描器：包扫描 + 标准判定（直铺 / 标准N / 无法识别）+ 目录签名 PackSig
@@ -262,7 +264,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       │   └── gen_queue.rs     # L3 应用：生成队列（会话内存态，不落盘）
 │       ├── image_ai_providers/  # 各服务商适配器：openai / volcano / dashscope / siliconflow / modelscope / localcomfyui（唯一网络接触面）
 │       ├── logger.rs            # ← core/NewGanLogManager.py（官方 log 插件管道 + 内存环形缓冲/批量事件）
-│       └── commands.rs          # ← services/* + 对话框原语（52 个 Tauri 命令）
+│       └── commands.rs          # ← services/* + 对话框原语（55 个 Tauri 命令）
 ├── tests/testing_data/          # RTF 测试样本（不入库）
 ├── .cargo/config.toml           # Cargo 构建配置（target-dir 指向根目录 target/）
 ├── package.json / vite.config.ts / svelte.config.js / tsconfig.json
@@ -291,7 +293,7 @@ pnpm install
 pnpm tauri dev
 
 # 3) 测试与检查
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 256 项）
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 271 项，含 1 项 #[ignore] 真包冒烟）
 pnpm test                                          # vitest 前端单测
 pnpm check                                         # svelte-check 类型检查
 
@@ -361,8 +363,8 @@ v2 首次启动时自动完成迁移，无需手动操作：
 ```
 # 只读配置（源码位置，编译期嵌入）
 src-tauri/assets/
-  nat_codes.json        FM 全部三字母国籍码清单
-  nat_translation.json  各语言国籍显示文本 → 英文三字码 对照表（简体中文/English，可自行增补德语、法语等语言节点）
+  nat_codes.json        FM 全部三字母国籍码清单（出厂默认）
+  nat_translation.json  各语言国籍显示文本 → 英文三字码 对照表（出厂默认；首次启动导出为用户副本）
   config_template       config.xml 的固定头尾模板，[players] 为占位符
   standard2.json        标准二规则出厂默认（14 种族目录 + 国籍映射 + 种族码修正）
   standard3.json        标准三规则出厂默认（62 图像池 + 族群映射规则块）
@@ -375,9 +377,17 @@ src-tauri/assets/
     <Profile>.json        该存档的组配置与 RTF 设置
     <快照词干>.xml         组映射快照（切换/激活存档时交换；词干为「graphics_<后段>_snapshot-哈希」式短命名，
                           哈希取自目录路径，因此两个不同的头像包目录不会共用同一份快照）
+image_ai.json             AI 服务商与生图设置（缺失时从出厂默认重新导出）
+nationalities.json        国籍对照表用户副本：三字码 ↔ 各语言国籍全称/别名（English/简体中文 等）
+                          首次启动从出厂默认导出；界面「国籍对照表」可增删改，保存后立即生效
+prompts/
+  templates.json          AI 提示词模板的用户副本（首次启动从出厂默认导出）
 rules/
   standard2.json          标准二规则的用户副本（首次启动从出厂默认导出，改完下次替换即生效）
   standard3.json          标准三规则的用户副本（同上）
+.imgtmp/                  AI 生成会话临时目录：图片 `{id}.{ext}`，每次启动清理
+  gallery.json            画廊记录（**跨会话保留**，启动清理与图片淘汰都跳过它）；
+                          每条记录含保存落点 `savedPath`（绝对路径）与 `savedName`（文件名）
 webview/                  WebView2 浏览器数据（缓存/localStorage，已重定向，不写 C 盘）
 newgan.log                运行日志（10 MB × 3 滚动，备份命名 newgan_日期_时间.log）
 ```
@@ -418,9 +428,29 @@ newgan.log                运行日志（10 MB × 3 滚动，备份命名 newgan
 
 ### 编辑规则
 
-界面里点「规则配置」直接改并保存，或用资源管理器打开 `data/rules/` 改 `standardN.json`（改完下次替换即生效）。保存与加载都会做结构校验：版本必须是 4、规则块键必须是国籍码或清单内目录名、每个块必须 0–10 全枚举、规则指向的目录必须在 `FolderList` 内、加权两列必须等长且全为正数。非法内容不会写盘，加载失败会报错并指明文件路径（不静默回退出厂默认，避免用改坏的规则抽图而不自知）。
+界面里点「规则配置」进入结构化编辑工作台：左侧分区（概览 / 目录清单 / 国籍映射 / 种族码修正或规则块 / 全局设置），右侧按表格、目录标签、规则卡片逐项修改；「概览」会先做配置体检（重复目录、失效引用、缺 `_DEFAULT_` 等），点击问题可直接跳到对应分区。需要手改整份文件时，顶部切到「源码」即可编辑 JSON。也可用资源管理器打开 `data/rules/` 改 `standardN.json`（改完下次替换即生效）。保存与加载都会做结构校验：版本必须是 4、规则块键必须是国籍码或清单内目录名、每个块必须 0–10 全枚举、规则指向的目录必须在 `FolderList` 内、加权两列必须等长且全为正数。非法内容不会写盘，加载失败会报错并指明文件路径（不静默回退出厂默认，避免用改坏的规则抽图而不自知）。
 
 `data/rules/template2.json` 这类旧命名文件会在启动时自动改名续用；已作废的旧标准三规则文件会被直接删除。
+
+### 编辑国籍对照表
+
+RTF 名单里的国籍（中文全称、英文全称或已经是三字码）先由**国籍对照表**归一化成三字码，再进入抽图与提示词。对照表在应用内点「国籍对照表」即可增删改，也可直接编辑 `data/nationalities.json`：
+
+```json
+{
+  "languages": ["English", "简体中文"],
+  "mappings": [
+    { "code": "CHN", "language": "English", "name": "China" },
+    { "code": "CHN", "language": "English", "name": "China PR" },
+    { "code": "CHN", "language": "简体中文", "name": "中国" }
+  ]
+}
+```
+
+- 一行 = 一条映射；同一码在同一语言下可以有多条（全称与别名），解析时都算命中。中文规范名取该码下**最长**的中文全称（供 AI 提示词的 `nationality` 变量），如 `ALB` 的「阿尔巴尼亚」与截断别名「阿尔巴」都保留。
+- 新增语言只需在 `languages` 里加一个节点，并给需要的码添加该语言全称；解析时按 `languages` 的顺序命中，因此德语、法语等导出也能自动识别。
+- 保存前会校验：码必须是 2–3 位大写字母（`SC` 是两位特例）、语言必须在 `languages` 里、同一语言下同一全称不能指向两个码、至少保留一条映射。非法内容不会写盘。
+- 应用内保存后**立即生效**（下一次扫描 RTF / 替换 / 提示词预览即用新表）；直接改文件则在下次扫描或替换前自动重读。出厂默认仍内嵌在 `assets/nat_translation.json` + `nat_codes.json`，删掉用户副本后重启会重新导出一份。
 
 ### 新增一个标准
 
@@ -446,7 +476,7 @@ newgan.log                运行日志（10 MB × 3 滚动，备份命名 newgan
 | `无法识别头像包结构` | 子目录与任何标准的 `FolderList` 清单都不构成包含关系；替换时将递归全池随机。可在 `规则配置` 中把包内目录名补进清单恢复精确路由 |
 | `标准三规则无效：…` / `标准规则文件无法解析：…` | `data/rules/standardN.json` 被改坏（版本不符、块缺码、目录不在 `FolderList` 内、加权两列不等长等）。错误信息会指明文件与具体键；也可删掉该文件让程序重新导出一份出厂默认 |
 | 部分球员被跳过、没生成映射 | 该球员国籍码不在标准规则的 `Ethnics` 映射中（如 FM 用了非英文三字码），可在 `data/rules/standardN.json` 补该码，或提 issue 反馈 |
-| RTF 中国籍查不到、整行被丢弃（警告日志提示「…不是 nat_translation.json 收录的国籍显示文本，也不是 nat_codes.json 收录的国籍码」） | 名单里的国籍显示文本两表都未收录（中文国名/截断别名或英文全名）；在 `src-tauri/assets/nat_translation.json` 补条目后自行构建 |
+| RTF 中国籍查不到、整行被丢弃（警告日志提示「…不是国籍对照表收录的国籍全称，也不是对照表收录的国籍码」） | 名单里的国籍显示文本或截断别名未收录；点「国籍对照表」在应用内补一条映射（或直接改 `data/nationalities.json`），保存后下次扫描/替换即生效 |
 | 名单里一个人都没换 | 勾了 `仅随机人`，但拓展名单第 10 列标志全为 `否/No`（名单里没有随机人）；关掉开关，或改用 `is newgen` 过滤视图重新导出 |
 | 写 `config.xml` 失败 / 权限错误 | 以管理员（或 `sudo`）运行，或把头像包移到当前用户可写目录 |
 | FM 里头像没变 | 未重新加载皮肤缓存；或 FM 图形缓存目录里存在旧的 `config.xml` 副本 |

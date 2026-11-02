@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn validation_rejects_missing_fields_and_vendor_limits() {
         // 两层准入校验：validate_complete 管请求自身完整性（提示词/张数/服务商与模型存在）；
-        // validate_for_generate 是 generate 的准入校验函数，厂商约束由 Provider 层解释——
-        // 结构性覆盖：若 generate 不再调用它、或它不再委派 for_kind(...).validate，断言会失败。
+        // validate_for_generate 由 Provider 层解释厂商约束——结构性覆盖：generate 不再调用
+        // 它、或它不再委派 for_kind(...).validate，断言即失败。
         let cfg = Config::builtin();
         let mut r = gen_req();
         r.prompt = " ".into();

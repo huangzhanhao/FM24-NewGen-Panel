@@ -175,9 +175,11 @@ pub fn build_vars(
     vars.insert("name".into(), rec.name.clone());
     vars.insert("primaryNat".into(), rec.primary_nat.clone());
     vars.insert("secNat".into(), rec.sec_nat.clone());
-    // 国籍中文名（三字码反查）；查不到码则不入 map，由模板默认值兜底。
-    if let Some(cn) = crate::assets::NAT_CN_BY_CODE.get(&rec.primary_nat) {
-        vars.insert("nationality".into(), cn.clone());
+    // 国籍中文名（三字码反查当前国籍对照表，用户在「国籍对照表」里改过的中文全称即时生效）；
+    // 查不到码则不入 map，由模板默认值兜底。
+    let nat = crate::nationality::current();
+    if let Some(cn) = nat.cn_name(&rec.primary_nat) {
+        vars.insert("nationality".into(), cn.to_string());
     }
     let pools = &tpl.pools;
     // 人员类别由数据源确定；空职位的职员不写 identity，避免错误回落成球员称谓。
@@ -387,8 +389,8 @@ pub fn build_vars(
             vars.insert(key.into(), pick(cand).to_string());
         }
     }
-    // 女性不随机胡须：移除该变量 → 模板默认值「干净无胡须」兜底；类别来自数据源，
-    // 不重复解释可能为空或本地化的性别文本。
+    // 女性不随机胡须：移除该变量 → 模板默认值「干净无胡须」兜底；判据只看数据源类别，
+    // 不再解释可能为空或本地化的性别文本。
     if rec.kind.is_female() {
         vars.remove("beard");
     }
@@ -401,8 +403,8 @@ pub fn build_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtf_scanner::{DetailedInfo, PersonKind, PlayerRecord};
     use crate::image_ai::types::{ShotPool, StaffPools};
+    use crate::rtf_scanner::{DetailedInfo, PersonKind, PlayerRecord};
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

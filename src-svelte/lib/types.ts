@@ -99,6 +99,13 @@ export interface PlayerPreview {
 /** 「读取快照」返回摘要（对应 Rust 的 SnapshotInfo）。 */
 export interface SnapshotInfo { total: number; }
 
+/** 一条国籍对照映射（对应 Rust 的 NationalityMapping）：三字码 + 语言 + 该语言下的国籍全称/别名。 */
+export interface NationalityMapping { code: string; language: string; name: string; }
+
+/** 国籍对照表文档（对应 Rust 的 NationalityDoc，落盘于 data/nationalities.json）。
+ *  languages 决定语言列顺序与解析优先级；mappings 一行一条，同一码同一语言可有多条别名。 */
+export interface NationalityDoc { languages: string[]; mappings: NationalityMapping[]; }
+
 /** 快照预览的一行（对应 Rust 的 SnapshotEntry）；relPath 是映射原文，imagePath 由前端按页批量解析。 */
 export interface SnapshotEntry { uid: string; relPath: string; imagePath: string | null; }
 
@@ -275,14 +282,21 @@ export interface GeneratedImage {
   seed?: string | null;
   imageAvailable?: boolean;
   removable?: boolean;
+  /** 这张图被保存后的落点（来自 gallery.json 的 savedPath/savedName；未保存过为空）。 */
+  savedPath?: string | null;
+  savedName?: string | null;
 }
 
-/** 一条持久画廊记录（对应 Rust 的 GalleryRecord）：与 `.imgtmp` 的图片字节是两条独立生命周期。
- *  除 id/ts 外的字段在 Rust 侧可缺省，故前端按可选处理。 */
+/** 一条持久画廊记录（对应 Rust 的 GalleryRecord）。记录文件在 `.imgtmp/gallery.json`，
+ *  与图片字节是两条独立生命周期，分别保存；除 id/ts 外字段可缺省，前端按可选处理。 */
 export interface GalleryRecord {
   id: string; ts: string;
   uid?: string | null; name?: string | null;
   model: string; prompt: string; negativePrompt: string; templateId: string;
+  /** 「另存为 / 保存并替换」落盘的绝对路径；从未保存过为 null。 */
+  savedPath?: string | null;
+  /** 保存落点的文件名（含扩展名，如 `2002046242_1.png`）；从未保存过为 null。 */
+  savedName?: string | null;
 }
 
 /** get_gallery 的返回项（对应 Rust 的 GalleryItem）：记录字段平铺 + 查询期现算的图片存在性。

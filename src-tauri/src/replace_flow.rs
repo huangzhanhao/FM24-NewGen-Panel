@@ -673,6 +673,7 @@ mod tests {
         .unwrap();
         let doc = crate::nationality::NationalityDoc {
             languages: vec!["English".into(), "简体中文".into()],
+            codes: vec!["ESP".into()],
             mappings: vec![crate::nationality::NationalityMapping {
                 code: "ESP".into(),
                 language: "简体中文".into(),

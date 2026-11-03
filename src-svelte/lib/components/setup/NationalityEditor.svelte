@@ -1,6 +1,8 @@
 <!-- NationalityEditor · 国籍对照表编辑对话框：在应用内调整/新增/删除「三字码 ↔ 各语言国籍全称」映射。
-     一行 = 一条映射（同码同语言可以有多条全称/别名）；保存时后端统一校验并原子写回
-     data/nationalities.json，成功后立即生效（下一次扫描/替换/提示词预览无需重启）。 -->
+     一行 = 一条映射（同码同语言可以有多条全称/别名）；码与全称分开维护：
+     只填三字码即登记一个「只有码、暂无全称」的条目（该码本身仍是合法国籍值）。
+     保存时后端统一校验并原子写回 data/nationalities.json，成功后立即生效
+     （下一次扫描/替换/提示词预览无需重启）。 -->
 <script lang="ts">
   import { ask } from "@tauri-apps/plugin-dialog";
   import { api } from "../../services/api";
@@ -10,7 +12,7 @@
   import type { NationalityDoc, NationalityMapping } from "../../types";
 
   let open = $state(false);
-  let doc = $state<NationalityDoc>({ languages: [], mappings: [] });
+  let doc = $state<NationalityDoc>({ languages: [], codes: [], mappings: [] });
   let baseline = $state(""); // 载入/保存后的内容（dirty 判定基准）
   let status = $state("");   // 成功提示（已保存）
   let notice = $state("");   // 编辑期校验提示（重复映射、字段未填等），与成功提示分开着色
@@ -41,6 +43,12 @@
     });
   });
 
+  // 只有码、还没有任何语言全称的条目：码本身即合法国籍值（名单里原样写着该码的行不会被丢），
+  // 只是查不到名字，所以单独列出来。
+  const bareCodes = $derived(
+    doc.codes.filter((c) => !doc.mappings.some((m) => m.code.trim().toUpperCase() === c)),
+  );
+
   /** 父组件经 bind:this 调用：打开对话框并载入当前生效表 */
   export function openEditor() {
     open = true;
@@ -64,11 +72,30 @@
     }
   }
 
-  /** 新增一条映射（本地追加，点「保存」才落盘） */
+  /** 新增一条映射，或（全称留空时）一个「只有码」的条目：本地追加，点「保存」才落盘 */
   function addMapping() {
     const code = draft.code.trim().toUpperCase();
     const name = draft.name.trim();
-    if (!code || !name || !draft.language) {
+    if (!code) {
+      notice = t.nationalityEditor.incomplete;
+      status = "";
+      return;
+    }
+    // 全称留空 = 只登记码：这个码本身即合法国籍值，名字可以以后再补。
+    if (!name) {
+      if (doc.codes.includes(code) || doc.mappings.some((m) => m.code.trim().toUpperCase() === code)) {
+        notice = t.nationalityEditor.codeExists;
+      } else {
+        doc.codes.push(code);
+        notice = t.nationalityEditor.codeOnly;
+      }
+      status = "";
+      draft.code = "";
+      draft.name = "";
+      return;
+    }
+    // 映射必须归属某个语言：语言列表为空/未选中时不能追加，否则后端校验会拒绝整份保存。
+    if (!draft.language) {
       notice = t.nationalityEditor.incomplete;
       status = "";
       return;
@@ -111,18 +138,31 @@
     notice = "";
   }
 
+  /** 移除一个「只有码」的条目：码退出码全集后不再被当作合法国籍值 */
+  function removeCode(code: string) {
+    doc.codes = doc.codes.filter((c) => c !== code);
+    status = "";
+    notice = "";
+  }
+
   /** 保存：后端校验 → 原子写盘 → 立即换表；返回值是规范化/排序后的文档，用它重设界面 */
   async function save() {
     if (saving) return;
     saving = true;
     try {
+      // 全称被清空的行不再是映射，但码本身保留（降级成「只有码」）。
+      const codes = new Set(doc.codes);
+      const mappings = doc.mappings
+        .filter((m) => m.name.trim().length > 0)
+        .map((m) => ({ code: m.code.trim(), language: m.language, name: m.name.trim() }));
+      for (const m of doc.mappings) {
+        const code = m.code.trim().toUpperCase();
+        if (m.name.trim().length === 0 && code) codes.add(code);
+      }
       const saved = await api.saveNationalities({
         languages: doc.languages.map((l) => l.trim()).filter((l) => l.length > 0),
-        mappings: doc.mappings.map((m) => ({
-          code: m.code.trim(),
-          language: m.language,
-          name: m.name.trim(),
-        })),
+        codes: [...codes],
+        mappings,
       });
       doc = saved;
       baseline = JSON.stringify(saved);
@@ -246,6 +286,26 @@
           <button class="btn sm" onclick={addLanguage}>{t.nationalityEditor.addLanguageBtn}</button>
         </div>
 
+        <!-- 只有码、暂无全称的条目：码本身已是合法国籍值（名单里原样写着该码的行不会被丢），名字以后再补 -->
+        {#if bareCodes.length > 0}
+          <div class="nat-bare">
+            <span class="muted small">{t.nationalityEditor.bareLabel(bareCodes.length)}</span>
+            {#each bareCodes as code (code)}
+              <span class="pill">
+                {code}
+                <button
+                  class="pill-x"
+                  onclick={() => removeCode(code)}
+                  use:tip={t.nationalityEditor.removeCodeHint}
+                  aria-label={t.nationalityEditor.removeCodeHint}
+                >
+                  ×
+                </button>
+              </span>
+            {/each}
+          </div>
+        {/if}
+
         <div class="nat-list">
           <table>
             <thead>
@@ -366,6 +426,35 @@
   }
   .nat-langs input {
     width: 170px;
+  }
+  /* 只有码的条目区：与语言区同一行的排布，空时不占位 */
+  .nat-bare {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-3);
+  }
+  /* 胶囊内的删除按钮：只去背，字色随胶囊，尺寸不撑高胶囊行 */
+  .pill-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-circle);
+    background: transparent;
+    color: inherit;
+    font-size: var(--fs-xs);
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.6;
+  }
+  .pill-x:hover {
+    opacity: 1;
+    background: var(--bg-raised);
   }
   /* 列表滚动区：sticky 表头 + 逐行输入框；表格宽度固定，长全称由输入框自身横向滚动 */
   .nat-list {

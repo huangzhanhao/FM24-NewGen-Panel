@@ -103,8 +103,9 @@ export interface SnapshotInfo { total: number; }
 export interface NationalityMapping { code: string; language: string; name: string; }
 
 /** 国籍对照表文档（对应 Rust 的 NationalityDoc，落盘于 data/nationalities.json）。
- *  languages 决定语言列顺序与解析优先级；mappings 一行一条，同一码同一语言可有多条别名。 */
-export interface NationalityDoc { languages: string[]; mappings: NationalityMapping[]; }
+ *  languages 决定语言列顺序与解析优先级；codes 是码全集（可以只有码、暂无全称）；
+ *  mappings 一行一条，同一码同一语言可有多条别名。 */
+export interface NationalityDoc { languages: string[]; codes: string[]; mappings: NationalityMapping[]; }
 
 /** 快照预览的一行（对应 Rust 的 SnapshotEntry）；relPath 是映射原文，imagePath 由前端按页批量解析。 */
 export interface SnapshotEntry { uid: string; relPath: string; imagePath: string | null; }

@@ -9,12 +9,15 @@
 //! ```json
 //! {
 //!   "languages": ["English", "简体中文"],
+//!   "codes": ["CHN", "USA"],
 //!   "mappings": [
 //!     { "code": "CHN", "language": "English", "name": "China" },
 //!     { "code": "CHN", "language": "简体中文", "name": "中国" }
 //!   ]
 //! }
 //! ```
+//! `codes` 是码全集，与全称解耦：可以只登记码、暂不给任何语言的全称（新增码不必同时补中/英文全称）。
+//! 这种码本身仍是合法国籍值（名单里原样写着该码的行不会被丢），只是查不到它的名字。
 //! 同码同语言可有多条全称/别名（如「中国」「China」「China PR」）；同语言下同一全称只能指向一个码，否则解析无定义、校验拒绝。
 //!
 //! 【生效方式】保存 = 校验 → 原子写盘 → [`install`] 换当前表；命令入口走 [`refresh`] 重读盘，
@@ -46,11 +49,15 @@ pub struct NationalityMapping {
 }
 
 /// 用户可编辑的对照表文档（`data/nationalities.json` 的落盘形状，也是前端编辑器的数据契约）。
-/// `languages` 决定界面列顺序与解析时的语言优先级；`mappings` 一行一条，已按 code/语言/全称排序。
+/// `languages` 决定界面列顺序与解析时的语言优先级；`codes` 是码全集；`mappings` 一行一条，已按 code/语言/全称排序。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NationalityDoc {
     pub languages: Vec<String>,
+    /// 码全集：可以只有码、还没有任何语言的全称（新增码不必同时补中/英文全称）。
+    /// 缺省时按 `mappings` 推导，没有该字段的旧副本照常可读。
+    #[serde(default)]
+    pub codes: Vec<String>,
     pub mappings: Vec<NationalityMapping>,
 }
 
@@ -63,7 +70,7 @@ pub struct NationalityTable {
     languages: Vec<String>,
     /// 规范化并排序后的映射全集（保存/展示都以此为准）。
     mappings: Vec<NationalityMapping>,
-    /// 码全集：值本身已是国籍码时直接放行（如 "CHN"、两位特例 "SC"）。
+    /// 码全集：值本身已是国籍码时直接放行（如 "CHN"、两位特例 "SC"）；含暂无全称的码。
     codes: BTreeSet<String>,
     /// 语言 → {显示文本: 三字码}：RTF 语言识别与全称归一化的主索引。
     by_language: BTreeMap<String, BTreeMap<String, String>>,
@@ -90,24 +97,22 @@ impl NationalityTable {
             return Err("语言列表不能为空（至少保留一个语言节点）".into());
         }
 
+        // ---- 码清单：只要码、不要全称也合法（新增码不必同时补中/英文全称） ----
+        let mut codes: BTreeSet<String> = BTreeSet::new();
+        for (i, raw) in doc.codes.into_iter().enumerate() {
+            let code = normalize_code(&raw).map_err(|e| format!("码清单第 {} 项的{e}", i + 1))?;
+            codes.insert(code);
+        }
+
         // ---- 映射行：逐条校验、同一语言下的显示文本去重并查冲突 ----
         let mut mappings: Vec<NationalityMapping> = Vec::new();
         // (语言, 显示文本) → 已占用的码：同一语言下同一个全称只能指向一个码。
         let mut claimed: BTreeMap<(String, String), String> = BTreeMap::new();
         for (i, raw) in doc.mappings.into_iter().enumerate() {
             let n = i + 1;
-            let code = raw.code.trim().to_ascii_uppercase();
+            let code = normalize_code(&raw.code).map_err(|e| format!("第 {n} 条映射的{e}"))?;
             let language = raw.language.trim().to_string();
             let name = raw.name.trim().to_string();
-            if code.is_empty() {
-                return Err(format!("第 {n} 条映射的三字码为空"));
-            }
-            // FM 国籍码是 2–3 位大写字母（"SC" 是两位特例）；数字/小写/超长一律拒绝。
-            if !(2..=3).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_uppercase()) {
-                return Err(format!(
-                    "第 {n} 条映射的三字码「{code}」不合法：只能是 2–3 位大写英文字母"
-                ));
-            }
             if language.is_empty() {
                 return Err(format!("第 {n} 条映射的语言为空"));
             }
@@ -133,9 +138,6 @@ impl NationalityTable {
                 }
             }
         }
-        if mappings.is_empty() {
-            return Err("至少保留一条国籍映射；空表会让所有名单行都因国籍无法识别而被丢弃".into());
-        }
 
         // ---- 排序：码升序 → 语言按 languages 给定顺序 → 全称升序（保证保存结果可复现） ----
         let lang_pos = |lang: &str| languages.iter().position(|l| l == lang).unwrap_or(usize::MAX);
@@ -147,7 +149,6 @@ impl NationalityTable {
         });
 
         // ---- 建索引 ----
-        let mut codes = BTreeSet::new();
         let mut by_language: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         let mut cn_by_code: BTreeMap<String, String> = BTreeMap::new();
         for m in &mappings {
@@ -165,6 +166,11 @@ impl NationalityTable {
                     cn_by_code.insert(m.code.clone(), m.name.clone());
                 }
             }
+        }
+        if codes.is_empty() {
+            return Err(
+                "至少保留一个国籍码或一条国籍映射；空表会让所有名单行都因国籍无法识别而被丢弃".into(),
+            );
         }
 
         Ok(Self {
@@ -188,10 +194,11 @@ impl NationalityTable {
         Arc::clone(&BUILTIN)
     }
 
-    /// 导出为文档（排序后的 languages 与 mappings）。
+    /// 导出为文档（排序后的 languages、码全集与 mappings）。
     pub fn doc(&self) -> NationalityDoc {
         NationalityDoc {
             languages: self.languages.clone(),
+            codes: self.codes.iter().cloned().collect(),
             mappings: self.mappings.clone(),
         }
     }
@@ -239,6 +246,19 @@ impl NationalityTable {
     }
 }
 
+/// 码的规范化与合法性校验：FM 国籍码是 2–3 位大写字母（"SC" 是两位特例）；
+/// 用户小写输入统一转大写，数字/超长一律拒绝。
+fn normalize_code(raw: &str) -> Result<String, String> {
+    let code = raw.trim().to_ascii_uppercase();
+    if code.is_empty() {
+        return Err("三字码为空".into());
+    }
+    if !(2..=3).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(format!("三字码「{code}」不合法：只能是 2–3 位大写英文字母"));
+    }
+    Ok(code)
+}
+
 /// 内嵌资产的转换结果。校验失败属于开发期错误（资产与代码不同步），直接 panic 暴露。
 fn build_builtin() -> NationalityTable {
     let translations = &*crate::assets::NAT_TRANSLATION;
@@ -264,13 +284,11 @@ fn build_builtin() -> NationalityTable {
             });
         }
     }
-    let mut table = NationalityTable::from_doc(NationalityDoc { languages, mappings })
-        .unwrap_or_else(|e| panic!("内置国籍对照表不合法：{e}"));
-    // 码全集里可能含暂无译名的码：无映射行，但作为「值本身已是国籍码」仍须放行。
-    // 【维护约束】`doc()` 只导出映射行，这批码不落盘；新增码必须同时在 nat_translation.json
-    // 补至少一条全称，否则用户副本读回后会把它判成非法。当前资产全有译名（覆盖测试守着）。
-    table.codes.extend(crate::assets::NAT_CODES.iter().cloned());
-    table
+    // 码全集来自 nat_codes.json：其中可能含暂无译名的码（无映射行），
+    // 但「值本身已是国籍码」仍须放行，且随文档一起落到用户副本。
+    let codes: Vec<String> = crate::assets::NAT_CODES.iter().cloned().collect();
+    NationalityTable::from_doc(NationalityDoc { languages, mappings, codes })
+        .unwrap_or_else(|e| panic!("内置国籍对照表不合法：{e}"))
 }
 
 fn language_rank(lang: &str) -> u8 {
@@ -352,6 +370,7 @@ mod tests {
     fn doc_with(languages: &[&str], mappings: &[(&str, &str, &str)]) -> NationalityDoc {
         NationalityDoc {
             languages: languages.iter().map(|s| s.to_string()).collect(),
+            codes: Vec::new(),
             mappings: mappings
                 .iter()
                 .map(|(code, language, name)| NationalityMapping {
@@ -386,26 +405,47 @@ mod tests {
 
     #[test]
     fn builtin_covers_every_embedded_code() {
-        // 两份内嵌资产不能脱节：nat_codes.json 的每个码都必须能在转换后的表里识别。
+        // 两份内嵌资产不能脱节：nat_codes.json 的每个码都必须能在转换后的表里识别，
+        // 且导出成用户副本后仍在（码与全称解耦，码不能只在内存里活着）。
         let t = NationalityTable::builtin();
+        let doc = t.doc();
         for code in crate::assets::NAT_CODES.iter() {
             assert!(t.is_code(code), "码 {code} 不在内置对照表中");
+            assert!(doc.codes.iter().any(|c| c == code), "码 {code} 未导出到用户副本");
         }
     }
 
     #[test]
-    fn builtin_has_english_and_chinese_names_for_every_code() {
-        // 出厂副本必须同时带英文与中文全称：两者是随包发布的「三字码 ↔ 中英文全称」对照基线，
-        // 缺一个语言节点会让该语言导出的名单整份丢行。
-        let doc = NationalityTable::builtin().doc();
-        for code in crate::assets::NAT_CODES.iter() {
-            for language in [EN_LANGUAGE, CN_LANGUAGE] {
-                assert!(
-                    doc.mappings.iter().any(|m| &m.code == code && m.language == language),
-                    "{code} 缺少 {language} 全称"
-                );
-            }
-        }
+    fn code_without_name_is_recognized_and_survives_roundtrip() {
+        // 新增码可以暂不给任何语言全称：值本身已是该码时按合法国籍处理，
+        // 查不到名字只是没有名字（提示词走模板默认值兜底），不能因此判非法或丢行。
+        let doc = NationalityDoc {
+            languages: vec![EN_LANGUAGE.into(), CN_LANGUAGE.into()],
+            codes: vec!["XYZ".into()],
+            mappings: vec![NationalityMapping {
+                code: "CHN".into(),
+                language: EN_LANGUAGE.into(),
+                name: "China".into(),
+            }],
+        };
+        let t = NationalityTable::from_doc(doc).unwrap();
+        assert!(t.is_code("XYZ"));
+        assert_eq!(t.resolve("XYZ"), Some((None, "XYZ".into())));
+        assert_eq!(t.cn_name("XYZ"), None);
+        // 导出再读回，码不丢（用户副本往返后名单里的该码仍然合法）。
+        let again = NationalityTable::from_doc(t.doc()).unwrap();
+        assert!(again.is_code("XYZ"));
+        assert_eq!(again.doc(), t.doc());
+    }
+
+    #[test]
+    fn doc_without_codes_field_still_loads() {
+        // 老副本只有 languages + mappings（没有 codes 字段）：码按映射行推导，照常可读。
+        let raw = r#"{"languages":["English"],"mappings":[{"code":"CHN","language":"English","name":"China"}]}"#;
+        let doc: NationalityDoc = serde_json::from_str(raw).unwrap();
+        let t = NationalityTable::from_doc(doc).unwrap();
+        assert!(t.is_code("CHN"));
+        assert_eq!(t.code_count(), 1);
     }
 
     #[test]
@@ -469,6 +509,14 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("必须唯一"), "{err}");
+        // 码清单里的非法码
+        let err = NationalityTable::from_doc(NationalityDoc {
+            languages: vec!["English".into()],
+            codes: vec!["CHIN".into()],
+            mappings: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(err.contains("码清单"), "{err}");
     }
 
     #[test]
@@ -523,7 +571,10 @@ mod tests {
             &[("CHN", "English", "China"), ("CHN", "简体中文", "中国")],
         );
         let table = save_doc(dir.path(), ok.clone()).unwrap();
-        assert_eq!(table.doc(), ok);
-        assert_eq!(load(dir.path()).unwrap().doc(), ok);
+        // 落盘文档补齐码全集（码由映射行派生），码与全称各自承载。
+        let mut expected = ok;
+        expected.codes = vec!["CHN".into()];
+        assert_eq!(table.doc(), expected);
+        assert_eq!(load(dir.path()).unwrap().doc(), expected);
     }
 }

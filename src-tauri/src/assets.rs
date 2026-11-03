@@ -31,7 +31,7 @@ pub static NAT_TRANSLATION: LazyLock<HashMap<String, HashMap<String, String>>> =
 });
 
 /// FM 全部国籍码的权威全集（nat_codes.json）：三位码、两位特例 "SC"、暂无译名的码都收录。
-/// rtf_scanner 用它判断「值本身已是国籍码」（严格国籍口径下的合法形态之一）；
+/// 国籍模块用它组装出厂表的码全集（码与全称解耦，暂无译名的码同样放行）；
 /// 本文件的自测另用它校验翻译表覆盖度（防两份资产脱节）。
 pub static NAT_CODES: LazyLock<Vec<String>> = LazyLock::new(|| {
     #[derive(serde::Deserialize)]

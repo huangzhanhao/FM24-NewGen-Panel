@@ -13,6 +13,7 @@
   import ImageAiPanel from "./lib/components/imageai/ImageAiPanel.svelte";
   import StatusBar from "./lib/components/layout/StatusBar.svelte";
   import LogDrawer from "./lib/components/layout/LogDrawer.svelte";
+  import HelpPanel from "./lib/components/help/HelpPanel.svelte";
   import { t } from "./lib/text";
   import { appStore, initListeners } from "./lib/stores/app.svelte";
   import { initQueueListeners } from "./lib/stores/imageai.svelte";
@@ -65,5 +66,6 @@
   <StatusBar />
 </div>
 
-<!-- 浮在最上层，由 ui.logOpen 控制显隐，故置于主布局之外。 -->
+<!-- 浮在最上层，分别由 ui.logOpen / ui.helpTab 控制显隐，故置于主布局之外。 -->
 <LogDrawer />
+<HelpPanel />

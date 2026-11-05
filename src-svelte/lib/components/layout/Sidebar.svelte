@@ -336,7 +336,7 @@
     {/if}
   </section>
 
-  <!-- 底部：首页/教程/FAQ 用默认浏览器打开（仓库暂无使用指引与 FAQ 文档，后两者暂用原地址顶替）；
+  <!-- 底部：首页跳转仓库；教程/FAQ 打开应用内文档面板（离线可查，不跳外部页面）；
        「语言」弹出三语菜单，点选即切换整个界面语言并记忆到 localStorage -->
   <div class="side-foot">
     <button
@@ -344,15 +344,10 @@
       onclick={() => openUrl("https://github.com/huangzhanhao/NewGAN-Manager-ByHzH")}
       >{t.sidebar.linkHome}</button
     >
-    <button
-      class="link small"
-      onclick={() => openUrl("https://www.bilibili.com/video/BV1ew411h759")}
+    <button class="link small" onclick={() => (ui.helpTab = "tutorial")}
       >{t.sidebar.linkTutorial}</button
     >
-    <button
-      class="link small"
-      onclick={() =>
-        openUrl("https://github.com/Maradonna90/NewGAN-Manager/wiki/FAQ")}
+    <button class="link small" onclick={() => (ui.helpTab = "faq")}
       >{t.sidebar.linkFaq}</button
     >
     <details class="lang-menu" bind:this={langMenu}>

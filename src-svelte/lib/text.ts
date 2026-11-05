@@ -71,6 +71,21 @@ const zhCN = {
     en: "English",
   },
 
+  /** 内置文档面板：侧栏「教程 / FAQ」两个入口各打开同一面板的对应页签 */
+  help: {
+    title: "使用文档",
+    subtitle: "内置教程与常见问题，离线可查",
+    tutorialTab: "教程",
+    faqTab: "FAQ",
+    searchPlaceholder: "搜索章节或关键词…",
+    searchHint: "Ctrl+F 搜索 · Esc 关闭",
+    resultCount: (shown: number, total: number) => `显示 ${shown} / 共 ${total} 条`,
+    noResults: "没有匹配的条目，换个关键词试试。",
+    close: "关闭文档面板",
+    note: "提示",
+    warning: "注意",
+  },
+
   /** 侧边栏：存档（Profile）与头像包（组）管理 */
   sidebar: {
     profileSection: "存档资料",
@@ -1003,6 +1018,21 @@ const zhTW: Dict = {
     en: "English",
   },
 
+  /** 内置文档面板：侧栏「教程 / FAQ」两个入口各打开同一面板的对应页签 */
+  help: {
+    title: "使用文件",
+    subtitle: "內建教學與常見問題，離線可查",
+    tutorialTab: "教學",
+    faqTab: "FAQ",
+    searchPlaceholder: "搜尋章節或關鍵字…",
+    searchHint: "Ctrl+F 搜尋 · Esc 關閉",
+    resultCount: (shown: number, total: number) => `顯示 ${shown} / 共 ${total} 筆`,
+    noResults: "沒有符合的項目，換個關鍵字試試。",
+    close: "關閉文件面板",
+    note: "提示",
+    warning: "注意",
+  },
+
   /** 侧边栏：存档（Profile）与头像包（组）管理 */
   sidebar: {
     profileSection: "存檔資料",
@@ -1930,6 +1960,21 @@ const en: Dict = {
     zhCN: "简体中文",
     zhTW: "繁體中文",
     en: "English",
+  },
+
+  /** 内置文档面板：侧栏「教程 / FAQ」两个入口各打开同一面板的对应页签 */
+  help: {
+    title: "Documentation",
+    subtitle: "Built-in tutorial and FAQ, available offline",
+    tutorialTab: "Tutorial",
+    faqTab: "FAQ",
+    searchPlaceholder: "Search sections or keywords…",
+    searchHint: "Ctrl+F to search · Esc to close",
+    resultCount: (shown: number, total: number) => `${shown} of ${total} entries shown`,
+    noResults: "No matching entries. Try another keyword.",
+    close: "Close documentation",
+    note: "Note",
+    warning: "Warning",
   },
 
   /** 侧边栏：存档（Profile）与头像包（组）管理 */
@@ -2874,6 +2919,9 @@ export const t = {
   },
   get lang() {
     return DICT[ui.lang].lang;
+  },
+  get help() {
+    return DICT[ui.lang].help;
   },
   get sidebar() {
     return DICT[ui.lang].sidebar;

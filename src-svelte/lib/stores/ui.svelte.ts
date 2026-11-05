@@ -19,6 +19,9 @@ const LANG_KEY = 'ngm-lang';
  *  顺序即主流程顺序（先备料 → 再替换 → 可选 AI 生图），顶栏序号圆按此顺序排列。 */
 export type Workbench = 'archive' | 'replace' | 'ai';
 
+/** 内置文档面板的页签：tutorial=教程 / faq=常见问题。 */
+export type HelpTab = 'tutorial' | 'faq';
+
 /** 启动时读取上次选择的主题（没有记录时默认深色）。 */
 function readTheme(): Theme {
   try {
@@ -45,6 +48,8 @@ export const ui = $state({
   /** 当前工作台。与 logOpen 同类——它是「界面在哪一屏」，不是业务数据，故放这里而非 appStore；
    *  也不持久化：每次启动都从「存档资料」开始，用户先看清手里有什么料。 */
   workbench: 'archive' as Workbench,
+  /** 内置文档面板：null=关闭；值决定打开哪个页签，侧栏「教程 / FAQ」入口只改这里。 */
+  helpTab: null as HelpTab | null,
 });
 
 /** 把当前主题写到 <html data-theme>——这是深/浅两套 CSS 变量的唯一切换开关。 */

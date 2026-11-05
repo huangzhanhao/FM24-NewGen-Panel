@@ -9,14 +9,18 @@ vi.mock('../services/api', () => ({
       text: body.replace(/\{\{(\w+)\|([^}]*)\}\}/g, '$2'),
       missing: [],
     })),
-    // P3 数据源：按 uid 拼一句可区分的渲染结果（个别用例会 mockResolvedValueOnce 覆盖）
+    // 数据源：按 uid 拼一句可区分的渲染结果（个别用例会 mockResolvedValueOnce 覆盖）
     previewPrompt: vi.fn(async (uid: string) => ({ text: `${uid} 的渲染结果`, missing: [] })),
-    // images 留空：generate 的 blob 加载循环不执行，无需替身 readImage
+    // images 留空：generate 的 blob 加载循环不执行，单张路径无需替身 readImage
     generateImage: vi.fn(async () => ({ images: [] })),
+    // 队列增量采集/持久记录载入要读图片字节：给 1 字节替身，避免触碰真实 read_image IPC。
+    readImage: vi.fn(async () => new ArrayBuffer(8)),
     saveAndReplace: vi.fn(async () => ({
       image: { id: 'g1', path: '/tmp/x.png', bytes: 1 },
       replaced: true,
     })),
+    // 落点预览：默认给一条带池的相对路径（个别用例会覆盖）
+    previewSaveTarget: vi.fn(async () => ({ base: 'C:/pack/_generated', rel: 'MENA/u1_1.png' })),
     addToQueue: vi.fn(async (entries: QueueEntry[]) =>
       entries.map((e, i) => ({ ...e, id: `q${i + 1}` })),
     ),
@@ -63,7 +67,9 @@ import {
   imageaiStore,
   isRetryableErrorKind,
   loadImageState,
+  rerollBorrowed,
   rerollPrompt,
+  previewSaveTarget,
   saveAndReplace,
   selectProvider,
   parseSeed,
@@ -91,12 +97,12 @@ import {
   validateSizeRules,
   SEED_MAX,
 } from './imageai.svelte';
-import type { ImageConfig, QueueEntry } from '../types';
+import type { GenImage, ImageConfig, QueueEntry } from '../types';
 
 const cfg: ImageConfig = {
   providers: [
     {
-      id: 'p1', kind: 'openai', name: 'P1', baseUrl: 'http://x/v1', defaultModel: 'm2',
+      id: 'provA', kind: 'openai', name: 'ProvA', baseUrl: 'http://x/v1', defaultModel: 'm2',
       models: [
         {
           model: 'm2',
@@ -109,7 +115,7 @@ const cfg: ImageConfig = {
       ],
     },
   ],
-  settings: { defaultProviderId: 'p1', historyLimit: 20, galleryRecordLimit: 100, concurrency: 2, namingPattern: '{uid}_{index}' },
+  settings: { defaultProviderId: 'provA', historyLimit: 20, galleryRecordLimit: 100, concurrency: 2, namingPattern: '{uid}_{index}' },
   templates: [],
 };
 
@@ -123,7 +129,7 @@ describe('image store', () => {
   it('selectProvider resets model-dependent fields', () => {
     imageaiStore.config = cfg;    imageaiStore.size = 'old';
     imageaiStore.n = 9;
-    selectProvider('p1');
+    selectProvider('provA');
     expect(imageaiStore.model).toBe('m2');
     expect(imageaiStore.size).toBe('768x768');
     expect(imageaiStore.n).toBe(1);
@@ -135,7 +141,7 @@ describe('image store', () => {
       providers: [
         ...cfg.providers,
         {
-          id: 'p2', kind: 'openai', name: 'P2', baseUrl: 'http://x/v1', defaultModel: 'mfree',
+          id: 'provB', kind: 'openai', name: 'ProvB', baseUrl: 'http://x/v1', defaultModel: 'mfree',
           models: [
             {
               model: 'mfree',
@@ -149,7 +155,7 @@ describe('image store', () => {
         },
       ],
     };
-    selectProvider('p2');
+    selectProvider('provB');
     expect(imageaiStore.size).toBe('768x768');
     // 起步值必须落在该模型的尺寸规则内：否则一进这类服务商卡片就红字。
     expect(imageaiStore.sizeError).toBeNull();
@@ -214,7 +220,7 @@ describe('queue store', () => {
 
   it('buildQueueEntries renders each player from the template and maps workbench params', async () => {
     imageaiStore.config = cfg;
-    selectProvider('p1'); // model=m2, size=768x768, n=1, quality=auto, seed=''
+    selectProvider('provA'); // model=m2, size=768x768, n=1, quality=auto, seed=''
     imageaiStore.prompt = '一张{{gender|男性}}脸';
     imageaiStore.negative = '模糊';
     imageaiStore.n = 2;
@@ -234,7 +240,7 @@ describe('queue store', () => {
       id: '', uid: 'u1', name: '甲', status: 'queued', images: [], error: '',
     });
     expect(entries[0].req).toMatchObject({
-      providerId: 'p1', model: 'm2', negativePrompt: '模糊',
+      providerId: 'provA', model: 'm2', negativePrompt: '模糊',
       size: '768x768', n: 2, quality: null, seed: 42, uid: 'u1',
     });
   });
@@ -247,7 +253,7 @@ describe('queue store', () => {
 
   it('enqueuePlayers submits entries and stores backend snapshot', async () => {
     imageaiStore.config = cfg;
-    selectProvider('p1');
+    selectProvider('provA');
     imageaiStore.prompt = '脸';
     const n = await enqueuePlayers([{ uid: 'u9', name: '丙' }]);
     expect(n).toBe(1);
@@ -262,7 +268,7 @@ describe('queue store', () => {
     const base: QueueEntry = {
       id: 'q1', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'queued', images: [], error: '',
@@ -277,7 +283,7 @@ describe('queue store', () => {
     const mk = (id: string, status: QueueEntry['status'], req: Partial<QueueEntry['req']> = {}): QueueEntry => ({
       id, uid: id, name: id,
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null, ...req,
       },
       status, images: [], error: '',
@@ -298,17 +304,17 @@ describe('queue store', () => {
     expect(runningQueueEntry()).toBeNull();
 
     // 配置摘要只列非空参数：默认项不该冒出 seed/steps 之类的空值
-    expect(queueEntryConfig(running)).toBe('p1/m2 · 768x768 · 1 张');
+    expect(queueEntryConfig(running)).toBe('provA/m2 · 768x768 · 1 张');
     expect(
       queueEntryConfig(mk('q4', 'running', { seed: 42, steps: 30, quality: 'hd', callMode: 'async', n: 2 })),
-    ).toBe('p1/m2 · 768x768 · 2 张 · quality hd · seed 42 · steps 30 · async');
+    ).toBe('provA/m2 · 768x768 · 2 张 · quality hd · seed 42 · steps 30 · async');
   });
 
   it('queueStartIds：勾选优先，未勾选才跑全部排队条目', () => {
     const mk = (id: string, status: QueueEntry['status']): QueueEntry => ({
       id, uid: id, name: id,
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status, images: [], error: '',
@@ -326,7 +332,7 @@ describe('queue store', () => {
     const base: QueueEntry = {
       id: 'q1', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'queued', images: [], error: '',
@@ -344,7 +350,7 @@ describe('queue store', () => {
     const before: QueueEntry = {
       id: 'q1', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'queued', images: [], error: '',
@@ -360,7 +366,7 @@ describe('queue store', () => {
 
   it('queueBorrowForm：把该行参数直接灌入原表单；换行直接覆盖（不留备份）', () => {
     imageaiStore.config = cfg;
-    selectProvider('p1');
+    selectProvider('provA');
     // 用户自己的工作台编辑：借用时被该行参数直接覆盖（约定：切行=直接覆盖，不做备份）
     imageaiStore.prompt = '用户自己的提示词';
     imageaiStore.negative = '用户负向';
@@ -370,7 +376,7 @@ describe('queue store', () => {
     const mk = (id: string, req: Partial<QueueEntry['req']>): QueueEntry => ({
       id, uid: `u-${id}`, name: `球员${id}`,
       req: {
-        providerId: 'p1', model: 'm2', prompt: '甲的脸', negativePrompt: '模糊', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '甲的脸', negativePrompt: '模糊', size: '768x768',
         n: 2, quality: 'high', seed: 42, callMode: 'sync', templateId: 't1', ...req,
       },
       status: 'queued', images: [], error: '',
@@ -382,7 +388,7 @@ describe('queue store', () => {
     expect(imageaiStore.queueSelectedId).toBe('q1');
     // 逐条映射（数值参数一律字符串化：表单里是字符串输入框）
     expect(imageaiStore).toMatchObject({
-      providerId: 'p1', model: 'm2', templateId: 't1', prompt: '甲的脸', negative: '模糊',
+      providerId: 'provA', model: 'm2', templateId: 't1', prompt: '甲的脸', negative: '模糊',
       size: '768x768', n: 2, quality: 'high', seed: '42', steps: '', guidance: '',
       callMode: 'sync', promptExtend: true, watermark: false, enableThinking: true,
       promptExtendMode: 'direct', outputFormat: 'png',
@@ -408,11 +414,11 @@ describe('queue store', () => {
 
   it('queueConfirmEntry：从当前表单组装 req 写回 → 快照整份替换 → 打上已确认标记', async () => {
     imageaiStore.config = cfg;
-    selectProvider('p1');
+    selectProvider('provA');
     const before: QueueEntry = {
       id: 'q1', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '甲的脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '甲的脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null, uid: 'u1', name: '甲', templateId: 't1',
       },
       status: 'queued', images: [], error: '',
@@ -471,7 +477,7 @@ describe('queue store', () => {
     const sampling: QueueEntry = {
       id: 'q2', uid: 'u2', name: '乙',
       req: {
-        providerId: 'p1', model: 'm3', prompt: '乙的脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm3', prompt: '乙的脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null, steps: 30, guidance: 3.5,
       },
       status: 'queued', images: [], error: '',
@@ -491,7 +497,7 @@ describe('queue store', () => {
 
   it('queueClearSelection：只清选中，不回滚表单（刻意取舍，不是漏做）', () => {
     imageaiStore.config = cfg;
-    selectProvider('p1');
+    selectProvider('provA');
     imageaiStore.prompt = '用户自己的提示词';
     imageaiStore.negative = '用户负向';
     imageaiStore.size = '512x512';
@@ -501,7 +507,7 @@ describe('queue store', () => {
     const entry: QueueEntry = {
       id: 'q1', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '甲的脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '甲的脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'queued', images: [], error: '',
@@ -516,7 +522,7 @@ describe('queue store', () => {
     expect(imageaiStore.queueBorrowing).toBe(false);
     // 表单**不回滚**：停在该行的参数上；用户原来的编辑不会自己回来（要恢复得自己改回去）。
     expect(imageaiStore).toMatchObject({
-      providerId: 'p1', model: 'm2', prompt: '甲的脸', negative: '', size: '768x768', n: 1, seed: '',
+      providerId: 'provA', model: 'm2', prompt: '甲的脸', negative: '', size: '768x768', n: 1, seed: '',
     });
     // 传 null / 失效 id（快照里已没有这条）同样收口
     queueSelectEntry('gone');
@@ -540,7 +546,7 @@ describe('queue store', () => {
     const mk = (id: string): QueueEntry => ({
       id, uid: `u-${id}`, name: `球员${id}`,
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'queued', images: [], error: '',
@@ -560,7 +566,7 @@ describe('queue store', () => {
     const base: QueueEntry = {
       id: 'q1', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'queued', images: [], error: '',
@@ -611,15 +617,16 @@ describe('queue store', () => {
   });
 });
 
-describe('P3 数据源与保存并替换', () => {
+describe('数据源与保存并替换', () => {
   beforeEach(() => {
     vi.mocked(api.renderPrompt).mockClear();
     vi.mocked(api.previewPrompt).mockClear();
     vi.mocked(api.generateImage).mockClear();
     vi.mocked(api.saveAndReplace).mockClear();
+    vi.mocked(api.previewSaveTarget).mockClear();
     clearSourcePlayer();
     imageaiStore.config = cfg;
-    selectProvider('p1'); // model=m2, size=768x768, n=1, quality=auto, seed=''
+    selectProvider('provA'); // model=m2, size=768x768, n=1, quality=auto, seed=''
     imageaiStore.templateId = 'tpl1';
     imageaiStore.prompt = '一张{{gender|男性}}脸';
   });
@@ -703,19 +710,64 @@ describe('P3 数据源与保存并替换', () => {
     );
   });
 
-  it('saveAndReplace passes the source uid and the shared backup switch', async () => {
+  it('saveAndReplace passes the source uid, the shared backup switch and the confirmed relative path', async () => {
     setSourcePlayer('u1', '甲');
     await saveAndReplace('img1');
-    expect(api.saveAndReplace).toHaveBeenCalledWith('img1', 'u1', true);
+    // 省略 relTarget：后端按球员所属池自动落点
+    expect(api.saveAndReplace).toHaveBeenCalledWith('img1', 'u1', true, undefined);
     (appStore as unknown as { saveBackup: boolean }).saveBackup = false; // 关掉共享备份开关
-    await saveAndReplace('img2');
-    expect(api.saveAndReplace).toHaveBeenLastCalledWith('img2', 'u1', false);
+    await saveAndReplace('img2', 'MENA/custom.png');
+    expect(api.saveAndReplace).toHaveBeenLastCalledWith('img2', 'u1', false, 'MENA/custom.png');
     (appStore as unknown as { saveBackup: boolean }).saveBackup = true; // 还原，不污染其它用例
   });
 
-  it('saveAndReplace without a source player throws', async () => {
+  it('previewSaveTarget asks for the current source uid', async () => {
+    setSourcePlayer('u1', '甲');
+    await expect(previewSaveTarget()).resolves.toEqual({
+      base: 'C:/pack/_generated',
+      rel: 'MENA/u1_1.png',
+    });
+    expect(api.previewSaveTarget).toHaveBeenCalledWith('u1');
+  });
+
+  it('rerollBorrowed 只回填当前借用行：切行或退出借用后丢弃结果', async () => {
+    const mk = (id: string): QueueEntry => ({
+      id, uid: id, name: id,
+      req: {
+        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        n: 1, quality: null, seed: null,
+      },
+      status: 'queued', images: [], error: '',
+    });
+    setQueue([mk('q1'), mk('q2')]);
+    imageaiStore.queueBorrowing = true;
+    imageaiStore.queueSelectedId = 'q1';
+
+    // 借用的 q1 → 按 q1 重掷：回填并复位 dirty
+    imageaiStore.prompt = '旧文本';
+    await rerollBorrowed('q1');
+    expect(imageaiStore.prompt).toBe('q1 的渲染结果');
+    expect(imageaiStore.promptDirty).toBe(false);
+
+    // 借用的是 q1，却按 q2 重掷：结果必须丢弃，不能把别人的词写进这一行
+    imageaiStore.prompt = '手改';
+    await rerollBorrowed('q2');
+    expect(imageaiStore.prompt).toBe('手改');
+
+    // 退出借用后一律不回填
+    imageaiStore.queueBorrowing = false;
+    await rerollBorrowed('q1');
+    expect(imageaiStore.prompt).toBe('手改');
+
+    imageaiStore.queueSelectedId = null; // 复原，不污染其它用例
+    setQueue([]);
+  });
+
+  it('保存类调用都要求数据源球员', async () => {
     await expect(saveAndReplace('img1')).rejects.toThrow();
+    await expect(previewSaveTarget()).rejects.toThrow();
     expect(api.saveAndReplace).not.toHaveBeenCalled();
+    expect(api.previewSaveTarget).not.toHaveBeenCalled();
   });
 });
 
@@ -820,7 +872,7 @@ describe('万相 V2 参数：自由尺寸校验与队列重试', () => {
     const failed: QueueEntry = {
       id: 'q9', uid: 'u1', name: '甲',
       req: {
-        providerId: 'p1', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+        providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
         n: 1, quality: null, seed: null,
       },
       status: 'failed', images: [], error: 'boom',
@@ -886,7 +938,7 @@ describe('seed 官方取值范围（百炼 [0, 2147483647]）', () => {
 describe('promptOver（提示词超限派生，D3 跨组件单点）', () => {
   beforeEach(() => {
     imageaiStore.config = cfg;
-    imageaiStore.providerId = 'p1';
+    imageaiStore.providerId = 'provA';
     imageaiStore.model = 'm2';
   });
 
@@ -924,7 +976,7 @@ describe('promptOver（提示词超限派生，D3 跨组件单点）', () => {
 describe('画廊记录（A1：持久化 + 双闸门前端接线）', () => {
   beforeEach(() => {
     imageaiStore.config = cfg;
-    selectProvider('p1'); // model=m2, size=768x768, n=1, quality=auto, seed=''
+    selectProvider('provA'); // model=m2, size=768x768, n=1, quality=auto, seed=''
     imageaiStore.templateId = 'tpl1';
     imageaiStore.prompt = '一张{{gender|男性}}脸';
     imageaiStore.results = [];
@@ -981,7 +1033,7 @@ describe('画廊记录（A1：持久化 + 双闸门前端接线）', () => {
     expect(g[1].imageAvailable).toBe(false);
   });
 
-  it('loadImageState 载入持久记录并入画廊（缺失图按占位）', async () => {
+  it('loadImageState 载入有字节的持久记录并入画廊；图已不在的记录不进画廊', async () => {
     imageaiStore.config = null; // 触发真实拉取
     imageaiStore.records = [];
     imageaiStore.results = [];
@@ -990,14 +1042,21 @@ describe('画廊记录（A1：持久化 + 双闸门前端接线）', () => {
       {
         id: 'g1', ts: '2026-09-26 10:00:00', uid: 'u1', name: '甲',
         model: 'm', prompt: 'p', negativePrompt: '', templateId: '',
+        imageAvailable: true, path: '/tmp/g1.png',
+      },
+      {
+        id: 'g2', ts: '2026-09-26 09:00:00', uid: 'u2', name: '乙',
+        model: 'm', prompt: 'p', negativePrompt: '', templateId: '',
         imageAvailable: false, path: null,
       },
     ]);
     await loadImageState();
-    expect(imageaiStore.records).toHaveLength(1);
-    expect(imageaiStore.records[0].imageAvailable).toBe(false);
-    expect(imageaiStore.records[0].removable).toBe(false);
-    expect(imageaiStore.gallery.map((i) => i.id)).toContain('g1');
+    // 只剩字节还在的那条：图已被会话清理的记录渲染出来只是空框，不入画廊。
+    expect(imageaiStore.records.map((r) => r.id)).toEqual(['g1']);
+    expect(imageaiStore.records[0]).toMatchObject({
+      imageAvailable: true, removable: false, uid: 'u1', name: '甲',
+    });
+    expect(imageaiStore.gallery.map((i) => i.id)).toEqual(['g1']);
   });
 });
 
@@ -1075,7 +1134,7 @@ describe('调用方式 callMode（A4：前端门控）', () => {
   });
 
   it('selectModel 复位 callMode 为 sync', () => {
-    selectProvider('p1');
+    selectProvider('provA');
     imageaiStore.callMode = 'async';
     selectModel('m-sync');
     expect(imageaiStore.callMode).toBe('sync');
@@ -1083,12 +1142,12 @@ describe('调用方式 callMode（A4：前端门控）', () => {
 
   it('selectProvider 复位 callMode 为 sync', () => {
     imageaiStore.callMode = 'async';
-    selectProvider('p1');
+    selectProvider('provA');
     expect(imageaiStore.callMode).toBe('sync');
   });
 
   it('generate：支持异步的模型 + callMode=async 才把 async 送进请求', async () => {
-    selectProvider('p1');
+    selectProvider('provA');
     selectModel('m2'); // supportsAsync=true
     imageaiStore.callMode = 'async';
     await generate();
@@ -1096,7 +1155,7 @@ describe('调用方式 callMode（A4：前端门控）', () => {
   });
 
   it('generate：模型不支持异步时即使 callMode=async 也送 null', async () => {
-    selectProvider('p1');
+    selectProvider('provA');
     selectModel('m-sync'); // supportsAsync 缺省 false
     imageaiStore.callMode = 'async'; // 强行置位，模拟脏状态
     await generate();
@@ -1104,7 +1163,7 @@ describe('调用方式 callMode（A4：前端门控）', () => {
   });
 
   it('buildQueueEntries：同样按能力位门控 callMode', async () => {
-    selectProvider('p1');
+    selectProvider('provA');
     selectModel('m2');
     imageaiStore.callMode = 'async';
     const entries = await buildQueueEntries([{ uid: 'u1', name: '甲' }]);
@@ -1144,7 +1203,7 @@ describe('输出格式 outputFormat（火山 Seedream / 硅基流动：能力位
   });
 
   it('selectProvider / selectModel 都把选择归位默认 png', () => {
-    selectProvider('p1');
+    selectProvider('provA');
     selectModel('m2');
     imageaiStore.outputFormat = 'jpeg'; // 用户选择
     selectModel('m-noformat');
@@ -1152,7 +1211,7 @@ describe('输出格式 outputFormat（火山 Seedream / 硅基流动：能力位
   });
 
   it('generate：声明可设的模型带当前选择；未声明的模型送 null', async () => {
-    selectProvider('p1');
+    selectProvider('provA');
     selectModel('m2'); // supportsOutputFormat=true
     imageaiStore.outputFormat = 'jpeg';
     await generate();
@@ -1164,7 +1223,7 @@ describe('输出格式 outputFormat（火山 Seedream / 硅基流动：能力位
   });
 
   it('buildQueueEntries：同一条能力位门控', async () => {
-    selectProvider('p1');
+    selectProvider('provA');
     selectModel('m2');
     imageaiStore.outputFormat = 'jpeg';
     const entries = await buildQueueEntries([{ uid: 'u1', name: '甲' }]);
@@ -1173,5 +1232,87 @@ describe('输出格式 outputFormat（火山 Seedream / 硅基流动：能力位
     selectModel('m-noformat');
     const none = await buildQueueEntries([{ uid: 'u2', name: '乙' }]);
     expect(none[0].req.outputFormat).toBeNull();
+  });
+});
+
+describe('本次结果画廊：队列跑一张进一张、只收有字节的记录、保存用图自己的球员', () => {
+  /** 队列增量采集是 fire-and-forget（setQueue 同步返回），测试里只能等它落地：
+   *  readImage → createObjectURL → 前置插入，几轮宏任务足够。 */
+  async function flush() {
+    for (let i = 0; i < 3; i += 1) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  const done = (id: string, uid: string, name: string, images: GenImage[]): QueueEntry => ({
+    id, uid, name,
+    req: {
+      providerId: 'provA', model: 'm2', prompt: '脸', negativePrompt: '', size: '768x768',
+      n: images.length, quality: null, seed: 42, uid, name,
+    },
+    status: 'success', images, error: '',
+  });
+
+  beforeEach(() => {
+    imageaiStore.config = cfg;
+    selectProvider('provA');
+    imageaiStore.results = [];
+    imageaiStore.records = [];
+    clearSourcePlayer();
+    vi.mocked(api.readImage).mockClear();
+    vi.mocked(api.getGallery).mockClear();
+    vi.mocked(api.saveAndReplace).mockClear();
+    vi.mocked(api.previewSaveTarget).mockClear();
+  });
+
+  it('快照反复整份喂入也不重复采集；图带上条目的球员身份；无图记录不进画廊；保存用图自己的 uid', async () => {
+    const batch = [
+      done('zq1', 'zu1', '甲', [
+        { id: 'zimg1', path: '/tmp/zimg1.png', bytes: 8 },
+        { id: 'zimg2', path: '/tmp/zimg2.png', bytes: 8 },
+      ]),
+    ];
+
+    // ① 队列完成一条 → 图立刻进本会话画廊（不必等整批收尾才补拉记录）
+    setQueue(batch);
+    await flush();
+    expect(imageaiStore.results.map((r) => r.id).sort()).toEqual(['zimg1', 'zimg2']);
+    // ② 身份来自条目本身：画廊卡据此保存回「这张图自己的球员」
+    expect(imageaiStore.results[0]).toMatchObject({
+      uid: 'zu1', name: '甲', size: '768x768', seed: '42',
+    });
+
+    // ③ 幂等：快照每完成一条就被整份替换一次，同一批成功条目会被反复喂进来
+    setQueue(batch);
+    await flush();
+    setQueue([...batch]);
+    await flush();
+    expect(imageaiStore.results).toHaveLength(2);
+    expect(new Set(imageaiStore.results.map((r) => r.id)).size).toBe(2);
+
+    // ④ 图已不在的持久记录不进画廊（可见路径：loadImageState 内部走 loadGalleryRecords）
+    imageaiStore.config = null;
+    vi.mocked(api.getImageAiState).mockResolvedValueOnce(cfg);
+    vi.mocked(api.getGallery).mockResolvedValueOnce([
+      {
+        id: 'zgone', ts: '2026-09-26 10:00:00', uid: 'zu9', name: '丁',
+        model: 'm', prompt: 'p', negativePrompt: '', templateId: '',
+        imageAvailable: false, path: null,
+      },
+      {
+        id: 'zlive', ts: '2026-09-26 10:01:00', uid: 'zu8', name: '丙',
+        model: 'm', prompt: 'p', negativePrompt: '', templateId: '',
+        imageAvailable: true, path: '/tmp/zlive.png',
+      },
+    ]);
+    await loadImageState();
+    expect(imageaiStore.records.map((r) => r.id)).toEqual(['zlive']);
+    expect(imageaiStore.gallery.map((i) => i.id)).not.toContain('zgone');
+
+    // ⑤ 保存对象取自图自带的 uid：工作台没选人也能存，且不因此改写 sourcePlayer
+    expect(imageaiStore.sourcePlayer).toBeNull();
+    await previewSaveTarget('zu1');
+    expect(api.previewSaveTarget).toHaveBeenCalledWith('zu1');
+    await saveAndReplace('zimg1', undefined, 'zu1', '甲');
+    expect(api.saveAndReplace).toHaveBeenCalledWith('zimg1', 'zu1', true, undefined);
+    expect(imageaiStore.sourcePlayer).toBeNull();
   });
 });

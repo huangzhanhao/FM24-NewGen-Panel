@@ -2,7 +2,7 @@
      结果数据的生命周期（没有→排队中→已产出→细看）自成一群；唯一外部触点是
      卡内「再生成」回调——onregenerate(meta) 交父级 onGenerate（Key 提交在父级包装）。 -->
 <script lang="ts">
-  import { confirm, message } from "@tauri-apps/plugin-dialog";
+  import { message } from "@tauri-apps/plugin-dialog";
   import Icon from "../../ui/Icon.svelte";
   import { saveGeneratedImageAs } from "../../ui/generatedImageSave"; // 生成图另存为（与队列坞共用）
   import { showError } from "../../ui/dialog";
@@ -11,9 +11,11 @@
   import {
     imageaiStore,
     parseSize,
+    previewSaveTarget,
     removeResult,
     saveAndReplace,
   } from "../../stores/imageai.svelte";
+  import type { GeneratedImage } from "../../types";
 
   let { onregenerate }: { onregenerate: (meta: { size: string; seed: string }) => void } = $props();
 
@@ -26,33 +28,63 @@
     return p ? `aspect-ratio:${p[0]} / ${p[1]}` : "aspect-ratio:1";
   }
 
-  // ---- 结果卡「保存并替换」：确认后写入 _generated 并走单人换脸链路 ----
-  async function onSaveReplace(imgId: string) {
-    const sp = imageaiStore.sourcePlayer;
-    if (!sp) return; // 无数据源时按钮已禁用，这里只是防御
-    if (
-      !(await confirm(t.gen.saveReplace.confirm(sp.name), {
-        title: t.dialog.info,
-      }))
-    )
-      return;
+  // ---- 结果卡「保存并替换」：先取落点预览，弹窗确认/修改后再写入 ----
+  /** 待确认的落点：base 只读展示，rel 可编辑（相对 `_generated`，含池与文件名）。
+   *  uid/name 在点开弹窗的瞬间从**这张图**上取定并冻结：弹窗期间用户可能改工作台选人，
+   *  保存对象与成功文案都不能跟着变。 */
+  let saveTarget = $state<{
+    imgId: string;
+    uid: string | null;
+    name: string;
+    base: string;
+    rel: string;
+  } | null>(null);
+
+  /** 这张图属于哪位球员：图自带的优先（队列产出/持久记录都有），缺失再回落当前数据源。
+   *  只用于文案与判禁用，不参与「保存给谁」的判定（那在 store 里同一套回落顺序）。 */
+  function ownerName(img: GeneratedImage): string {
+    return img.name || imageaiStore.sourcePlayer?.name || "";
+  }
+
+  /** 能否保存并替换：这张图自带球员，或工作台已选了数据源。两者都没有才禁用。 */
+  function canSaveReplace(img: GeneratedImage): boolean {
+    return !!img.uid || !!imageaiStore.sourcePlayer;
+  }
+
+  async function onSaveReplace(img: GeneratedImage) {
+    if (!canSaveReplace(img)) return; // 按钮已禁用，这里只是防御
     try {
-      const r = await saveAndReplace(imgId);
-      // 未命中＝图片进了 _generated，但该球员在当前档没有映射行；必须警告，不能报成功。
+      const p = await previewSaveTarget(img.uid);
+      saveTarget = { imgId: img.id, uid: img.uid ?? null, name: ownerName(img), base: p.base, rel: p.rel };
+    } catch (e) {
+      await showError(e); // 未关联头像包等后端错误走统一弹窗
+    }
+  }
+
+  async function confirmSaveReplace() {
+    const st = saveTarget;
+    if (!st) return;
+    try {
+      const r = await saveAndReplace(st.imgId, st.rel, st.uid, st.name);
+      saveTarget = null; // 成功才关：路径非法时报错弹窗关掉后，用户还能改着重试
+      // 未命中＝图片已落盘，但该球员在当前档没有映射行；必须警告，不能报成功。
       if (r.replaced) {
-        await message(t.gen.saveReplace.ok(sp.name), { title: t.dialog.info });
+        await message(t.gen.saveReplace.ok(st.name), { title: t.dialog.info });
       } else {
-        await message(t.gen.saveReplace.notMapped(sp.name), { title: t.dialog.warning });
+        await message(t.gen.saveReplace.notMapped(st.name), { title: t.dialog.warning });
       }
     } catch (e) {
-      await showError(e); // 批量替换进行中被拒等后端错误走统一弹窗
+      await showError(e); // 路径非法、批量替换进行中等后端错误走统一弹窗
     }
   }
 </script>
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.key === "Escape") lightboxUrl = null;
+    if (e.key !== "Escape") return;
+    // 落点弹窗在灯箱之上：先关它，再轮到灯箱
+    if (saveTarget) saveTarget = null;
+    else lightboxUrl = null;
   }}
 />
 
@@ -74,7 +106,8 @@
         </div>
       {/each}
     {/if}
-    <!-- 画廊 = 本会话结果 ∪ 持久记录（store.gallery 已按 id 去重）；持久记录图被会话清理时走下方占位分支 -->
+    <!-- 画廊 = 本会话结果 ∪ 持久记录（store.gallery 已按 id 去重）；读不出字节的记录在载入时就被滤掉，
+         下方占位分支只兜底「url 事后失效」这一极端情况 -->
     {#each imageaiStore.gallery as img (img.id)}
       {@const hasImg = img.imageAvailable !== false && !!img.url}
       <div class="img-card">
@@ -97,12 +130,12 @@
               <Icon name="download" class="ic" />
               {t.gen.save}
             </button>
-            <!-- 保存并替换：需数据源球员，无数据源禁用并提示入口 -->
+            <!-- 保存并替换：图自带球员（队列产出/持久记录）或工作台选了数据源都可用，两者都没有才禁用 -->
             <button
               class="btn sm"
-              disabled={!imageaiStore.sourcePlayer}
-              use:tip={imageaiStore.sourcePlayer ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
-              onclick={() => onSaveReplace(img.id)}
+              disabled={!canSaveReplace(img)}
+              use:tip={canSaveReplace(img) ? t.gen.saveReplace.btn : t.gen.saveReplace.needPlayer}
+              onclick={() => onSaveReplace(img)}
             >
               {t.gen.saveReplace.btn}
             </button>
@@ -165,7 +198,67 @@
   </div>
 {/if}
 
+<!-- 落点确认：base 只读，rel 可编辑（相对 _generated，含池与文件名）；确认后才写盘 -->
+{#if saveTarget}
+  <div
+    class="modal-overlay"
+    role="presentation"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) saveTarget = null;
+    }}
+  >
+    <div class="modal narrow" role="dialog" aria-modal="true" aria-label={t.gen.saveReplace.pathTitle}>
+      <div class="modal-title">{t.gen.saveReplace.pathTitle}</div>
+      <div class="modal-body">
+        <!-- 点名保存对象：图可能属于它自己的球员（队列产出/旧图），与工作台当前数据源未必同一人 -->
+        {#if saveTarget.name || saveTarget.uid}
+          <p class="save-target">{t.gen.saveReplace.target(saveTarget.name || saveTarget.uid || "")}</p>
+        {/if}
+        <p class="path-line mono">{saveTarget.base}/{saveTarget.rel}</p>
+        <input type="text" class="path-input" bind:value={saveTarget.rel} spellcheck="false" />
+        <p class="path-hint">{t.gen.saveReplace.pathHint}</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" onclick={() => (saveTarget = null)}>{t.gen.saveReplace.cancelBtn}</button>
+        <button class="btn primary" onclick={() => void confirmSaveReplace()}>
+          {t.gen.saveReplace.btn}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
+  /* 落点弹窗只需一行输入：覆写全局 .modal 的固定高宽，其余 modal 原语照用 */
+  .modal.narrow {
+    width: min(560px, 92vw);
+    height: auto;
+    max-height: 86vh;
+  }
+  .path-line {
+    margin: 0 0 var(--sp-3);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    word-break: break-all;
+  }
+  /* 保存对象一行：这行说的是「本次真正会被改头像的人」，用正文色强调；
+     字号与路径行同量级，不新造层级 */
+  .save-target {
+    margin: 0 0 var(--sp-2);
+    font-size: var(--fs-sm);
+    color: var(--text-1);
+    font-weight: var(--fw-semibold);
+    word-break: break-all;
+  }
+  .path-input {
+    width: 100%;
+    font-size: var(--fs-sm);
+  }
+  .path-hint {
+    margin: var(--sp-3) 0 0;
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+  }
   .res-empty {
     flex: 1;
   }

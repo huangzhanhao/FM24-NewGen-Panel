@@ -533,7 +533,7 @@
                     use:tip={t.gen.queue.saveImage}
                     onclick={() => void saveGeneratedImageAs(im.id)}
                   >
-                    <Icon name="download" />
+                    <Icon name="download" size={12} />
                     {t.gen.queue.saveImage}
                   </button>
                 </div>

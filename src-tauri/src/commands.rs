@@ -1812,7 +1812,7 @@ fn expand_naming(pattern: &str, uid: &str, index: usize) -> String {
     out
 }
 
-/// 统计 `_generated` 里属于该 uid 的已有文件数（file_stem 以 `{uid}_` 开头）；只数文件，同名目录与读目录失败一律跳过。
+/// 统计目标目录里属于该 uid 的已有文件数（file_stem 以 `{uid}_` 开头）；只数文件，同名目录与读目录失败一律跳过。
 fn count_existing(dir: &Path, uid: &str) -> usize {
     let prefix = format!("{uid}_");
     std::fs::read_dir(dir)
@@ -1848,7 +1848,208 @@ fn next_free_target(gen_dir: &Path, pattern: &str, uid: &str) -> Result<PathBuf,
     Ok(target)
 }
 
-/// 「保存并替换」的回执。`replaced=false` = 图片已落进 `_generated/`，但该 UID 在当前档的
+/// 生成图在头像包内的顶层目录名。生成区必须与正式池在目录上分开：
+/// 图一旦落进池目录就会被扫描收进抽图池，与原始素材再也分不出来。
+const GENERATED_DIR: &str = "_generated";
+
+/// 多级池（config.xml 里 from 的目录部分，如 `WF/China`）逐段拼到 base 下；空池 = base 本身。
+fn join_pool(base: &Path, pool: &str) -> PathBuf {
+    let mut p = base.to_path_buf();
+    for seg in pool.split('/').filter(|s| !s.is_empty()) {
+        p = p.join(seg);
+    }
+    p
+}
+
+/// 池取自 config.xml 的 from，属于外部输入：逐段滤掉能越出包根的片段，其余原样保留。
+/// 不做 FolderList 白名单——Unknown 布局的池键本就不在配置里。
+fn sanitize_pool(raw: &str) -> String {
+    raw.replace('\\', "/")
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != ".." && !s.starts_with('.') && !s.contains(':'))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// 归一化用户可编辑的相对路径（相对 `_generated`）。无扩展名补 `.png`；
+/// 非 png 扩展名直接拒——落盘内容恒为 png 字节，扩展名写错 FM 找不到图。
+fn normalize_rel_target(raw: &str) -> Result<String, String> {
+    let s = raw.trim().replace('\\', "/");
+    let s = s.trim_matches('/');
+    if s.is_empty() {
+        return Err("保存路径不能为空".into());
+    }
+    let mut segs: Vec<String> = Vec::new();
+    for seg in s.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err(format!("保存路径含非法片段（{seg}）：不能使用 . 或 .."));
+        }
+        if seg.starts_with('.') {
+            return Err(format!("保存路径的目录名不能以 . 开头（{seg}）"));
+        }
+        if seg.contains(':') {
+            return Err("保存路径必须是相对路径（不能含盘符或冒号）".into());
+        }
+        segs.push(seg.to_string());
+    }
+    if segs[0] == GENERATED_DIR {
+        return Err(format!("路径直接写在 {GENERATED_DIR} 之后即可，不要重复包含该目录"));
+    }
+    let last = segs.len() - 1;
+    let stem = Path::new(&segs[last]).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return Err("保存路径缺少文件名".into());
+    }
+    let ext = Path::new(&segs[last]).extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        // 扩展名统一小写：FM 在大小写敏感的文件系统上按 from 原样找文件。
+        Some("png") => segs[last] = Path::new(&segs[last]).with_extension("png").to_string_lossy().to_string(),
+        Some(other) => return Err(format!("生成图统一保存为 .png，不能使用 .{other}")),
+        None => segs[last].push_str(".png"),
+    }
+    Ok(segs.join("/"))
+}
+
+/// 用户指定的文件名已存在时静默递增（`name_1.png`、`name_2.png`…），绝不覆盖旧图。
+/// 占用判定用 exists（同名目录也算）：copy 覆盖不了目录，提前避让比写到一半失败好。
+/// 上限与命名模板避让同口径：撞满 32 个说明命名本身有问题，报错让用户改。
+fn unique_target(dir: &Path, stem: &str) -> Result<PathBuf, String> {
+    let first = dir.join(format!("{stem}.png"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for n in 1..=32 {
+        let p = dir.join(format!("{stem}_{n}.png"));
+        if !p.exists() {
+            return Ok(p);
+        }
+    }
+    Err(format!("同名文件过多，无法自动避让：{stem}.png（{}）", dir.display()))
+}
+
+/// 规划落点：`base` 恒为 `<包>/_generated`，返回「绝对路径 + 相对 base 的展示路径」。
+/// 未给相对路径（弹窗默认值）时按「池 + 命名模板」生成；给了就按用户的走（同名静默递增）。
+/// 预览命令与保存命令共用这一份规划，弹窗里看到的位置就是实际写下去的位置。
+fn plan_save_target(
+    base: &Path,
+    pool: &str,
+    pattern: &str,
+    uid: &str,
+    user_rel: Option<&str>,
+) -> Result<(PathBuf, String), String> {
+    match user_rel.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(raw) => {
+            let rel = normalize_rel_target(raw)?;
+            let p = Path::new(&rel);
+            // Path::new("a.png").parent() 是空路径，join("") 会带出尾分隔符并让 file_name 失效，故显式过滤。
+            let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+            let dir = parent.map(|d| base.join(d)).unwrap_or_else(|| base.to_path_buf());
+            let stem = p.file_stem().and_then(|s| s.to_str()).ok_or("保存路径缺少文件名")?;
+            let target = unique_target(&dir, stem)?;
+            let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let shown = match parent {
+                Some(d) => format!("{}/{}", d.to_string_lossy().replace('\\', "/"), name),
+                None => name.to_string(),
+            };
+            Ok((target, shown))
+        }
+        None => {
+            let dir = join_pool(base, pool);
+            let target = next_free_target(&dir, pattern, uid)?;
+            let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let shown = if pool.is_empty() { name.to_string() } else { format!("{pool}/{name}") };
+            Ok((target, shown))
+        }
+    }
+}
+
+/// 在「国籍同名目录 → 种族目录」里取第一个包内真实存在的一级目录（与标准二的候选顺序一致）。
+/// 都不存在返回空串：宁可落 `_generated/` 根，也不凭空造一个池目录。
+fn pick_existing_pool(img_dir: &Path, primary_nat: &str, eth: &str) -> String {
+    for cand in [primary_nat, eth] {
+        let pool = sanitize_pool(cand);
+        if !pool.is_empty() && img_dir.join(&pool).is_dir() {
+            return pool;
+        }
+    }
+    String::new()
+}
+
+/// 无映射球员的默认池：按名单里的国籍，经标准二的族裔规则（ethnics + code_rules）推出目录。
+/// 【为何复用标准二】它就是「名单国籍 → 头像包目录」的既有唯一口径；另写一套会让生成落点与
+/// 抽图归属分叉。只影响图放哪个子目录——from 由落点反推，不会写错映射。
+fn derive_pool(state: &State<'_, AppState>, img_dir: &str, uid: &str) -> String {
+    let variants = xml_parser::with_newgan_prefix_variants(uid);
+    let rec = {
+        let cache = state.rtf_cache.lock().unwrap();
+        cache.iter().find(|p| variants.contains(&p.uid)).cloned()
+    };
+    let Some(rec) = rec else { return String::new() };
+    let Ok(cfg) = RuleConfig::load(&state.data_dir) else { return String::new() };
+    let s2 = &cfg.standard2;
+    let Some(e1) = s2.ethnics.get(&rec.primary_nat) else { return String::new() };
+    let e2 = if rec.sec_nat.is_empty() {
+        None
+    } else {
+        s2.ethnics.get(&rec.sec_nat).map(String::as_str)
+    };
+    let eth = templates::standard2::apply_code_rule(&rec.ethnicity_code, e1, e2, &s2.code_rules);
+    pick_existing_pool(Path::new(img_dir), &rec.primary_nat, &eth)
+}
+
+/// 球员所属池 = 映射行 from 的目录部分（config.xml 口径）。
+/// 取数顺序：最近一次替换的映射缓存 → 本档本组快照 → 当前头像包的 live config.xml → 按国籍推导。
+/// 前三级都查不到（球员在这个包里本来就没有脸）才推导；全落空则返回空串，落 `_generated/` 根。
+fn resolve_pool(state: &State<'_, AppState>, uid: &str) -> String {
+    let variants = xml_parser::with_newgan_prefix_variants(uid);
+    let mut mapping = {
+        let cache = state.mapping_cache.lock().unwrap();
+        cache.iter().find(|m| variants.contains(&m.uid)).cloned()
+    };
+    let (cur_group, snap) = {
+        let pm = state.pm.lock().unwrap();
+        let g = pm.cur_group.clone();
+        let snap = g
+            .as_ref()
+            .map(|g| crate::paths::group_xml_path(&pm.user_cfg_path(), &pm.cur_prf, g));
+        (g, snap)
+    };
+    if mapping.is_none() {
+        if let Some(snap) = snap {
+            let snap_str = snap.to_string_lossy().to_string();
+            mapping = {
+                let cache = state.snapshot_cache.lock().unwrap();
+                cache
+                    .as_ref()
+                    .filter(|c| c.xml_path == snap_str)
+                    .and_then(|c| c.entries.iter().find(|e| variants.contains(&e.uid)).cloned())
+            };
+            if mapping.is_none() && snap.is_file() {
+                if let Ok(xml) = xml_parser::parse_xml(&snap) {
+                    mapping = variants.iter().find_map(|u| xml.get(u).cloned());
+                }
+            }
+        }
+    }
+    // 【兜底读 live config.xml】前两级只在「本档在这个包上跑过替换」时才有内容；用户只是生图再保存时
+    // 两级都是空的，但球员在包里本来就有归属目录——「所属池」问的是它，不是「本档上次抽到了哪个池」。
+    // 只影响图落在哪个子目录：映射仍由替换链路按本档快照重写，不会把别档的 from 带进来。
+    if mapping.is_none() {
+        if let Some(g) = cur_group.as_deref() {
+            if let Ok(xml) = xml_parser::parse_xml(&Path::new(g).join("config.xml")) {
+                mapping = variants.iter().find_map(|u| xml.get(u).cloned());
+            }
+        }
+    }
+    if mapping.is_none() {
+        if let Some(g) = cur_group.as_deref() {
+            return derive_pool(state, g, uid);
+        }
+    }
+    mapping.map(|m| sanitize_pool(&m.ethnicity)).unwrap_or_default()
+}
+
+/// 「保存并替换」的回执。`replaced=false` = 图片已落进 `_generated/` 下的目标目录，但该 UID 在当前档的
 /// config.xml 里没有映射行，替换链路没改动任何东西 —— 前端据此提示「未替换」，不能报成功。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1857,14 +2058,16 @@ pub struct SaveReplaceResult {
     pub replaced: bool,
 }
 
-/// 「保存并替换」：把 .imgtmp 里的生成图落盘到 `<当前组>/_generated/`，再复用单人换脸链
+/// 「保存并替换」：把 .imgtmp 里的生成图落盘到 `<当前组>/_generated/<池>/`，再复用单人换脸链
 /// （互斥检查/快照归位/改 config.xml/缓存同步）；映射表没有该 UID 时追加一条（insert_missing）。
+/// `rel_target` 是弹窗里确认过的相对路径（相对 `_generated`）；None/空 → 按球员所属池自动生成。
 /// 【为什么是同步 fn】：内部无 await 点，重活是同步 XML 链路，Tauri 同步命令跑在命令线程池不卡 UI。
 #[tauri::command]
 pub fn save_and_replace(
     state: State<'_, AppState>,
     image_id: String,
     uid: String,
+    rel_target: Option<String>,
     save_backup: bool,
 ) -> Result<SaveReplaceResult, String> {
     let uid = uid.trim().to_string();
@@ -1884,10 +2087,17 @@ pub fn save_and_replace(
         let pm = state.pm.lock().unwrap();
         pm.cur_group.clone().ok_or("请先关联头像包（当前没有选中组），再保存并替换")?
     };
-    let gen_dir = Path::new(&img_dir).join("_generated");
-    std::fs::create_dir_all(&gen_dir).map_err(|e| format!("创建生成图目录失败（{}）: {e}", gen_dir.display()))?;
-    // ⑤ 目标路径：命名模板展开 + 同名避让（见 next_free_target）；生成图统一 png。
-    let target = next_free_target(&gen_dir, &pattern, &uid)?;
+    // ⑤ 落点：`_generated` 下按「球员所属池」分层（用户可在弹窗里改这一段相对路径）。
+    //    用户的路径优先：给了就不再解析池，避免为一次保存去读整份快照。
+    let base = Path::new(&img_dir).join(GENERATED_DIR);
+    let pool = match rel_target.as_deref().map(str::trim) {
+        Some(r) if !r.is_empty() => String::new(),
+        _ => resolve_pool(&state, &uid),
+    };
+    let (target, _) = plan_save_target(&base, &pool, &pattern, &uid, rel_target.as_deref())?;
+    let target_dir = target.parent().unwrap_or(base.as_path());
+    std::fs::create_dir_all(target_dir)
+        .map_err(|e| format!("创建生成图目录失败（{}）: {e}", target_dir.display()))?;
     json_store::copy_atomic(&src, &target)?;
     // ⑤.5 保存落点回写画廊记录（路径 + 文件名）。失败只告警，不阻断保存/替换。
     if let Err(e) = image_ai::record_saved_image(&state.data_dir, &image_id, &target) {
@@ -1914,6 +2124,32 @@ pub fn save_and_replace(
         },
         replaced,
     })
+}
+
+/// 「保存并替换」的落点预览：`base` = `<当前组>/_generated` 的绝对路径，`rel` = 相对 base 的可编辑部分
+/// （球员所属池 + 命名模板展开，已做同名避让）。前端把两段拼起来展示，用户只改 rel。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTargetPreview {
+    pub base: String,
+    pub rel: String,
+}
+
+#[tauri::command]
+pub fn preview_save_target(state: State<'_, AppState>, uid: String) -> Result<SaveTargetPreview, String> {
+    let uid = uid.trim().to_string();
+    let img_dir = {
+        let pm = state.pm.lock().unwrap();
+        pm.cur_group
+            .clone()
+            .ok_or("请先关联头像包（当前没有选中组），再保存并替换")?
+    };
+    let pattern = state.image.lock().unwrap().settings.naming_pattern.clone();
+    let base = Path::new(&img_dir).join(GENERATED_DIR);
+    let pool = resolve_pool(&state, &uid);
+    let (_, rel) = plan_save_target(&base, &pool, &pattern, &uid, None)?;
+    // 分隔符统一成 "/"：前端把 base 与可编辑的 rel 直接拼起来展示，混用两种分隔符会读起来很别扭。
+    Ok(SaveTargetPreview { base: base.to_string_lossy().replace('\\', "/"), rel })
 }
 
 // 批量生成队列（gen_queue::run_queue 承担实际调度）
@@ -2300,6 +2536,86 @@ mod tests {
         std::fs::write(dir.join("fixed.png"), b"x").unwrap();
         let err = next_free_target(&dir, "fixed", "p1").unwrap_err();
         assert!(err.contains("命名模板"), "报错应指引补 {{index}}：{err}");
+    }
+
+    // ---------------- 生成图落点：池分层 / 用户可编辑路径 ----------------
+
+    #[test]
+    fn normalize_rel_target_normalizes_and_rejects_unsafe() {
+        // 分隔符归一 + 缺扩展名补 .png + 扩展名统一小写
+        assert_eq!(normalize_rel_target("MENA/uid_1").unwrap(), "MENA/uid_1.png");
+        assert_eq!(normalize_rel_target(r"WF\China\x.PNG").unwrap(), "WF/China/x.png");
+        assert_eq!(normalize_rel_target("  /MENA/sub/x/  ").unwrap(), "MENA/sub/x.png");
+        // 越界 / 隐藏段 / 绝对路径 / 重复 _generated / 非 png：一律拒绝
+        for bad in ["", "../x.png", "a/./b.png", ".hidden/x.png", "C:/x.png", "_generated/x.png", "x.jpg"] {
+            assert!(normalize_rel_target(bad).is_err(), "应拒绝：{bad}");
+        }
+        // 报错要能指导用户改：提到 .png 与 _generated
+        assert!(normalize_rel_target("x.webp").unwrap_err().contains(".png"));
+        assert!(normalize_rel_target("_generated/x.png").unwrap_err().contains("_generated"));
+    }
+
+    #[test]
+    fn plan_save_target_layers_pool_then_honors_user_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("pack").join("_generated");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // 默认：池作为子目录（多级池逐段镜像），文件名走命名模板
+        let (abs, rel) = plan_save_target(&base, "MENA", "{uid}_{index}", "p1", None).unwrap();
+        assert_eq!(abs, base.join("MENA").join("p1_1.png"));
+        assert_eq!(rel, "MENA/p1_1.png");
+        let (abs, rel) = plan_save_target(&base, "WF/China", "{uid}_{index}", "p1", None).unwrap();
+        assert_eq!(abs, base.join("WF").join("China").join("p1_1.png"));
+        assert_eq!(rel, "WF/China/p1_1.png");
+        // 空池（平铺包 / 无映射球员）：落 _generated 根，不伪造目录
+        let (abs, rel) = plan_save_target(&base, "", "{uid}_{index}", "p1", None).unwrap();
+        assert_eq!(abs, base.join("p1_1.png"));
+        assert_eq!(rel, "p1_1.png");
+
+        // 用户改过的路径优先：缺扩展名补 .png；同名静默递增、绝不覆盖
+        let (abs, rel) = plan_save_target(&base, "MENA", "{uid}_{index}", "p1", Some("MENA/custom")).unwrap();
+        assert_eq!(abs, base.join("MENA").join("custom.png"));
+        assert_eq!(rel, "MENA/custom.png");
+        // 落盘前才建目录（规划本身无副作用）：这里手工补上，模拟「上一张已写过」
+        std::fs::create_dir_all(base.join("MENA")).unwrap();
+        std::fs::write(&abs, b"x").unwrap();
+        let (abs, rel) =
+            plan_save_target(&base, "MENA", "{uid}_{index}", "p1", Some("MENA/custom.png")).unwrap();
+        assert_eq!(abs, base.join("MENA").join("custom_1.png"));
+        assert_eq!(rel, "MENA/custom_1.png");
+        // 根级路径：parent 为空时不能被 join("") 带出尾分隔符（否则 file_name 失效）
+        let (abs, rel) = plan_save_target(&base, "MENA", "{uid}_{index}", "p1", Some("top.png")).unwrap();
+        assert_eq!(abs, base.join("top.png"));
+        assert_eq!(rel, "top.png");
+    }
+
+    #[test]
+    fn pick_existing_pool_prefers_nationality_dir_then_ethnicity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // 两个目录都在：国籍同名目录优先（与标准二的候选顺序一致）
+        std::fs::create_dir_all(root.join("CHN")).unwrap();
+        std::fs::create_dir_all(root.join("Asian")).unwrap();
+        assert_eq!(pick_existing_pool(root, "CHN", "Asian"), "CHN");
+        // 国籍目录不在：退到种族目录
+        std::fs::create_dir_all(root.join("Seasian")).unwrap();
+        assert_eq!(pick_existing_pool(root, "TLS", "Seasian"), "Seasian");
+        // 两个都不在 / 候选为空：返回空串（落根，不凭空造池目录）
+        assert_eq!(pick_existing_pool(root, "XXX", "Yyy"), "");
+        assert_eq!(pick_existing_pool(root, "", ""), "");
+        // 越界片段被剥掉：`../Asian` 归一成包内的 `Asian`，结果永远不会越出包根
+        assert_eq!(pick_existing_pool(root, "..", "../Asian"), "Asian");
+    }
+
+    #[test]
+    fn sanitize_pool_drops_segments_that_escape_pack() {
+        // 正常池原样保留（多级）；越界/隐藏/盘符段整段丢弃
+        assert_eq!(sanitize_pool("MENA"), "MENA");
+        assert_eq!(sanitize_pool(r"WF\China"), "WF/China");
+        assert_eq!(sanitize_pool("../../etc"), "etc");
+        assert_eq!(sanitize_pool(".hidden/MENA"), "MENA");
+        assert_eq!(sanitize_pool(""), "");
     }
 
     #[test]

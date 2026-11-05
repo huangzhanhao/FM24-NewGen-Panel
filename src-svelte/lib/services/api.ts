@@ -7,7 +7,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AppSnapshot, GalleryItem, GenImage, GenRequest, SaveReplaceResult, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
+  AppSnapshot, GalleryItem, GenImage, GenRequest, SaveReplaceResult, SaveTargetPreview, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
   NationalityDoc, PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
@@ -110,8 +110,13 @@ export const api = {
   saveGeneratedImage: (imageId: string, targetPath: string) => invoke<string>('save_generated_image', { imageId, targetPath }),
   // 按球员 UID + 模板渲染提示词（不发起生成），供生成前确认。
   previewPrompt: (uid: string, templateId: string) => invoke<RenderOutcome>('preview_prompt', { uid, templateId }),
-  // 保存生成图并替换该球员头像；replaced 区分「真改了映射」与「只落盘」。
-  saveAndReplace: (imageId: string, uid: string, saveBackup: boolean) => invoke<SaveReplaceResult>('save_and_replace', { imageId, uid, saveBackup }),
+  // 保存前取落点预览（`_generated` 基址 + 池/文件名），供弹窗确认或修改。
+  previewSaveTarget: (uid: string) => invoke<SaveTargetPreview>('preview_save_target', { uid }),
+  // 保存生成图并替换该球员头像；relTarget 为空 → 后端按球员所属池自动落点。
+  // replaced 区分「真改了映射」与「只落盘」。
+  // relTarget 显式转 null：invoke 会丢掉 undefined 字段，后端 Option<String> 收不到键会报参数缺失。
+  saveAndReplace: (imageId: string, uid: string, saveBackup: boolean, relTarget?: string) =>
+    invoke<SaveReplaceResult>('save_and_replace', { imageId, uid, saveBackup, relTarget: relTarget ?? null }),
   // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
   // 追加条目到队列（id 由后端补发），返回全量队列。
   addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),

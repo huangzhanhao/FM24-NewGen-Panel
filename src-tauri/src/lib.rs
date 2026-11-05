@@ -370,7 +370,8 @@ pub fn run() {
             commands::generate_image,  // 单张生成：调服务商出图（不跨 await 持锁）
             commands::get_gallery,     // 画廊记录：读持久清单 + 现算图片存在性
             commands::save_generated_image, // 生成图另存：从会话临时目录原子复制到目标路径
-            commands::save_and_replace, // 保存并替换：生成图落盘 _generated 后复用单人换脸链
+            commands::save_and_replace, // 保存并替换：生成图落盘 _generated/<池> 后复用单人换脸链
+            commands::preview_save_target, // 保存并替换的落点预览（池 + 命名模板，供弹窗确认/修改）
             commands::add_to_queue,    // 批量生成：追加条目（返回快照）
             commands::remove_from_queue, // 批量生成：按 id 移除条目
             commands::clear_queue,     // 批量生成：清空队列

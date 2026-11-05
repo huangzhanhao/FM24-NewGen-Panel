@@ -202,8 +202,8 @@ export const imageaiStore = $state({
   callMode: 'sync' as 'sync' | 'async', // 调用方式；仅支持异步的模型可选，切服务商/模型时归位同步
   generating: false,
   results: [] as GeneratedImage[],
-  /** 载入的持久画廊记录（跨会话留存；图片仅存会话临时目录，可能已被清理 → url 为空，渲染端显示占位）。
-   *  与 results 一起构成画廊数据源，去重见 gallery 派生。 */
+  /** 载入的持久画廊记录（跨会话留存）。只收「字节还在」的条目：图已被会话清理的记录不进画廊，
+   *  去重与合并见 gallery 派生。 */
   records: [] as GeneratedImage[],
 
   /** 哪些服务商「已设置 Key」。密文随服务商行落盘、明文只进后端会话内存，且永不回传前端；
@@ -359,23 +359,41 @@ export function loadImageState(): Promise<void> {
   return loadPromise;
 }
 
-/** 载入持久画廊记录：图片仍在会话临时目录的，预读成 blob URL；已被清理的 url 留空（渲染端显示占位）。
- *  单张图片读取失败只退化为该条占位，不阻塞整批。 */
+/** 载入持久画廊记录并预读成 blob URL。
+ *  只收**图还在**的记录：`imageAvailable=false` / 无 path（会话临时目录已被清理）或字节读不出来的，
+ *  渲染出来只是一个「图片已不在」的空框，一排空框对用户没有信息量，直接不进画廊。
+ *  单张读取失败只跳过该张，不阻塞整批。 */
 async function loadGalleryRecords() {
   const items = await api.getGallery();
   const recs: GeneratedImage[] = [];
   for (const it of items) {
+    if (!it.imageAvailable || !it.path) continue;
     let url = '';
-    if (it.imageAvailable && it.path) {
-      try {
-        url = await loadImageBlobUrl(it.path);
-      } catch {
-        url = '';
-      }
+    try {
+      url = await loadImageBlobUrl(it.path);
+    } catch {
+      continue; // 读不出字节与「图已不在」等价：跳过，不留空框
     }
     // savedPath/savedName 来自 GalleryItem（Rust 的 #[serde(flatten)] 把记录字段平铺到顶层）；
     // 后端对从未保存过的记录省略该键，这里统一收敛成 null，渲染端只判空。
-    recs.push({ id: it.id, path: it.path ?? '', url, imageAvailable: it.imageAvailable, removable: false, savedPath: it.savedPath ?? null, savedName: it.savedName ?? null });
+    // uid/name 必须透传：画廊卡要靠它把图保存回自己的球员（丢了就只能靠工作台手选）。
+    recs.push({
+      id: it.id,
+      path: it.path,
+      url,
+      imageAvailable: it.imageAvailable,
+      removable: false,
+      savedPath: it.savedPath ?? null,
+      savedName: it.savedName ?? null,
+      uid: it.uid ?? null,
+      name: it.name ?? null,
+    });
+  }
+  // 【blob 回收】records 是整表替换，旧表里的 blob URL 不 revoke 就永远泄漏（每个背后是整张图的字节）；
+  // 队列每收尾一次都会重拉一遍，长会话就是线性增长。只在 recs 建完之后做：中途抛异常时旧表仍然完好，
+  // 也绝不碰 results 的 URL——同一张图可能在两边各持一份，results 那份还在展示。
+  for (const old of imageaiStore.records) {
+    if (old.url) URL.revokeObjectURL(old.url);
   }
   imageaiStore.records = recs;
 }
@@ -506,19 +524,34 @@ export function setSourcePlayer(uid: string, name: string) {
   void assembleForSource(uid);
 }
 
-/** 按球员记录组装提示词并回填输入框。失败静默：名单未扫到该球员时框内保留原文，
- *  真正缺什么会在生成时抛可读错误。两处 uid 校验用于丢弃换人期间返回的过期结果。 */
-async function assembleForSource(uid: string) {
+/** 重掷内核：组装 → 竞态守卫 → 回填。`isCurrent` 判定「结果回来时 uid 是否仍是当前操作对象」，
+ *  异步期间用户切了数据源/换了核对行就丢弃结果，避免把 A 的提示词写进 B 的框。 */
+async function rerollCore(uid: string, isCurrent: () => boolean) {
   try {
     if (!imageaiStore.config) await loadImageState();
-    if (imageaiStore.sourcePlayer?.uid !== uid) return;
+    if (!isCurrent()) return;
     const rendered = await api.previewPrompt(uid, imageaiStore.templateId);
-    if (imageaiStore.sourcePlayer?.uid !== uid) return;
+    if (!isCurrent()) return;
     imageaiStore.prompt = rendered.text;
     imageaiStore.promptDirty = false;
   } catch {
-    // 组装失败不打断选人流程
+    // 组装失败不打断选人/核对流程
   }
+}
+
+/** 换数据源球员后的重掷：守卫口径就是「结果回来时数据源还是不是他」。 */
+async function assembleForSource(uid: string) {
+  await rerollCore(uid, () => imageaiStore.sourcePlayer?.uid === uid);
+}
+
+/** 借用态重掷：按被核对队列行的球员重新组装提示词。
+ *  队列里没有「数据源球员」这一说，故守卫看的是「借用的还是不是这一条」。 */
+export async function rerollBorrowed(uid: string) {
+  await rerollCore(uid, () => {
+    if (!imageaiStore.queueBorrowing) return false;
+    const id = imageaiStore.queueSelectedId;
+    return imageaiStore.queue.find((e) => e.id === id)?.uid === uid;
+  });
 }
 
 export function clearSourcePlayer() {
@@ -594,6 +627,9 @@ export async function generate(meta?: { size?: string; seed?: string }) {
         path: im.path,
         url: await loadImageBlobUrl(im.path),
         ...used,
+        // 身份随结果落到图上（与请求里的 uid/name 同源）：画廊卡保存时不必再问工作台此刻选了谁。
+        uid: sp?.uid ?? null,
+        name: sp?.name ?? null,
       });
     }
     imageaiStore.results = [...imgs, ...imageaiStore.results];
@@ -614,17 +650,38 @@ export function clearResults() {
   imageaiStore.results = [];
 }
 
-// ---------------- 结果卡「保存并替换」（P3） ----------------
+// ---------------- 结果卡「保存并替换」 ----------------
 
-/** 把生成图写为数据源球员的新头像：后端复制到 <头像包>/_generated/ 并复用单人换脸全链。
- *  备份开关读 appStore.saveBackup（与单人替换同口径）；sourcePlayer 为 null 时 UI 已禁用，这里再拦一道。 */
-export async function saveAndReplace(imageId: string) {
-  const sp = imageaiStore.sourcePlayer;
-  if (!sp) throw new Error(t.gen.saveReplace.needSource);
-  return api.saveAndReplace(imageId, sp.uid, appStore.saveBackup);
+/** 决定「保存给谁」：显式传入的 uid（这张图自己的球员，见 GeneratedImage.uid）优先，
+ *  其次才是工作台当前数据源。已有的画廊卡带着自己的 uid，故保存不再要求先手选球员。
+ *  刻意**不改写** sourcePlayer：保存一张旧图不该把工作台的选人改掉。 */
+function saveTargetUid(uid?: string | null): string {
+  const target = uid || imageaiStore.sourcePlayer?.uid;
+  if (!target) throw new Error(t.gen.saveReplace.needSource);
+  return target;
 }
 
-// ---------------- 批量生成队列（P2 Task5） ----------------
+/** 把生成图写为**该图所属球员**的新头像：后端复制到 <头像包>/_generated/<池>/ 并复用单人换脸全链。
+ *  relTarget 是弹窗里确认过的相对路径（相对 `_generated`）；省略则按球员所属池自动落点。
+ *  uid 省略时回落到工作台数据源；两者都没有才抛 needSource（UI 已禁用按钮，这里再拦一道）。
+ *  name 仅供调用方拼提示文案，落盘与替换链路都不需要它。
+ *  备份开关读 appStore.saveBackup（与单人替换同口径）。 */
+export async function saveAndReplace(
+  imageId: string,
+  relTarget?: string,
+  uid?: string | null,
+  name?: string | null,
+) {
+  return api.saveAndReplace(imageId, saveTargetUid(uid), appStore.saveBackup, relTarget);
+}
+
+/** 取「保存并替换」的默认落点（池 + 命名模板，后端已避让），供弹窗预填与展示。
+ *  uid 口径与 saveAndReplace 完全一致（显式传入优先，否则回落数据源）。 */
+export async function previewSaveTarget(uid?: string | null) {
+  return api.previewSaveTarget(saveTargetUid(uid));
+}
+
+// ---------------- 批量生成队列 ----------------
 
 /** 提交加入队列的行数据（名单预览当前页勾选的球员）。 */
 export interface PlayerRow { uid: string; name: string; }
@@ -685,12 +742,64 @@ export async function buildQueueEntries(rows: ReadonlyArray<PlayerRow>): Promise
   return entries;
 }
 
-/** 快照唯一写入方：整份替换本地镜像并派生 queueRunning。挂载时 query 一次即能同步错过的现状。 */
+/** 已采集过的图 id（含正在读 blob 的、读失败的、以及用户后来移除/清空的）。
+ *  采集是异步的，而快照会被反复整份替换（进度事件 120ms 节流刷新）——同一份成功条目会重复送进来，
+ *  靠它保证一张图只进画廊一次，也避免用户移除后下一份快照又把它捡回来。 */
+const harvestedIds = new Set<string>();
+
+/** 把快照里已成功条目的图片前置进本会话画廊（results）。
+ *  队列条目的 images 本就带 id/path，逐张读 blob 即可，不必等后端写记录再整表拉一遍。
+ *  逐张独立成败：一张读失败只跳过它自己，不抛错、不拖累同批（setQueue 是同步出口，
+ *  未处理的 rejection 会直接冒到控制台/上层）。 */
+function harvestQueueImages(entries: QueueEntry[]) {
+  const known = new Set<string>(harvestedIds);
+  for (const r of imageaiStore.results) known.add(r.id);
+  for (const r of imageaiStore.records) known.add(r.id);
+  const pending: GeneratedImage[] = [];
+  for (const e of entries) {
+    if (e.status !== 'success') continue;
+    for (const im of e.images ?? []) {
+      if (!im?.id || !im.path || known.has(im.id)) continue;
+      known.add(im.id);
+      harvestedIds.add(im.id); // 先占位：同一 id 的第二次采集在 blob 读回前就被挡下
+      pending.push({
+        id: im.id,
+        path: im.path,
+        url: '',
+        size: e.req.size,
+        // 与单张 generate 的记录口径一致：随机（null）留空，有效 seed 字符串化供结果卡展示/同参重生
+        seed: e.req.seed != null ? String(e.req.seed) : null,
+        // 身份取条目自己的：队列里每行就是一名球员，这张图也只能保存回他
+        uid: e.uid ?? null,
+        name: e.name ?? null,
+      });
+    }
+  }
+  if (pending.length === 0) return;
+  void Promise.all(
+    pending.map(async (img) => {
+      try {
+        img.url = await loadImageBlobUrl(img.path);
+        // 前置：最新读回的那张排在最前，与单张 generate 的插入方向一致
+        imageaiStore.results = [img, ...imageaiStore.results];
+      } catch {
+        // 读不出字节就不进画廊：空框没有信息量。id 仍留在 harvestedIds 里，不再反复重读同一张。
+      }
+    }),
+  ).catch(() => {
+    // 理论上进不到这里（逐张已各自兜住），留一道防线：collect 的异常绝不冒给同步调用方。
+  });
+}
+
+/** 快照唯一写入方：整份替换本地镜像并派生 queueRunning。挂载时 query 一次即能同步错过的现状。
+ *  每次快照都顺带做一次增量采集：队列每完成一条都会经这里刷新，画廊因此「跑一张进一张」，
+ *  不必等整批收尾（见 harvestQueueImages）。 */
 export function setQueue(entries: QueueEntry[]) {
   imageaiStore.queue = entries;
   imageaiStore.queueRunning = entries.some((e) => e.status === 'running');
   // 快照里已无 running：说明取消（或自然收尾）已经落地，过渡态该收了。
   if (!imageaiStore.queueRunning) imageaiStore.queueCancelling = false;
+  harvestQueueImages(entries);
 }
 
 /** 组装并入队，返回本次提交条数；后端全量快照写回 store。 */

@@ -189,7 +189,7 @@ export interface ProviderConfig {
 }
 
 /** 生图设置。concurrency 仅随文件读写、不参与调度（队列一律串行提交，见后端
- *  commands::QUEUE_CONCURRENCY）；namingPattern 在 P1 只随文件读写、P3 生效。
+ *  commands::QUEUE_CONCURRENCY）；namingPattern 同样只随文件读写，落盘时由后端按模板命名。
  *  historyLimit 与 galleryRecordLimit 是两条独立淘汰闸门的上限（图片数 / 记录行数），互不换算。 */
 export interface GenSettings {
   defaultProviderId: string; historyLimit: number; galleryRecordLimit: number;
@@ -228,11 +228,11 @@ export interface ImageConfig {
 export interface GenRequest {
   providerId: string; model: string; prompt: string; negativePrompt: string;
   size: string; n: number; quality: string | null; seed: number | null;
-  /** P2 生效（steps 依赖支持该参数的适配器）；硅基流动/魔搭用；null/缺省 = 不发送（用服务端默认）。 */
+  /** 仅当模型声明支持 steps 的适配器（硅基流动/魔搭）才发送；null/缺省 = 不发送（用服务端默认）。 */
   steps?: number | null;
   /** 引导系数（硅基流动 guidance_scale / 魔搭 guidance）；null/缺省 = 不发送。 */
   guidance?: number | null;
-  /** P3 生效（uid 依赖名单数据源）；字段先落下，P1 恒不传。 */
+  /** 名单数据源球员的 UID：用于日志标签与画廊记录；无数据源时为 null。 */
   uid?: string | null;
   /** 球员名（随请求带入，仅用于画廊记录展示；无数据源时缺省 null）。 */
   name?: string | null;
@@ -268,6 +268,9 @@ export interface GenImage { id: string; path: string; bytes: number; }
 
 export interface SaveReplaceResult { image: GenImage; replaced: boolean; }
 
+/** 「保存并替换」的落点预览：base = `<当前组>/_generated` 绝对路径，rel = 相对它、用户可编辑的部分。 */
+export interface SaveTargetPreview { base: string; rel: string; }
+
 export interface GenResult {
   images: GenImage[];
 }
@@ -283,6 +286,10 @@ export interface GeneratedImage {
   seed?: string | null;
   imageAvailable?: boolean;
   removable?: boolean;
+  /** 这张图属于哪位球员（单张生成、队列产出、持久记录三处都会带；无数据源时为空）。
+   *  画廊卡据此「保存到这张图自己的球员」，不必先在工作台手动选人。 */
+  uid?: string | null;
+  name?: string | null;
   /** 这张图被保存后的落点（来自 gallery.json 的 savedPath/savedName；未保存过为空）。 */
   savedPath?: string | null;
   savedName?: string | null;

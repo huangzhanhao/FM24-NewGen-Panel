@@ -25,6 +25,7 @@
     parseSize,
     queueConfirmEntry,
     queueEntryConfig,
+    rerollBorrowed,
     rerollPrompt,
     runningQueueEntry,
     SEED_MAX,
@@ -79,6 +80,18 @@
    *  冒泡收不到——在这些控件的回调里显式走同一入口，保证「改即清标记」无旁路。 */
   function onBorrowParamEdit() {
     onCardEdited();
+  }
+
+  /** 重掷对象：借用中的队列行优先——队列是多球员场景，工作台没有「数据源球员」可用，
+   *  逐条核对时重掷的必须是正在核对的这一条。两者都没有就不渲染按钮（没有球员就没有随机量）。 */
+  const rerollUid = $derived(borrowEntry?.uid || imageaiStore.sourcePlayer?.uid || null);
+
+  /** 重掷提示词：借用态对被核对的那条，普通态对数据源球员。 */
+  function onReroll() {
+    onBorrowParamEdit(); // 重掷只写 store、不派发 DOM 事件，确认标记要在这里显式清
+    const uid = rerollUid;
+    if (!uid) return;
+    void (borrowEntry ? rerollBorrowed(uid) : rerollPrompt());
   }
 
   const promptLen = $derived(imageaiStore.prompt.length);
@@ -372,7 +385,7 @@
   </div>
 
   <!-- 单框可编辑：内容即实发文本。有数据源时由后端组装后回填此处，用户改动优先。
-       重掷胶囊浮在框内右下角（仅数据源模式下出现）：textarea 内放不了元素，用 wrapper 定位 -->
+       重掷胶囊浮在框内右下角（数据源或借用中的队列行都可掷）：textarea 内放不了元素，用 wrapper 定位 -->
   <div class="prompt-wrap">
     <textarea
       id="ig-prompt"
@@ -381,8 +394,8 @@
       class:invalid={imageaiStore.promptOver}
       oninput={() => (imageaiStore.promptDirty = true)}
     ></textarea>
-    {#if imageaiStore.sourcePlayer}
-      <button type="button" class="reroll-btn" use:tip={t.gen.rerollPromptTitle} onclick={() => { onBorrowParamEdit(); rerollPrompt(); }}>
+    {#if rerollUid}
+      <button type="button" class="reroll-btn" use:tip={t.gen.rerollPromptTitle} onclick={onReroll}>
         {t.gen.rerollPrompt}
       </button>
     {/if}

@@ -97,7 +97,7 @@ const zhCN = {
     deleteGroupBtn: "删除组",
     deleteGroupConfirm: (dir: string) => `删除组及其映射备份？\n${dir}`,
     deleteGroupTitle: "删除组",
-    /** 队列运行中的切档/切组护栏（S10）：空闲切换不弹窗不打断，运行中才问这一句 */
+    /** 队列运行中的切档/切组护栏：空闲切换不弹窗不打断，运行中才问这一句 */
     queueScopeTitle: "AI 头像队列正在运行",
     queueScopeConfirm:
       "切换存档或头像包后，未完成的生成任务将被取消。确定要切换吗？",
@@ -175,7 +175,7 @@ const zhCN = {
     provider: "服务商",
     model: "模型",
     providerSettings: "服务商设置",
-    /** 服务配置条就绪状态灯（S6）：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
+    /** 服务配置条就绪状态灯：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
     statusReady: "已就绪",
     statusNoKey: "未设置 Key",
     statusNoModel: "未选模型",
@@ -288,13 +288,13 @@ const zhCN = {
     saved: "图片已保存",
     removeImageTitle: "移除",
     needModel: "请先在「AI 生成头像」工作台选择服务商与模型",
-    /** 生成前渲染发现「既无默认值、又无数据源」的占位符时抛出（P1 无数据源，出现即需用户手工替换）。 */
+    /** 渲染时抛出：无默认值且无数据源的占位符无法自动解析，只能由用户手工替换，故直接报错并列出变量名。 */
     missingPlaceholders: (keys: string[]) => `占位符未填充：${keys.join("、")}`,
-    // P3 数据源：名单/单人预览入口把球员设为生图数据源，模板变量按名单记录自动填充
+    // 数据源：名单/单人预览入口可把球员设为生图数据源，模板变量按名单记录自动填充
     source: {
       clear: "清除",
       clearTitle: "清除数据源，恢复手动提示词",
-      /** 档案卡（S7）：无数据源时的台内 UID 查询（球员源第三来源） */
+      /** 档案卡：无数据源时的台内 UID 查询（球员源第三来源） */
       queryHint: "输入 UID 查询球员并设为数据源",
       queryPlaceholder: "如 r-2000472008",
       queryBtn: "查询",
@@ -311,16 +311,20 @@ const zhCN = {
       useForGen: "送生图",
       selected: "已是数据源",
     },
-    // P3 结果卡「保存并替换」：生成图写入 <头像包>/_generated/ 并走单人换脸链路
+    // 结果卡「保存并替换」：生成图写入 <头像包>/_generated/<池>/ 并走单人换脸链路
     saveReplace: {
       btn: "保存并替换",
       needPlayer:
         "需先选择球员：在「名单预览」行尾点「去抽图」或单人替换页点「送生图」",
-      confirm: (name: string) =>
-        `把这张生成图设为 ${name} 的头像？将写入头像包并替换其映射。`,
+      pathTitle: "保存位置",
+      // 落点弹窗里显式点名保存对象：图可能有自己的球员（队列产出/旧图），不一定是工作台当前数据源
+      target: (name: string) => `保存为 ${name} 的头像`,
+      pathHint:
+        "路径相对于 _generated 目录，可用 / 分多级；文件名已按命名模板避让，同名会自动加序号。",
+      cancelBtn: "取消",
       ok: (name: string) => `已保存并替换 ${name} 的头像`,
       notMapped: (name: string) =>
-        `图片已保存到 _generated 目录，但没能写入映射：当前头像包的 config.xml 缺失或结构异常。请检查头像包后重试。`,
+        `图片已保存到 _generated 下的目标目录，但没能写入映射：当前头像包的 config.xml 缺失或结构异常。请检查头像包后重试。`,
       needSource: "请先选择数据源球员（名单预览行尾「去抽图」）",
     },
     // 服务商设置：Key 跟着服务商走，这里是唯一编辑入口（工作台只显示状态）
@@ -1025,7 +1029,7 @@ const zhTW: Dict = {
     deleteGroupBtn: "刪除組",
     deleteGroupConfirm: (dir: string) => `刪除組及其對映備份？\n${dir}`,
     deleteGroupTitle: "刪除組",
-    /** 队列运行中的切档/切组护栏（S10）：空闲切换不弹窗不打断，运行中才问这一句 */
+    /** 队列运行中的切档/切组护栏：空闲切换不弹窗不打断，运行中才问这一句 */
     queueScopeTitle: "AI 頭像佇列正在執行",
     queueScopeConfirm:
       "切換存檔或頭像包後，未完成的生成任務將被取消。確定要切換嗎？",
@@ -1103,7 +1107,7 @@ const zhTW: Dict = {
     provider: "服務商",
     model: "模型",
     providerSettings: "服務商設定",
-    /** 服务配置条就绪状态灯（S6）：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
+    /** 服务配置条就绪状态灯：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
     statusReady: "已就緒",
     statusNoKey: "未設定 Key",
     statusNoModel: "未選模型",
@@ -1216,13 +1220,13 @@ const zhTW: Dict = {
     saved: "圖片已儲存",
     removeImageTitle: "移除",
     needModel: "請先在「AI 生成頭像」工作臺選擇服務商與模型",
-    /** 生成前渲染发现「既无默认值、又无数据源」的占位符时抛出（P1 无数据源，出现即需用户手工替换）。 */
+    /** 渲染时抛出：无默认值且无数据源的占位符无法自动解析，只能由用户手工替换，故直接报错并列出变量名。 */
     missingPlaceholders: (keys: string[]) => `佔位符未填充：${keys.join("、")}`,
-    // P3 数据源：名单/单人预览入口把球员设为生图数据源，模板变量按名单记录自动填充
+    // 数据源：名单/单人预览入口可把球员设为生图数据源，模板变量按名单记录自动填充
     source: {
       clear: "清除",
       clearTitle: "清除資料來源，恢復手動提示詞",
-      /** 档案卡（S7）：无数据源时的台内 UID 查询（球员源第三来源） */
+      /** 档案卡：无数据源时的台内 UID 查询（球员源第三来源） */
       queryHint: "輸入 UID 查詢球員並設為資料來源",
       queryPlaceholder: "如 r-2000472008",
       queryBtn: "查詢",
@@ -1239,16 +1243,20 @@ const zhTW: Dict = {
       useForGen: "送生圖",
       selected: "已是資料來源",
     },
-    // P3 结果卡「保存并替换」：生成图写入 <头像包>/_generated/ 并走单人换脸链路
+    // 结果卡「保存并替换」：生成图写入 <头像包>/_generated/<池>/ 并走单人换脸链路
     saveReplace: {
       btn: "儲存並替換",
       needPlayer:
         "需先選擇球員：在「名單預覽」行尾點「去抽圖」或單人替換頁點「送生圖」",
-      confirm: (name: string) =>
-        `把這張生成圖設為 ${name} 的頭像？將寫入頭像包並替換其對映。`,
+      pathTitle: "儲存位置",
+      // 落點彈窗裡顯式點名儲存對象：圖可能有自己的球員（佇列產出/舊圖），不一定是工作台目前資料來源
+      target: (name: string) => `儲存為 ${name} 的頭像`,
+      pathHint:
+        "路徑相對於 _generated 目錄，可用 / 分多級；檔名已按命名模板避讓，同名會自動加序號。",
+      cancelBtn: "取消",
       ok: (name: string) => `已儲存並替換 ${name} 的頭像`,
       notMapped: (name: string) =>
-        `圖片已儲存到 _generated 目錄，但沒能寫入對映：當前頭像包的 config.xml 缺失或結構異常。請檢查頭像包後重試。`,
+        `圖片已儲存到 _generated 下的目標目錄，但沒能寫入對映：當前頭像包的 config.xml 缺失或結構異常。請檢查頭像包後重試。`,
       needSource: "請先選擇資料來源球員（名單預覽行尾「去抽圖」）",
     },
     // 服務商設定：Key 跟著服務商走，這裡是唯一編輯入口（工作台只顯示狀態）
@@ -1953,7 +1961,7 @@ const en: Dict = {
     deleteGroupConfirm: (dir: string) =>
       `Delete the group and its mapping backup?\n${dir}`,
     deleteGroupTitle: "Delete group",
-    /** 队列运行中的切档/切组护栏（S10）：空闲切换不弹窗不打断，运行中才问这一句 */
+    /** 队列运行中的切档/切组护栏：空闲切换不弹窗不打断，运行中才问这一句 */
     queueScopeTitle: "The AI avatar queue is running",
     queueScopeConfirm:
       "Switching the profile or facepack cancels unfinished generation tasks. Continue?",
@@ -2038,7 +2046,7 @@ const en: Dict = {
     provider: "Provider",
     model: "Model",
     providerSettings: "Provider settings",
-    /** 服务配置条就绪状态灯（S6）：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
+    /** 服务配置条就绪状态灯：判据与顶栏 ③chip 同源（Key 已设置 + 模型已选），不冒充「已连通」 */
     statusReady: "Ready",
     statusNoKey: "No key",
     statusNoModel: "No model",
@@ -2161,14 +2169,14 @@ const en: Dict = {
     saved: "Image saved",
     removeImageTitle: "Remove",
     needModel: "Select a provider and model in the AI avatars workbench first",
-    /** 生成前渲染发现「既无默认值、又无数据源」的占位符时抛出（P1 无数据源，出现即需用户手工替换）。 */
+    /** 渲染时抛出：无默认值且无数据源的占位符无法自动解析，只能由用户手工替换，故直接报错并列出变量名。 */
     missingPlaceholders: (keys: string[]) =>
       `Unfilled placeholders: ${keys.join(", ")}`,
-    // P3 数据源：名单/单人预览入口把球员设为生图数据源，模板变量按名单记录自动填充
+    // 数据源：名单/单人预览入口可把球员设为生图数据源，模板变量按名单记录自动填充
     source: {
       clear: "Clear",
       clearTitle: "Clear the data source and restore the manual prompt",
-      /** 档案卡（S7）：无数据源时的台内 UID 查询（球员源第三来源） */
+      /** 档案卡：无数据源时的台内 UID 查询（球员源第三来源） */
       queryHint: "Enter a UID to look up a player and set them as the data source",
       queryPlaceholder: "e.g. r-2000472008",
       queryBtn: "Query",
@@ -2187,16 +2195,21 @@ const en: Dict = {
       useForGen: "Send to generation",
       selected: "Already the source",
     },
-    // P3 结果卡「保存并替换」：生成图写入 <头像包>/_generated/ 并走单人换脸链路
+    // 结果卡「保存并替换」：生成图写入 <头像包>/_generated/<池>/ 并走单人换脸链路
     saveReplace: {
       btn: "Save & replace",
       needPlayer:
         'Select a player first: click "Generate" at the end of a roster preview row, or "Send to generation" on the single replacement page',
-      confirm: (name: string) =>
-        `Set this generated image as ${name}'s avatar? It will be written into the facepack and its mapping replaced.`,
+      pathTitle: "Save location",
+      // Name the save target explicitly: the image may belong to its own player (queue output / older
+      // image), not necessarily the workbench's current source player.
+      target: (name: string) => `Save as ${name}'s avatar`,
+      pathHint:
+        "Path is relative to the _generated folder; use / for nested pools. The file name is de-duplicated automatically.",
+      cancelBtn: "Cancel",
       ok: (name: string) => `Saved and replaced ${name}'s avatar`,
       notMapped: (name: string) =>
-        `The image was saved to _generated, but the mapping could not be written: the current facepack's config.xml is missing or malformed. Check the facepack and retry.`,
+        `The image was saved under _generated, but the mapping could not be written: the current facepack's config.xml is missing or malformed. Check the facepack and retry.`,
       needSource:
         'Select a source player first ("Generate" at the end of a roster preview row)',
     },

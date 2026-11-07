@@ -9,9 +9,7 @@
 //! - `doubao-seedream-5-0-flash-260915`（5.0 Flash，出厂默认）
 //! - `doubao-seedream-4-0-20260415`（4.0 现役版本）
 //!
-//! 早期版本 assets 里出现过的 `seedream-5.0-flash` / `seedream-5.0-lite` / `seedream-4.0`
-//! 是从未调通的猜测模型名；该目录现由代码内置、缺失即整块注入（见
-//! [`crate::image_ai::reconcile_builtin_providers`]）。
+//! 模型目录由代码内置、缺失即整块注入（见 [`crate::image_ai::reconcile_builtin_providers`]）。
 //!
 //! 【逐模型参数差异】（官方「图片生成 API」参数表，能力不声明就不发字段）：
 //! | 参数 | 5.0 Pro/Flash | 4.0 |
@@ -43,7 +41,7 @@ use base64::Engine; // STANDARD.decode() 来自 Engine trait
 use std::future::Future;
 use std::pin::Pin;
 
-/// 内置火山服务商的固定 ID（配置合并/迁移按此 ID 认领）。
+/// 内置火山服务商的固定 ID（配置合并按此 ID 认领）。
 pub(crate) const PROVIDER_ID: &str = "volcano";
 
 /// 方舟华北 2（北京）公共基址；生图端点为 `{base}/images/generations`。
@@ -52,7 +50,7 @@ const DEFAULT_BASE: &str = "https://ark.cn-beijing.volces.com/api/v3";
 /// 默认模型：Flash 档，速度快成本低，适合批量出脸。
 const DEFAULT_MODEL: &str = "doubao-seedream-5-0-flash-260915";
 
-// ===================== 自定义像素总像素区间（官方逐模型口径）=====================
+// ===================== 自定义像素总像素区间（官方逐模型口径） ========================================================
 
 /// 下限：1280×720 = 921600（Pro/Flash 与 4.0）。
 const TOTAL_MIN_720P: u64 = 1280 * 720;
@@ -61,7 +59,7 @@ const TOTAL_MAX_PRO_FLASH: u64 = 4_624_220;
 /// 上限：4096² = 16777216。
 const TOTAL_MAX_4K: u64 = 4096 * 4096;
 
-// ===================== 内置模型目录 =====================
+// ===================== 内置模型目录 ==================================================================================
 
 /// 火山内置服务商：模型目录代码托管（不读 assets/image_ai.json），新装直接得到完整目录。
 pub(crate) fn builtin_provider() -> ProviderConfig {
@@ -108,7 +106,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
 /// - 文生图固定单图：`max_n=1`、[`Capabilities::supports_n`]=false（请求体不发 n）；
 /// - 全系列无 seed（不发）、无负向词/改写/质量档位、仅同步；
 /// - 全系列支持 `response_format`（适配器固定 b64_json）与 `watermark`（默认关，显式发 false）；
-/// - `output_format` 仅 Pro/Flash/Lite 可设（值取用户选择 png/jpeg，未选默认 png）；4.5/4.0 只回 jpeg、传参报错；
+/// - `output_format` 仅 Seedream 5.0 系列可设（值取用户选择 png/jpeg，未选默认 png）；4.0 只回 jpeg、传参报错；
 /// - 尺寸：`tiers` 为官方档位串，自定义像素按总像素区间 + 宽高比 [1/16, 16] 校验
 ///   （min/max_side 留 0 = 官方未给单边约束）。
 fn seedream_caps(
@@ -142,13 +140,13 @@ fn seedream_caps(
     }
 }
 
-// ===================== 请求体（纯函数，字段逐字照抄官方文档）=====================
+// ===================== 请求体（纯函数，字段逐字照抄官方文档） ========================================================
 
 /// 组装 Seedream 文生图请求体：
 /// - 恒发：`model` / `prompt` / `size`（档位串或小写 `x` 像素串，原样透传不转换）；
 /// - `response_format`：固定 `b64_json`（能力位门控，内置目录全开）；
 /// - `watermark`：用户值优先，未置回落能力集声明的默认（内置 false；官方服务端默认 true）；
-/// - `output_format`：仅 Pro/Flash/Lite 发（4.5/4.0 传参报错，整条省略），值取用户选择
+/// - `output_format`：仅 Seedream 5.0 系列发（4.0 传参报错，整条省略），值取用户选择
 ///   （`png` / `jpeg`），未选或越界回落 `png`——见 [`super::output_format`]；
 /// - **绝不发** `n` / `seed` / `sequential_image_generation`（全系列无 n/seed；
 ///   Pro/Flash 收到 sequential 直接报错，Lite 等缺省即单图）。
@@ -176,7 +174,7 @@ pub(crate) fn build_volcano_body(req: &GenRequest) -> serde_json::Value {
     v
 }
 
-/// 落盘图片后缀：4.5/4.0 不接受 `output_format`、服务端只回 JPEG；其余模型随用户选择的格式。
+/// 落盘图片后缀：Seedream 4.5/4.0 不接受 `output_format`、服务端只回 JPEG；其余模型随用户选择的格式。
 pub(crate) fn image_extension(req: &GenRequest) -> &'static str {
     if req.caps().supports_output_format {
         super::output_format(req)
@@ -198,6 +196,7 @@ pub(crate) fn error_message(resp: &serde_json::Value) -> Option<String> {
     })
 }
 
+/// 火山方舟 Seedream 适配器（同步 Bearer；响应与 OpenAI 同构、复用其解析）。
 pub struct VolcanoProvider;
 
 impl ImageProvider for VolcanoProvider {
@@ -324,7 +323,7 @@ mod tests {
             .clone()
     }
 
-    // ===================== 内置目录 =====================
+    // ===================== 内置目录 ==================================================================================
 
     #[test]
     fn catalog_common_caps_match_official_spec() {
@@ -379,7 +378,7 @@ mod tests {
         assert!(!v40.supports_output_format, "4.0 仅回 jpeg、不可设格式");
     }
 
-    // ===================== 请求体组装 =====================
+    // ===================== 请求体组装 ================================================================================
 
     #[test]
     fn body_pro_flash_carries_exactly_official_fields() {
@@ -448,7 +447,7 @@ mod tests {
     #[test]
     fn body_output_format_follows_user_choice_and_falls_back_to_png() {
         let mut r = req_for("doubao-seedream-5-0-flash-260915");
-        // 用户选 jpeg：请求体与落盘后缀都跟着走（此前适配器写死 png，勾了能力位也无处可选）。
+        // 用户选 jpeg：请求体与落盘后缀都跟着走，能力位不再形同虚设。
         r.output_format = Some("jpeg".into());
         assert_eq!(build_volcano_body(&r)["output_format"], "jpeg");
         assert_eq!(image_extension(&r), "jpeg");
@@ -474,7 +473,7 @@ mod tests {
         assert_eq!(build_volcano_body(&r)["watermark"], false);
     }
 
-    // ===================== 尺寸规则边界 =====================
+    // ===================== 尺寸规则边界 ==============================================================================
 
     #[test]
     fn pro_flash_size_rules_guard_custom_pixels() {
@@ -512,7 +511,7 @@ mod tests {
         assert!(check("4097x4096").is_err());
     }
 
-    // ===================== 错误解析 =====================
+    // ===================== 错误解析 ==================================================================================
 
     #[test]
     fn error_response_exposes_code_and_message() {

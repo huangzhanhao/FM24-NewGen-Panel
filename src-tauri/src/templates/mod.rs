@@ -35,7 +35,9 @@ pub const IMPLEMENTED_STANDARDS: [u8; 2] = [2, 3];
 /// 写 config.xml 时 dir + stem 经 record_from 拼成 from。
 #[derive(Debug)]
 pub struct PickedImage {
+    /// 相对头像包根的目录（"" = 根，多级用 "/" 分隔）
     pub dir: String,
+    /// 文件词干（不含扩展名）
     pub stem: String,
 }
 
@@ -78,7 +80,9 @@ pub trait PickRule {
 /// 全部标准规则的集合。字段名与标准号一一对应（standardN）。
 #[derive(Debug, Clone)]
 pub struct RuleConfig {
+    /// 标准二（14 种族目录）规则
     pub standard2: standard2::Standard2Config,
+    /// 标准三（细分目录）规则
     pub standard3: standard3::Standard3Config,
 }
 
@@ -225,7 +229,7 @@ pub fn for_layout(layout: PackLayout, scan: &PackScan, config: &RuleConfig) -> B
     }
 }
 
-// ---------------- 两个跨标准无语义的机械工具 ----------------
+// ---- 两个跨标准无语义的机械工具 -------------------------------------------------------------------------------------
 
 /// 图片池：目录路径 → 该目录下的图片词干列表（"" = 包根，多级用 "/" 分隔）。
 ///

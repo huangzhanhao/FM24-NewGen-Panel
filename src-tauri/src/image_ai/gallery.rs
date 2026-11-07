@@ -41,6 +41,7 @@ pub fn now_ts() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// 画廊文件 I/O 的全局互斥：所有「read → 改 → save」都要持它（见模块头【并发】）。
 static GALLERY_IO: Mutex<()> = Mutex::new(());
 
 /// 读画廊清单的**不加锁内核**：调用方必须已持有 GALLERY_IO（分开是为了让取锁方在自己
@@ -201,7 +202,7 @@ pub fn load_gallery_items(data_dir: &Path) -> Vec<GalleryItem> {
         .collect()
 }
 
-// ===================== 单元测试：双闸门 / 会话清理 / 记录往返 / 并发写入 ========================
+// ===================== 单元测试：双闸门 / 会话清理 / 记录往返 / 并发写入 =============================================
 
 #[cfg(test)]
 mod tests {

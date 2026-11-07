@@ -38,7 +38,7 @@ pub(crate) const PROVIDER_ID: &str = "modelscope";
 /// 魔搭 API-Inference 基址；生图端点 `{base}/images/generations`、任务端点 `{base}/tasks/{id}`。
 const DEFAULT_BASE: &str = "https://api-inference.modelscope.cn/v1";
 
-/// 默认模型。
+/// 默认模型：Qwen-Image 2.1（质量与速度均衡）。
 const DEFAULT_MODEL: &str = "Qwen/Qwen-Image-2.1";
 
 /// 提交任务必须带：开启异步模式。
@@ -71,7 +71,7 @@ const ZIMAGE_SIZES: &[&str] = &["1024x1024", "768x1344", "1344x768"];
 /// Krea 2 Turbo（FLUX 系，含其 LoRA 变体）常用分辨率。
 const KREA_SIZES: &[&str] = &["1024x1024", "1344x768", "768x1344"];
 
-// ===================== 内置模型目录 =====================
+// ===================== 内置模型目录 ==================================================================================
 
 /// 魔搭内置服务商：模型目录代码托管（不读 assets/image_ai.json）。
 pub(crate) fn builtin_provider() -> ProviderConfig {
@@ -149,14 +149,14 @@ fn modelscope_caps(sizes: &[&str]) -> Capabilities {
     }
 }
 
-// ===================== URL =====================
+// ===================== URL ===========================================================================================
 
 /// 任务查询端点：`{base}/tasks/{task_id}`。
 pub(crate) fn task_url(base: &str, task_id: &str) -> String {
     format!("{}/tasks/{task_id}", base.trim_end_matches('/'))
 }
 
-// ===================== 请求体（纯函数）=====================
+// ===================== 请求体（纯函数） ==============================================================================
 
 /// 组装魔搭文生图请求体：恒发 `model`/`prompt`/`size`；其余按能力位门控。
 /// **不发 `n`**（官方为单张）；尺寸字段就是 `size`（非硅基流动的 `image_size`）。
@@ -190,7 +190,7 @@ pub(crate) fn build_modelscope_body(req: &GenRequest) -> serde_json::Value {
     v
 }
 
-// ===================== 响应解析（纯函数）=====================
+// ===================== 响应解析（纯函数） ============================================================================
 
 /// 解析提交响应：成功取 `task_id`。
 pub(crate) fn parse_submit(resp: &Value) -> Result<String, ImageGenError> {
@@ -258,7 +258,7 @@ pub(crate) fn parse_task(resp: &Value) -> TaskState {
 /// 提取 `code: message` 形态的厂商错误细节；字段缺失用 fallback 兜底。
 /// 【为什么三种形态都要认】魔搭自己返回 `{"errors":{"message":…}}`（账号未验证、额度用尽都走它），
 /// 前置网关与兼容层则可能是 OpenAI 的 `{"error":{"message":…}}` 或平铺的 `{"code","message"}`。
-/// 只认平铺会把可执行的提示（去验证邮箱）压成一句「生图失败」，用户无从下手。
+/// 只认平铺会把可执行的提示压成一句「生图失败」，用户无从下手。
 fn error_detail(json: &Value) -> String {
     let code = json
         .get("code")
@@ -288,6 +288,7 @@ async fn download_all(
     Ok(images)
 }
 
+/// 魔搭适配器（强制异步：提交 → 轮询 → 下载；无状态）。
 pub struct ModelscopeProvider;
 
 impl ImageProvider for ModelscopeProvider {
@@ -432,7 +433,7 @@ mod tests {
             .clone()
     }
 
-    // ===================== 内置目录 =====================
+    // ===================== 内置目录 ==================================================================================
 
     #[test]
     fn catalog_contains_builtin_models() {
@@ -477,7 +478,7 @@ mod tests {
         }
     }
 
-    // ===================== 请求体组装 =====================
+    // ===================== 请求体组装 ================================================================================
 
     #[test]
     fn body_sends_size_not_image_size_and_no_n() {
@@ -497,7 +498,7 @@ mod tests {
         }
     }
 
-    // ===================== 响应解析 =====================
+    // ===================== 响应解析 ==================================================================================
 
     #[test]
     fn error_detail_reads_nested_shapes_and_keeps_code_verbatim() {
@@ -571,7 +572,7 @@ mod tests {
         }
     }
 
-    // ===================== 校验 =====================
+    // ===================== 校验 ======================================================================================
     #[test]
     fn task_url_appends_path() {
         assert_eq!(

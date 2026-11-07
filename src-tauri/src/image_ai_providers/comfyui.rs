@@ -29,7 +29,7 @@ use crate::image_ai::types::{
     from_http_status, Capabilities, GenRequest, ImageGenError, ModelInfo, ProviderConfig,
     ProviderKind,
 };
-use rand::Rng; // 随机 seed：rand::rng().random::<u64>()（显式导入 trait，与 image_ai.rs 同款）
+use rand::Rng; // 随机 seed：rand::rng().random::<u64>()（显式导入 trait）
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -64,7 +64,7 @@ const SDXL_SIZES: &[&str] = &[
     "768x1344",
 ];
 
-// ===================== 内置模型目录 =====================
+// ===================== 内置模型目录 ==================================================================================
 
 /// 本地 ComfyUI 内置服务商：模型目录代码托管（不读 assets/image_ai.json）。
 pub(crate) fn builtin_provider() -> ProviderConfig {
@@ -103,7 +103,7 @@ fn comfyui_caps() -> Capabilities {
     }
 }
 
-// ===================== URL 与工作流（纯函数）=====================
+// ===================== URL 与工作流（纯函数） ========================================================================
 
 /// 工作流提交端点。
 pub(crate) fn prompt_url(base: &str) -> String {
@@ -186,8 +186,11 @@ fn error_message(json: &Value) -> Option<String> {
 
 /// 一张待下载的结果图（`/view` 的查询参数三元组）。
 pub(crate) struct OutputImage {
+    /// 文件名（`/view` 的 filename 参数）
     pub(crate) filename: String,
+    /// 子目录（空串 = 根目录）
     pub(crate) subfolder: String,
+    /// 输出类型（output / temp）
     pub(crate) kind: String,
 }
 
@@ -195,7 +198,9 @@ pub(crate) struct OutputImage {
 pub(crate) enum TaskState {
     /// 仍在排队/运行（history 查无此条，或已见条目但还没产出图片）。
     Pending,
+    /// 已完结并取到结果图。
     Done(Vec<OutputImage>),
+    /// 失败（执行报错，或已完结但无图）。
     Failed(ImageGenError),
 }
 
@@ -274,6 +279,7 @@ fn image_extension(filename: &str) -> String {
         .unwrap_or_else(|| "png".into())
 }
 
+/// ComfyUI 适配器（无鉴权、无状态；提交原生节点工作流并轮询 history）。
 pub struct ComfyUIProvider;
 
 impl ImageProvider for ComfyUIProvider {
@@ -416,7 +422,7 @@ mod tests {
         }
     }
 
-    // ===================== 内置目录 =====================
+    // ===================== 内置目录 ==================================================================================
 
     #[test]
     fn catalog_is_single_placeholder_model() {
@@ -443,7 +449,7 @@ mod tests {
         assert!(c.size_rules.is_none(), "不臆造尺寸边界");
     }
 
-    // ===================== URL / 尺寸 / 退避 =====================
+    // ===================== URL / 尺寸 / 退避 =========================================================================
 
     #[test]
     fn urls_trim_trailing_slash() {
@@ -472,7 +478,7 @@ mod tests {
         assert_eq!(poll_delay(10), Duration::from_millis(5000));
     }
 
-    // ===================== 工作流组装 =====================
+    // ===================== 工作流组装 ================================================================================
 
     #[test]
     fn workflow_carries_prompt_negative_size_and_n() {
@@ -512,7 +518,7 @@ mod tests {
         assert_eq!(b["prompt"]["5"]["inputs"]["cfg"], 6.5);
     }
 
-    // ===================== 提交与轮询解析 =====================
+    // ===================== 提交与轮询解析 ============================================================================
 
     #[test]
     fn parse_submit_reads_prompt_id() {
@@ -573,7 +579,7 @@ mod tests {
         assert_eq!(image_extension("noext"), "png");
     }
 
-    // ===================== 校验 =====================
+    // ===================== 校验 ======================================================================================
 
     #[test]
     fn validate_requires_base_url_parses_size_and_nonnegative_seed() {

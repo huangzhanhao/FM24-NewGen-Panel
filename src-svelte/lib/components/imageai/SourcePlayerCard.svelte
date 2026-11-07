@@ -22,7 +22,7 @@
   const shownUid = $derived(queueTask?.uid ?? imageaiStore.sourcePlayer?.uid ?? "");
   const shownName = $derived(queueTask?.name ?? imageaiStore.sourcePlayer?.name ?? "");
 
-  // ---- 头像缩略图：走共用的 createAvatarSource；取不到/取失败静默降级为只显示姓名+UID，不弹窗 ----
+  // ---- 头像缩略图：走共用的 createAvatarSource；取不到/取失败静默降级为只显示姓名+UID，不弹窗 -----------------------
   const srcAvatars = createAvatarSource();
   $effect(() => {
     const uid = shownUid;
@@ -30,7 +30,7 @@
     if (uid) void srcAvatars.load([uid]);
   });
 
-  // ---- 球员源资料：preview_player 缓存未命中时要重解析整份档案（秒级），按 uid 记账防重拉 ----
+  // ---- 球员源资料：preview_player 缓存未命中时要重解析整份档案（秒级），按 uid 记账防重拉 ---------------------------
   // 台内 UID 查询命中时已带回首份资料，effect 靠 srcProfileUid 跳过同 uid 的第二次查询
   let srcProfile = $state<PlayerPreview | null>(null);
   let srcProfileUid = $state(""); // 资料已为哪个 uid 拉取过（失败也记账，避免 effect 反复重试）
@@ -61,7 +61,7 @@
   });
   const srcRec = $derived(shownUid ? (srcProfile?.record ?? null) : null);
 
-  // ---- 台内 UID 查询：命中即 setSourcePlayer 设为数据源 ----
+  // ---- 台内 UID 查询：命中即 setSourcePlayer 设为数据源 -------------------------------------------------------------
   let srcUidInput = $state("");
   let srcQueryError = $state("");
   async function querySourceUid() {

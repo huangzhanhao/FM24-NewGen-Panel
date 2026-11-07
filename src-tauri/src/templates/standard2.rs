@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 /// 固定值码（如码 4 恒为 MESA）表达为 prefer 与 fallback 同值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeRule {
+    /// 优先级目录列表：取第一个命中主/第二国籍目录的项
     #[serde(default)]
     pub prefer: Vec<String>,
+    /// 都不命中时的兜底目录
     pub fallback: String,
 }
 
@@ -257,7 +259,7 @@ mod tests {
 
     #[test]
     fn apply_code_rule_matches_legacy_correct_ethnic() {
-        // 内置 CodeRules（数据驱动）必须与旧 correct_ethnic 硬编码逐分支等价。
+        // 内置 CodeRules（数据驱动）逐分支覆盖 0–10 码的修正语义。
         let rules = RuleConfig::builtin().standard2.code_rules;
         // 0：优先 Scandinavian > Caucasian > 兜底
         assert_eq!(apply_code_rule("0", "African", Some("Scandinavian"), &rules), "Scandinavian");

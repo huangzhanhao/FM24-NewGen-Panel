@@ -160,7 +160,7 @@ impl FaceMapper {
                             map
                         }
                         Err(e) => {
-                            // 【不可静默】原来这里 `unwrap_or_default()` 一把抹平：文件损坏读出 0 条时，
+                            // 【不可静默】读取失败不能 `unwrap_or_default()` 一把抹平：文件损坏读出 0 条时，
                             // Preserve 会把所有球员当成新球员重抽、Overwrite 会丢掉名单外的旧映射，
                             // 而用户只看到「头像全变了」。按空表继续（不阻断流程），但要留痕说明原因。
                             logger.warn(
@@ -652,8 +652,8 @@ mod tests {
     #[test]
     fn overwrite_redraws_roster_and_keeps_entries_outside_it() {
         // Overwrite 的正面场景（串档回归那条只覆盖了「名单外保留 0 条」）：快照里比名单多出的旧映射
-        // 必须原样带回（process_overwrite 的 rest.into_values() 回填）——这条路径此前没有正向断言，
-        // 真回归会让退役/转会走的球员静默变回原脸。
+        // 必须原样带回（process_overwrite 的 rest.into_values() 回填），
+        // 退役/转会走的球员会静默变回原脸。
         let dir = tempfile::tempdir().unwrap();
         let img = facepack(&dir);
         let snap_dir = dir.path().join("snap");

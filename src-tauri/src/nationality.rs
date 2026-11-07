@@ -82,7 +82,7 @@ impl NationalityTable {
     /// 从文档构建并校验。所有字段先去首尾空白；三字码统一转大写（用户小写输入也接受）。
     /// 失败信息直接展示给用户，故一律指明第几条映射与具体原因。
     pub fn from_doc(doc: NationalityDoc) -> Result<Self, String> {
-        // ---- 语言列表：去空白、去重（保留用户给定顺序） ----
+        // ---- 语言列表：去空白、去重（保留用户给定顺序） -------------------------------------------------------------
         let mut languages: Vec<String> = Vec::new();
         for (i, raw) in doc.languages.into_iter().enumerate() {
             let lang = raw.trim();
@@ -97,14 +97,14 @@ impl NationalityTable {
             return Err("语言列表不能为空（至少保留一个语言节点）".into());
         }
 
-        // ---- 码清单：只要码、不要全称也合法（新增码不必同时补中/英文全称） ----
+        // ---- 码清单：只要码、不要全称也合法（新增码不必同时补中/英文全称） ------------------------------------------
         let mut codes: BTreeSet<String> = BTreeSet::new();
         for (i, raw) in doc.codes.into_iter().enumerate() {
             let code = normalize_code(&raw).map_err(|e| format!("码清单第 {} 项的{e}", i + 1))?;
             codes.insert(code);
         }
 
-        // ---- 映射行：逐条校验、同一语言下的显示文本去重并查冲突 ----
+        // ---- 映射行：逐条校验、同一语言下的显示文本去重并查冲突 -----------------------------------------------------
         let mut mappings: Vec<NationalityMapping> = Vec::new();
         // (语言, 显示文本) → 已占用的码：同一语言下同一个全称只能指向一个码。
         let mut claimed: BTreeMap<(String, String), String> = BTreeMap::new();
@@ -139,7 +139,7 @@ impl NationalityTable {
             }
         }
 
-        // ---- 排序：码升序 → 语言按 languages 给定顺序 → 全称升序（保证保存结果可复现） ----
+        // ---- 排序：码升序 → 语言按 languages 给定顺序 → 全称升序（保证保存结果可复现） ------------------------------
         let lang_pos = |lang: &str| languages.iter().position(|l| l == lang).unwrap_or(usize::MAX);
         mappings.sort_by(|a, b| {
             a.code
@@ -148,7 +148,7 @@ impl NationalityTable {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
-        // ---- 建索引 ----
+        // ---- 建索引 -------------------------------------------------------------------------------------------------
         let mut by_language: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         let mut cn_by_code: BTreeMap<String, String> = BTreeMap::new();
         for m in &mappings {
@@ -299,7 +299,7 @@ fn language_rank(lang: &str) -> u8 {
     }
 }
 
-// ===================== 落盘 / 进程内当前表 =====================
+// ===================== 落盘 / 进程内当前表 ===========================================================================
 
 /// 用户副本路径：`<data>/nationalities.json`。
 pub fn file_path(data_dir: &Path) -> PathBuf {
@@ -307,7 +307,7 @@ pub fn file_path(data_dir: &Path) -> PathBuf {
 }
 
 /// 首次运行导出出厂默认（已存在不覆盖，避免冲掉用户修改）。
-/// 【注意：升级不合并】内嵌资产后来新增的语言/别名不会自动补进老用户副本；要回到出厂内容
+/// 【注意：升级不合并】内嵌资产新增的语言/别名不会自动补进旧副本；要回到出厂内容
 /// 只能删掉该文件再重启（[`refresh`] 会重新导出）。改成「总是覆盖」会冲掉用户手改内容。
 pub fn ensure_user_file(data_dir: &Path) -> Result<(), String> {
     let path = file_path(data_dir);

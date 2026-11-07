@@ -214,7 +214,7 @@ export const imageaiStore = $state({
    *  有数据源时单张/批量均改走 preview_prompt，按该球员的名单记录渲染模板正文。 */
   sourcePlayer: null as { uid: string; name: string } | null,
 
-  // ---- 批量生成队列：queue 是后端快照的镜像，唯一写入方是 setQueue ----
+  // ---- 批量生成队列：queue 是后端快照的镜像，唯一写入方是 setQueue --------------------------------------------------
   queue: [] as QueueEntry[],
   /** 由 setQueue 按快照派生（存在 running 条目即在跑）；queueStart 例外地乐观置位。 */
   queueRunning: false,
@@ -434,7 +434,7 @@ export async function setProviderKey(id: string, key: string) {
   imageaiStore.keysSet[id] = !!key.trim();
 }
 
-// ---------------- 服务商 / 模板的写入出口（config 整包替换单点化） ----------------
+// ===================== 服务商 / 模板的写入出口（config 整包替换单点化） ==============================================
 /** 保存/删除均以后端返回的全量 ImageConfig 单点写回；写回后兜一致性：当前 providerId/templateId
  *  若已不在新配置中（删的正是当前项）就地回退，否则下拉悬空、生图带着指向已删条目的脏参数发出去。 */
 export async function saveProvider(provider: ProviderConfig) {
@@ -650,7 +650,7 @@ export function clearResults() {
   imageaiStore.results = [];
 }
 
-// ---------------- 结果卡「保存并替换」 ----------------
+// ===================== 结果卡「保存并替换」 ==========================================================================
 
 /** 决定「保存给谁」：显式传入的 uid（这张图自己的球员，见 GeneratedImage.uid）优先，
  *  其次才是工作台当前数据源。已有的画廊卡带着自己的 uid，故保存不再要求先手选球员。
@@ -681,7 +681,7 @@ export async function previewSaveTarget(uid?: string | null) {
   return api.previewSaveTarget(saveTargetUid(uid));
 }
 
-// ---------------- 批量生成队列 ----------------
+// ===================== 批量生成队列 ==================================================================================
 
 /** 提交加入队列的行数据（名单预览当前页勾选的球员）。 */
 export interface PlayerRow { uid: string; name: string; }
@@ -827,7 +827,7 @@ export async function queueApplyEdits(edits: { id: string; req: GenRequest }[]) 
   setQueue(await api.updateQueueEntries(edits));
 }
 
-// ---------------- 手动确认：把工作台原表单「借」给一条队列行 ----------------
+// ===================== 手动确认：把工作台原表单「借」给一条队列行 ====================================================
 // 复核一条队列任务的参数必须用**工作台那套表单**（同一批控件、同一套交互），不为它另画一份输入框。
 // 故选中行时把该行参数灌进本 store 的表单字段，用户就在原表单里改；点「确认」按既有映射写回队列。
 //
@@ -1084,7 +1084,7 @@ export function queueQuery() {
   return api.queryQueue().then(setQueue);
 }
 
-// ---------------- 队列事件订阅（进程级） ----------------
+// ===================== 队列事件订阅（进程级） ========================================================================
 // 订阅曾挂在 QueueDock 的 onMount：切走 AI 台期间事件全错过，queueRunning 卡在 true。
 // 现与 app.svelte.ts 的 initListeners 同口径：App 挂载调用一次，内部防重复，存活到进程结束。
 
@@ -1131,7 +1131,7 @@ export async function initQueueListeners(onError: (e: unknown) => void): Promise
   });
 }
 
-// ---------------- 名单表格勾选（key=uid，切组/翻页不清空） ----------------
+// ===================== 名单表格勾选（key=uid，切组/翻页不清空） ======================================================
 
 /** 勾选/取消单个球员；v 缺省为取反。 */
 export function toggleSelect(uid: string, v?: boolean) {

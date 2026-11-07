@@ -39,8 +39,7 @@ const MAX_ATTEMPTS: u32 = 3;
 
 /// 重试退避纯函数：`2s × 2^n`（n = 已重试次数，从 0 起）+ 确定性抖动，单次上限 30s；
 /// 服务端给了 `Retry-After`（秒）时优先取它（同样受 30s 上限钳制）。
-/// 【为什么抖动是确定性的】零新增依赖下无随机源；确定性数值才可被单测精确断言。
-/// n=0 抖动为 0，故首次退避恰为 2s（无 Retry-After 时）。
+/// 抖动是确定性的（无随机源，便于单测精确断言）；n=0 抖动为 0，首次退避恰为 2s。
 pub fn backoff_delay(attempt: u32, retry_after: Option<u64>) -> Duration {
     const BASE_MS: u64 = 2000;
     const CAP: Duration = Duration::from_secs(30);
@@ -61,10 +60,10 @@ pub const GEN_QUEUE_FINISHED_EVENT: &str = "gen:queue:finished";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum QueueStatus {
-    Queued,
-    Running,
-    Success,
-    Failed,
+    Queued,  // 等待派发
+    Running, // 执行中（含重试期间）
+    Success, // 成功（images 已回填）
+    Failed,  // 失败（含用户取消）
 }
 
 /// 一条批量生成任务。经 IPC 往返（前端提交 / 查询快照返回），故 Serialize + Deserialize。
@@ -75,7 +74,7 @@ pub struct QueueEntry {
     /// 负责，前端不需要（也无法可靠地）保证不撞 id；提交后的 snapshot 带回真实 id 供
     /// 移除/取消定位。
     pub id: String,
-    /// 球员 UID（P3 数据源用，本任务仅透传；进度事件带出供前端定位行）。
+    /// 球员 UID（仅透传；进度事件带出供前端定位行）。
     pub uid: String,
     /// 球员名（展示用）。
     pub name: String,
@@ -99,12 +98,11 @@ pub struct QueueEntry {
 }
 
 /// 队列共享状态：条目列表 + 取消令牌。
-/// `cancel` 用 [`CancelToken`]（原子布尔 + Arc）而非裸 bool：取消要在**多个派发决策点**
-/// 读到同一个值（主循环派发前、重试退避后、generate 发 HTTP 前），裸 bool 只能在锁内读；
-/// 它与 `entries` 各管一件事，不需要同一把锁。
+/// `cancel` 用 [`CancelToken`]（Arc + 原子布尔）：主循环、重试退避后、generate 发 HTTP 前
+/// 要读同一个值，且与 `entries` 各管一件事、无需共用锁。
 ///
-/// 【语义】取消只拦「尚未提交」的请求：未派发的条目直接判失败，已发出的那一次等它返回、
-/// 结果照常落盘记画廊（已计费，中途丢弃等于白花钱）。
+/// 【语义】取消只拦尚未提交的请求：未派发的条目直接判失败，已发出的那一次等它返回并照常
+/// 落盘记画廊（已计费，中途丢弃等于白花钱）。
 #[derive(Default)]
 pub struct QueueState {
     pub entries: Vec<QueueEntry>,
@@ -189,9 +187,13 @@ impl QueueState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueProgress {
+    /// "running" | "success" | "failed"
     pub status: String,
+    /// 已完成数（终态条目累计，非派发序号）
     pub current: u32,
+    /// 本次启动的条目总数
     pub total: u32,
+    /// 球员 UID（重复入队时会重复，定位请用 entry_id）
     pub uid: String,
     /// 事件所属队列条目的唯一 id（同一球员重复入队时 uid 会重复、id 不会），前端据此定位阶段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,12 +292,9 @@ impl Sleeper for RealSleeper {
     }
 }
 
-/// 入队前的整批校验：逐条做厂商无关完整性 + 协议约束校验，任一条不合规则整批拒绝。
-/// 【为什么放这里】「不合规入队即失败、从不发出 HTTP」是队列的准入契约；add_to_queue 在取
-/// queue 锁之前调用本函数，保证不合规时队列内容完全不变。
-/// 【为什么只调两个既有函数】两层口径已由 `validate_complete` 与 `validate_for_generate`
-/// 各自收口；此处重查服务商/模型并自组探针等于抄第二份判据，`generate` 一改探针形状就会
-/// 与入队校验悄悄分叉。
+/// 入队前的整批校验：逐条做厂商无关完整性 + 协议约束，任一条不合规则整批拒绝。
+/// 调用方在取 queue 锁之前调用，保证不合规时队列内容完全不变；两层判据分别复用
+/// `validate_complete` 与 `validate_for_generate`，不另抄一份。
 pub fn validate_entries(
     cfg: &image_ai::Config,
     entries: &[QueueEntry],
@@ -309,20 +308,17 @@ pub fn validate_entries(
 /// 手动确认清单写回一条条目参数的入参：条目 id + 新的生成请求。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct QueueEditArg {
+    /// 目标条目 id
     pub id: String,
+    /// 新的生成请求
     pub req: image_ai::GenRequest,
 }
 
 /// 只覆盖 Queued 条目的 req；非 Queued 或不存在的 id 原样跳过。返回实际写入条数。
 ///
-/// 【为什么这里不校验参数合法性】写回的只是「用户在原有表单里核对过的那份参数」，一份坏参数
-/// 不会悄悄发出去：`start_queue` 之前的 [`validate_entries`] 会整批拦下不合规条目，执行期
-/// `validate_for_generate` 再按厂商能力位判一次。另抄一套硬性下限等于养第二份判据——前端放行
-/// 而后端拒绝只会变成「确认点不动、又看不出哪项错」的死路。
-/// 【整批一次性写入】调用方（`update_queue_entries`）持队列锁跑完整个批次，对本进程其他 IPC
-/// 而言这批写回是原子的：不会出现「改了一半」被 `query_queue` 读到的中间态。
-/// 【身份字段】`uid`/`name`/`template_id` 以入队时的值为准（前端传空即保留队列原值），它们
-/// 决定画廊归属，不属于这次可改的生成参数。
+/// 不做参数合法性校验：`start_queue` 前的 [`validate_entries`] 会整批拦截，执行期还会再按
+/// 厂商能力位判一次。整批一次性写入（调用方持锁），不会出现改了一半的中间态。
+/// 身份字段`uid`/`name`/`template_id` 为空时保留队列原值——它们决定画廊归属，不属于可改的生成参数。
 pub fn apply_queue_edits(entries: &mut [QueueEntry], edits: &[QueueEditArg]) -> usize {
     let is_blank = |v: &Option<String>| v.as_deref().unwrap_or("").trim().is_empty();
     let mut applied = 0usize;
@@ -563,9 +559,6 @@ pub async fn run_queue(
 
 /// 单条任务的执行体：置 Running → 阶段回调（相邻去重）→ 重试循环 → 终态回写 → 进度事件。
 /// 返回本次是否成功，供 [`run_queue`] 汇总；占位由 `_slot` 的 Drop 释放（任务 panic 也不漏）。
-///
-/// 【为什么独立成函数】`run_queue` 只管派发、等空位与汇总，单条的重试与状态回写自成一段；
-/// 两者揉在同一个 spawn 闭包里时，「并发」与「一次尝试」的边界只能靠缩进辨认。
 async fn run_entry(
     ctx: &EntryCtx,
     id: String,
@@ -1048,7 +1041,7 @@ mod tests {
         }
     }
 
-    // ===================== QueueState 状态机 =====================
+    // ===================== QueueState 状态机 =========================================================================
 
     #[test]
     fn queue_state_add_remove_clear_snapshot() {
@@ -1102,7 +1095,7 @@ mod tests {
         assert!(q.snapshot().is_empty());
     }
 
-    // ===================== run_queue（替身执行器，不触网） =====================
+    // ===================== run_queue（替身执行器，不触网） ===========================================================
 
     #[test]
     fn run_queue_only_runs_selected_entries() {
@@ -1384,7 +1377,7 @@ mod tests {
         );
     }
 
-    // ===================== 执行期重试（退避纯函数 + 任务体循环） =====================
+    // ===================== 执行期重试（退避纯函数 + 任务体循环） =====================================================
 
     #[test]
     fn run_queue_retries_with_backoff_and_honors_retry_after() {
@@ -1491,7 +1484,7 @@ mod tests {
         assert_eq!(snap[0].attempts, MAX_ATTEMPTS);
     }
 
-    // ===================== 阶段事件的透传与去重 =====================
+    // ===================== 阶段事件的透传与去重 ======================================================================
 
     #[test]
     fn run_queue_forwards_stages_with_dedupe() {
@@ -1702,7 +1695,7 @@ mod tests {
         }
     }
 
-    // ===================== 入队整批校验（不合规即整批拒绝） =====================
+    // ===================== 入队整批校验（不合规即整批拒绝） ==========================================================
 
     #[test]
     fn validate_entries_rejects_whole_batch_on_one_bad_entry() {
@@ -1721,7 +1714,7 @@ mod tests {
         assert_eq!(batch[1].req.n, 99);
     }
 
-    // ===================== 取消只作用于本批次（active） =====================
+    // ===================== 取消只作用于本批次（active） ==============================================================
 
     #[test]
     fn cancel_pending_only_touches_active_batch() {
@@ -1763,7 +1756,7 @@ mod tests {
         assert_eq!(q.entries[1].status, QueueStatus::Queued);
     }
 
-    // ===================== 手动确认的参数写回 =====================
+    // ===================== 手动确认的参数写回 ========================================================================
 
     /// 一条合法的待写回参数（沿用队列夹具那份请求：尺寸 1024x1024、n=1）。
     fn edit_arg(id: &str) -> QueueEditArg {

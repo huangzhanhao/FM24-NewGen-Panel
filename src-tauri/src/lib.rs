@@ -61,11 +61,11 @@ fn portable_data_dir() -> Result<PathBuf, String> {
 /// 本项目从旧版（Python v1）重写而来，老用户升级后需要把以前的配置自动搬到新位置，
 /// 避免重新配置；仅在「新目录还没有数据」时才搬。
 ///
-/// 【迁移失败绝不阻断启动】原来第一个 IO 错误就用 `?` 抛出 `.setup()` → Tauri 起不来 →
-/// 发布版没有控制台、用户看到的是「程序打不开」。现在一律记警告后继续跑：v1 原件仍在原处，
+/// 【迁移失败绝不阻断启动】首个 IO 错误若用 `?` 抛出会让 `.setup()` 失败、Tauri 起不来——
+/// 发布版没有控制台，用户看到的是「程序打不开」。故一律记警告后继续跑：v1 原件仍在原处，
 /// 用户可以手工拷贝，也可以下次启动重试。
-/// 【为什么先写暂存目录再 rename】原来「已迁移」只看 cfg.json 是否存在，而 NTFS 目录读序
-/// 大致按字母——拷贝到一半失败时 cfg.json 往往已经落位，下次启动就直接宣布「迁移完成」，
+/// 【为什么先写暂存目录再 rename】「已迁移」不能只看 cfg.json 是否存在：NTFS 目录读序
+/// 大致按字母，拷贝到一半失败时 cfg.json 往往已经落位，下次启动就会误判「迁移完成」，
 /// 带着静默缺失的 v1 数据继续跑。暂存目录 + 一次性 rename 让「就位」要么整体发生要么没发生。
 fn migrate_legacy_user_data(data_dir: &std::path::Path) {
     let dst = data_dir.join(".user");
@@ -271,7 +271,7 @@ pub fn run() {
             logger.info("app", "Starting Application v2");
 
             // 5) 初始化存档管理器（ProfileManager），读取或创建用户配置。
-            //    并把日志出口交给它：切档时的档景（快照）存取异常此前是静默的，
+            //    并把日志出口交给它：切档时的档景（快照）存取异常必须进日志，
             //    而快照正是替换的判据，静默失败＝下次替换按旧档景判断（见 profile_manager 的 warn）。
             let mut pm = profile_manager::ProfileManager::new(None, &data_dir)?;
             pm.set_logger(logger.clone());

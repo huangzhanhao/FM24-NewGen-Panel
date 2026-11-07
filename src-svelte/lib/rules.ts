@@ -34,7 +34,7 @@ function readStringRecord(value: unknown, where: string): Record<string, string>
   return value as Record<string, string>;
 }
 
-// ===================== 标准二 =====================
+// ===================== 标准二 ========================================================================================
 
 export interface S2CodeRule {
   prefer: string[];
@@ -70,7 +70,7 @@ function normalizeS2(raw: unknown): S2Doc {
   };
 }
 
-// ===================== 标准三 =====================
+// ===================== 标准三 ========================================================================================
 
 export type MappingKind = 'default' | 'directly' | 'random' | 'randomWithWeight';
 
@@ -155,7 +155,7 @@ export function formatDoc(doc: S2Doc | S3Doc): string {
   return JSON.stringify(doc, null, 2);
 }
 
-// ===================== 规则形态 =====================
+// ===================== 规则形态 ======================================================================================
 
 /** 判定一条标准三规则的形态；无法识别的结构返回 null（UI 提示改源码）。 */
 export function mappingKind(rule: unknown): MappingKind | null {
@@ -259,7 +259,7 @@ export function folderUsageMap(name: RuleStandard, doc: S2Doc | S3Doc): Map<stri
   return uses;
 }
 
-// ===================== 配置体检 =====================
+// ===================== 配置体检 ======================================================================================
 
 export type HealthIssue =
   | { kind: 'emptyFolders' }

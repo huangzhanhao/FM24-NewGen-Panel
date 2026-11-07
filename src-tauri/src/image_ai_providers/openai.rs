@@ -24,9 +24,8 @@ pub(crate) fn endpoint(base_url: &str) -> String {
 }
 
 /// 组装 OpenAI Images 请求体：参数一律平铺在顶层（没有 DashScope 的 input/parameters 嵌套）。
-/// `supports_response_format` 来自模型能力集（`ModelInfo.capabilities`）：
-/// OpenAI 官方 gpt-image-1 系列**不支持** `response_format`（始终返回 base64，传了即 400），
-/// 出厂该能力为 false；OpenAI 兼容的第三方服务多默认返回 URL，需显式声明 b64_json 免去一次下载。
+/// `supports_response_format`来自模型能力集（`ModelInfo.capabilities`）：出厂为 false；
+/// OpenAI 兼容的第三方服务多默认返回 URL，显式声明 b64_json 可免一次下载。
 pub(crate) fn build_body(req: &GenRequest, supports_response_format: bool) -> serde_json::Value {
     use serde_json::json;
     let mut v = json!({
@@ -42,9 +41,7 @@ pub(crate) fn build_body(req: &GenRequest, supports_response_format: bool) -> se
     if supports_response_format {
         obj.insert("response_format".into(), json!("b64_json"));
     }
-    // 质量按能力位门控，与其余字段同口径（能力不声明就不发）。store 只在切**服务商**时把
-    // quality 归位 auto，切模型不归位：从 gpt-image-1 带过来的 "high" 会被原样发给
-    // 不认该参数的模型（如兼容模式下的 qwen-image），换来一个看不懂的 400。
+    // 质量按能力位门控：切模型不归位 quality，避免把上一家模型的 "high" 发给不认该参数的模型。
     if req.caps().supports_quality {
         if let Some(q) = &req.quality {
             if q != "auto" {
@@ -63,7 +60,9 @@ pub(crate) fn build_body_for(req: &GenRequest) -> serde_json::Value {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ImagePayload {
+    /// base64 内联图片
     B64(String),
+    /// 远程图片 URL（需立即下载）
     Url(String),
 }
 
@@ -152,6 +151,7 @@ pub(crate) async fn fetch_payload(
     }
 }
 
+/// OpenAI Images 协议适配器（无状态；兼容服务同走此档）。
 pub struct OpenAiProvider;
 
 impl ImageProvider for OpenAiProvider {

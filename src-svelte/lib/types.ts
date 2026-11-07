@@ -150,7 +150,7 @@ export interface Capabilities {
   guidanceMax?: number;
   supportsNegativePrompt: boolean;
   supportsResponseFormat: boolean;
-  /** 火山 Seedream output_format（png/jpeg）：5.0 Pro/Flash/Lite 可设；4.5/4.0 仅回 jpeg、不可设。
+  /** 火山 Seedream output_format（png/jpeg）：仅 5.0 系列可设；4.0 仅回 jpeg、不可设。
    *  其余协议不用。本字段只决定该参数是否发送，取值由工作台的输出格式选择给出。 */
   supportsOutputFormat?: boolean;
   qualities: string[];
@@ -160,9 +160,10 @@ export interface Capabilities {
   maxPromptChars?: number;
   /** null/缺省 = 不吃自由尺寸约束（有预设尺寸的模型）。 */
   sizeRules?: SizeRules | null;
-  /** 请求体是否携带 n（z-image 无此参数，固定出 1 张；缺省按 true 处理）。 */
+  /** 请求体是否携带张数参数（z-image、火山 Seedream 全系列、硅基流动 Qwen-Image 与魔搭全系列
+   *  均无此参数，固定出 1 张；缺省按 true 处理）。 */
   supportsN?: boolean;
-  /** 智能改写开关的官方默认值：千问/万相 true，z-image false（开启即思考模式、单价翻倍）。 */
+  /** 智能改写开关的官方默认值：千问与 wan2.6 true，z-image false（开启即思考模式、单价翻倍）。 */
   promptExtendDefault?: boolean;
   /** `watermark` 的默认值（官方 false；按模型存放，便于日后分化）。 */
   watermarkDefault?: boolean;
@@ -256,7 +257,7 @@ export interface GenRequest {
    *  Seedream 5.0 系列、硅基流动）消费；null/缺省 = 适配器默认 png。越界值由适配器白名单拦下。 */
   outputFormat?: string | null;
   /** 内部字段（serde 缺省为空）：后端 generate 解析出服务商后回填 base_url，前端提交（单张/批量）
-   *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai_queue::QueueEntry 内嵌本类型）。
+   *  时不传；仅队列条目经 IPC 快照回传时会带值（见 image_ai::gen_queue::QueueEntry 内嵌本类型）。
    *  能力位不在此列：后端整体快照走 `caps`（前端亦不传）。 */
   baseUrl?: string;
 }
@@ -314,7 +315,7 @@ export interface GalleryItem extends GalleryRecord {
   path: string | null;
 }
 
-// ---------------- 批量生成队列（对应 image_ai_queue.rs，serde 均为 camelCase） ----------------
+// ===================== 批量生成队列（对应 image_ai/gen_queue.rs，serde 均为 camelCase） ==============================
 
 /** 队列条目状态：对应 Rust QueueStatus（serde rename_all = "lowercase"）。 */
 export type QueueStatus = 'queued' | 'running' | 'success' | 'failed';

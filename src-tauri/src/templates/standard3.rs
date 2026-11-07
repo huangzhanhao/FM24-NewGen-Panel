@@ -175,8 +175,11 @@ pub enum Fallback {
 /// 解析后的候选目录形态。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Candidates {
+    /// 单一目录。
     Single(String),
+    /// 等概率多选一。
     Uniform(Vec<String>),
+    /// 按权重多选一（权重先按 Σ 归一）。
     Weighted { dirs: Vec<String>, weights: Vec<f64> },
 }
 
@@ -228,11 +231,8 @@ impl Standard3Config {
         Resolution { candidates, owner_folder }
     }
 
-    /// 纯函数：按权重取候选下标（r ∈ [0,1)）。Σ 归一在函数内做，
-    /// 因此权重和是 99 还是 100 都不影响分布（本仓库内置 json 里两种和都存在：99×4、100×7）。
-    /// 【"99 或 100"只对内置 json 成立】NG 真实配置里 6 条加权规则的权重和是
-    /// 1 / 3 / 8 / 9 / 10 五种（如 `Rules[373] = {Mestizo:9, NorthernSA:1}` 和为 10）。
-    /// Σ 归一这条结论不受影响——它本来就不要求权重和等于任何定值。
+    /// 纯函数：按权重取候选下标（r ∈ [0,1)）。权重和不必等于 100——
+    /// Σ 归一在函数内完成，99、100、10 等任意正权重和都不影响分布。
     fn weighted_index(weights: &[f64], r: f64) -> usize {
         let sum: f64 = weights.iter().sum();
         if sum <= 0.0 || weights.is_empty() {
@@ -485,10 +485,8 @@ fn save_file(path: &Path, content: &str) -> Result<(), String> {
 
 /// 标准三抽图规则：规则块模型。
 ///
-/// 【为什么只有一份池】历史上这里有两份索引：`pools`（清单内目录）与 `recursive_pools`（递归全池），
-/// 于是「禁重复摘图」必须两边都摘（drop_image），漏一处同一张图就会被发出两次；反过来兜底抽中的图
-/// 也得回头从主池摘。现在只有**一份全池**，规则与兜底都从它取图 —— 摘一次即两边同时生效，
-/// 同步问题在结构上就不存在了；顺带省掉构造时的整份克隆（28 万词条，约几十 MB）。
+/// 【只有一份全池】规则与兜底都从同一份池取图：禁重复摘一次即在两侧同时生效，
+/// 不存在「主池/兜底池同步」问题；也省掉构造时的整份克隆（28 万词条，约几十 MB）。
 pub struct Standard3Rule {
     /// 唯一的图片存储：目录路径 → 该目录**剩余未发**的牌（建池时洗好，含清单内、清单外与根 ""）。
     pools: Pools,
@@ -773,7 +771,7 @@ mod tests {
         serde_json::Number::from(v)
     }
 
-    // ---------------- 解析（组 A） ----------------
+    // ---- 解析（组 A） -----------------------------------------------------------------------------------------------
 
     #[test]
     fn resolve_covers_chain_defaults_and_unknown_nationality() {
@@ -950,7 +948,7 @@ mod tests {
         );
     }
 
-    // ---------------- 抽图行为（组 B） ----------------
+    // ---- 抽图行为（组 B） -------------------------------------------------------------------------------------------
 
     #[test]
     fn builtin_rules_resolve_every_country_and_code() {
@@ -1152,7 +1150,7 @@ mod tests {
         assert_eq!(seen, sset(&["Spain", "Japan"]), "兜底越过了 FolderList 的类别口径");
         assert_eq!(rule.stats(), vec![
             ("owner_fallback", 0), ("pool_fallback", 80), ("wf_family", 0), ("staff_family", 0)]);
-        // ④ 清单内所有目录都空 ⇒ 一律 EmptyPack 跳过（Q4 裁定：与空包同处置）。
+        // ④ 清单内所有目录都空 ⇒ 一律 EmptyPack 跳过（与空包同处置）。
         let mut drained: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         drained.insert("Spain".into(), BTreeSet::new());
         drained.insert("Japan".into(), BTreeSet::new());
@@ -1291,7 +1289,7 @@ mod tests {
         );
     }
 
-    // ---------------- 真实包形态（组 C）：126 目录超集包的完整链路 ----------------
+    // ---- 真实包形态（组 C）：126 目录超集包的完整链路 ---------------------------------------------------------------
     // 形态取自实测的社区标准三包：清单目录全在且各有几千张图，另多出三个包外目录——
     // Scandinavian（老头像包平铺残留）与 Staff/WF（嵌套子树）。专门覆盖手搓 faces_map 测不到的
     // 「扫描 → 判定 → 建池 → 抽图」全程，尤其是包外目录与递归池的关系。

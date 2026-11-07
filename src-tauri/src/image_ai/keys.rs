@@ -23,7 +23,7 @@ use super::types::{ProviderConfig, SealedKey};
 /// 派生主密钥的固定盐。改动等于作废所有已存 Key，非必要不动。
 const KEY_SALT: &[u8] = b"NewGAN-Manager/image-ai/key-store/v1";
 
-/// GCM 随机数长度；AES-256-GCM 的 nonce 固定 12 字节。
+/// AES-256-GCM 的 nonce 长度固定 12 字节。
 const KEY_NONCE_LEN: usize = 12;
 
 /// 机器指纹：启动时算一次并缓存，之后不再起子进程。
@@ -32,7 +32,8 @@ fn key_fingerprint() -> &'static str {
     CACHE.get_or_init(read_key_fingerprint)
 }
 
-/// 三平台取机器标识；任一环节失败都回落到空串（退化为「同目录混淆密文」），不阻断启动。
+/// 各平台取机器标识：Windows 优先 MachineGuid、失败退到「计算机名|用户名」；macOS/Linux
+/// 取不到则回落到空串（退化为仅靠固定盐混淆密文）。任一步失败都不阻断启动。
 fn read_key_fingerprint() -> String {
     #[cfg(target_os = "windows")]
     {

@@ -33,38 +33,37 @@ mod validate;
 
 pub mod gen_queue;
 
-// 【为什么下面几组重导出带 allow(unused_imports)】门面重导出面刻意宽于 crate 内部用量——它是
-// `crate::image_ai::X` 这套既有调用面的稳定契约（含仅由单测/本模块消费的条目）。`mod image_ai`
-// 私有，故「内部未使用」会被 lint 判为未使用导入，但删掉就破坏了拆分前后逐字不变的调用面。
+// 门面重导出面刻意宽于 crate 内部用量：它是 `crate::image_ai::X` 调用面的稳定契约（含仅由
+// 单测/本模块消费的条目）。`mod image_ai` 私有，未使用会被 lint 判为 unused_imports，故放行。
 #[allow(unused_imports)] // 见上：门面契约面宽于内部用量
 pub use config::{
     providers_path, remove_provider, remove_template, templates_path, tmp_dir, upsert_provider,
     upsert_template, Config,
 };
 
-// ---- 画廊记录与双淘汰闸门 ---------------------------------------------------------------------
+// ---- 画廊记录与双淘汰闸门 -------------------------------------------------------------------------------------------
 #[allow(unused_imports)] // 见上：门面契约面宽于内部用量
 pub use gallery::{
     enforce_gallery_limit, enforce_image_limit, gallery_path, load_gallery_items, now_ts,
     record_gallery, record_saved_image,
 };
 
-// ---- 生成编排 ---------------------------------------------------------------------------------
+// ---- 生成编排 -------------------------------------------------------------------------------------------------------
 pub use generate::{generate, new_id};
 // 日志摘要：单张与队列提交时各打一行（人是谁 + 这条参数）
 pub use types::{person_summary, request_summary};
 
-// ---- Key 密文存储 -----------------------------------------------------------------------------
+// ---- Key 密文存储 ---------------------------------------------------------------------------------------------------
 #[allow(unused_imports)] // open_key 由 load_stored_keys 内部与单测消费，仍属对外契约
 pub use keys::{load_stored_keys, open_key, seal_key};
 
-// ---- 模板渲染 ---------------------------------------------------------------------------------
+// ---- 模板渲染 -------------------------------------------------------------------------------------------------------
 pub use prompt::{build_vars, render, RenderOutcome};
 
-// ---- 准入校验 ---------------------------------------------------------------------------------
+// ---- 准入校验 -------------------------------------------------------------------------------------------------------
 pub use validate::validate_complete;
 
-// ---- 数据契约（L0）----------------------------------------------------------------------------
+// ---- 数据契约（L0） -------------------------------------------------------------------------------------------------
 #[allow(unused_imports)] // 见上：类型契约须完整导出，用量随上层变动
 pub use types::{
     classify_provider_error, from_http_status, kind_from_business_code, CancelToken, Capabilities,
@@ -73,12 +72,12 @@ pub use types::{
     ProviderKind, SealedKey, ShotPool, SizeRules, StaffPools,
 };
 
-// ---- crate 内部可见（非公开 API）--------------------------------------------------------------
+// ---- crate 内部可见（非公开 API） -----------------------------------------------------------------------------------
 // `validate_for_generate` 是 generate 与 gen_queue 的唯一准入入口，不对外暴露给命令层。
 pub(crate) use validate::validate_for_generate;
 // rtf_scanner 的性别归一化复用本模块的判据（保持单一来源）。
 pub(crate) use prompt::is_female;
 
-// ---- 测试夹具（providers/queue 单测共用同一份 GenRequest 基座）-------------------------------
+// ---- 测试夹具（providers/queue 单测共用同一份 GenRequest 基座） -----------------------------------------------------
 #[cfg(test)]
 pub(crate) use types::test_req_base;

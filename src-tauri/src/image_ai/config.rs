@@ -16,7 +16,7 @@ use super::types::{
     Capabilities, GenSettings, ImageAiFile, ModelInfo, PromptTemplate, ProviderConfig,
 };
 
-// ===================== data/ 路径 ================================================================
+// ===================== data/ 路径 ====================================================================================
 
 /// 服务商与设置文件：`{data_dir}/image_ai.json`。
 pub fn providers_path(d: &Path) -> PathBuf {
@@ -32,14 +32,17 @@ pub fn tmp_dir(d: &Path) -> PathBuf {
     d.join(".imgtmp")
 }
 
-// ===================== Config：内置默认 + 用户文件双来源（仿 templates::RuleConfig） =============
+// ===================== Config：内置默认 + 用户文件双来源（仿 templates::RuleConfig） =================================
 
 /// 生图模块生效配置的聚合（AppState 中以 Mutex 托管）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
+    /// 服务商列表（内置 + 用户新增/修改）
     pub providers: Vec<ProviderConfig>,
+    /// 全局生图设置
     pub settings: GenSettings,
+    /// 提示词模板列表
     pub templates: Vec<PromptTemplate>,
 }
 
@@ -245,7 +248,7 @@ impl Config {
     }
 }
 
-// ---- 内置服务商归并（builtin/load/ensure 三处同口径） ---------------------------------
+// ---- 内置服务商归并（builtin/load/ensure 三处同口径） ---------------------------------------------------------------
 
 /// 把代码内置的服务商（百炼/火山/硅基流动/魔搭/本地 ComfyUI，目录不写 assets/image_ai.json）
 /// 并入一份服务商列表（builtin/load/ensure 三处同口径）：
@@ -285,7 +288,7 @@ fn reconcile_one_builtin(providers: &mut Vec<ProviderConfig>, builtin: ProviderC
     }
 }
 
-// ===================== CRUD 辅助（命令层调用；校验失败返回中文错误） =============================
+// ===================== CRUD 辅助（命令层调用；校验失败返回中文错误） =================================================
 
 /// 新增或更新服务商（按 id 去重：同 id 整体替换、否则追加）；id/name trim 后为空则报中文错误。
 pub fn upsert_provider(cfg: &mut Config, mut p: ProviderConfig) -> Result<(), String> {
@@ -308,9 +311,8 @@ pub fn upsert_provider(cfg: &mut Config, mut p: ProviderConfig) -> Result<(), St
     Ok(())
 }
 
-/// 删除服务商。判据是 **id**（不是 kind）：「能否删」讲「是不是内置」，与 kind 讲的
-/// 「用什么协议」是两个维度；前端删除按钮同用 id 判据（两处必须一致）。
-/// openai 不可删：它是 default_provider_id 的兜底项。其余内置（如 dashscope）可删——
+/// 删除服务商。判据是 **id**（不是 kind）：前端删除按钮同用 id 判据（两处必须一致）。
+/// openai 不可删（default_provider_id 的兜底项）；其余内置（如 dashscope）可删——
 /// 下次启动 reconcile 会把内置目录整块重新注入，等于恢复默认模型行。
 pub fn remove_provider(cfg: &mut Config, id: &str) -> Result<(), String> {
     if id == "openai" {
@@ -343,7 +345,7 @@ pub fn remove_template(cfg: &mut Config, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ===================== 单元测试：出厂目录 / 归并 / 加载导出 / CRUD ==============================
+// ===================== 单元测试：出厂目录 / 归并 / 加载导出 / CRUD ===================================================
 
 #[cfg(test)]
 mod tests {

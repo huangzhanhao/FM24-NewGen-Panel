@@ -323,7 +323,7 @@ fn backup_rotation(config_path: &Path, img_dir: &Path) -> Result<(), String> {
 
 /// 用 `src` 覆盖写档景快照 `snapshot_path`，覆盖前先把盘上的旧快照轮转备份到同目录。
 /// 三处覆盖点全部走这里（切档备份、替换收尾同步、单人微调回写）。
-/// 【为什么档景也要备份】它是 Preserve/Overwrite 的判据源，也是「本档在这个包上原来有哪些映射」的
+/// 【为什么档景也要备份】它是 Preserve/Overwrite 的判据源，也是「本档在这个包上此前有哪些映射」的
 /// 唯一记录：config.xml 写坏了还有它能对照，而它自己被一次误替换、或一次被跳过的 restore 覆盖后，
 /// 就没有第二份可回了——原有的备份只覆盖 live 文件。
 /// 【为什么不做读取回退】备份只用于人工恢复，程序不去自动挑一份读：那等于把「猜哪份是对的」
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn written_mapping_reparses_identically_in_order() {
-        // 【P0-3 的等价性依据】write_xml 按**传入顺序**逐行写出，parse_xml_entries 又按**文件顺序**
+        // 【写读等价性依据】write_xml 按**传入顺序**逐行写出，parse_xml_entries 又按**文件顺序**
         // 返回，所以「拿本次 mapping 直填快照缓存」与「回读刚写出的文件」结果逐条相同（顺序也相同）。
         // 替换收尾省掉的正是那次回读（15 万行实测 1.4–1.5 s，且卡住按钮解禁）——
         // 这条断言就是那次省略的安全网：一旦 write/parse 的口径不再互逆，它会立刻失败。
@@ -666,8 +666,8 @@ mod tests {
 
     #[test]
     fn overwrite_snapshot_backs_up_the_previous_one() {
-        // 档景是 Preserve/Overwrite 的判据源，也是「本档原来有哪些映射」的唯一记录：
-        // 覆盖它之前必须先把盘上那份备份下来（原来只有 live config.xml 有轮转备份）。
+        // 档景是 Preserve/Overwrite 的判据源，也是「本档此前有哪些映射」的唯一记录：
+        // 覆盖它之前必须先把盘上那份备份下来（live config.xml 与档景都要有轮转备份）。
         let dir = tempfile::tempdir().unwrap();
         let snap = dir.path().join("graphics_a_snapshot-1234abcd.xml");
         fs::write(&snap, "旧档景").unwrap();

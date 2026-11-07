@@ -114,9 +114,10 @@ pub fn group_xml_path(user_dir: &Path, profile: &str, img_dir: &str) -> PathBuf 
     snap_path(user_dir, profile, &snapshot_stem(img_dir))
 }
 
+/// 组快照路径：`<user_dir>/<sanitize(profile)>/<stem>.xml`。
 fn snap_path(user_dir: &Path, profile: &str, stem: &str) -> PathBuf {
     user_dir
-        .join(sanitize(profile)) // 存档名子目录
+        .join(sanitize(profile))
         .join(format!("{stem}.xml"))
 }
 

@@ -1,7 +1,7 @@
 //! AI 文生图的数据契约（L0）：IPC/落盘共用的 serde 类型、错误分类与 serde 辅助。
 //!
 //! 【分层】本层只放类型与纯函数，不碰文件系统、不碰网络、不做配置归并——
-//! 上层（config/gallery/prompt/generate/queue）依赖本层，本层不反向依赖任何兄弟模块。
+//! 上层（config/gallery/keys/prompt/validate/generate/gen_queue）依赖本层，本层不反向依赖任何兄弟模块。
 //! 与前端 `types.ts` 一一对应，字段一律 camelCase、枚举一律小写/snake_case。
 
 use serde::{Deserialize, Serialize};
@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-// ===================== 数据契约（与前端 types.ts 一一对应，camelCase） ===========================
+// ===================== 数据契约（与前端 types.ts 一一对应，camelCase） ===============================================
 
-// ---- 服务商类型 -----------------------------------------------------------------------
+// ---- 服务商类型 -----------------------------------------------------------------------------------------------------
 
 /// 服务商类型：决定适配器。OpenAI 兼容服务与官方 OpenAI 请求/响应同构（差异仅在 base_url
 /// 与模型名），全仓无一处按「是否官方」分流；兼容服务走 OpenAI 档、改 base_url 即可。
@@ -34,7 +34,7 @@ impl ProviderKind {
     }
 }
 
-// ---- 生成阶段（适配器上报、队列透传）-----------------------------------------
+// ---- 生成阶段（适配器上报、队列透传） -------------------------------------------------------------------------------
 
 /// 生成阶段：适配器在执行链上按序上报（同步两段 Submitting→Downloading；异步三段
 /// Submitting→Polling→Downloading），供队列把「当前项正在做什么」推给前端。
@@ -59,18 +59,12 @@ impl GenStage {
     }
 }
 
-// ---- 取消令牌（队列 → 执行链的单向信号）--------------------------------------
+// ---- 取消令牌（队列 → 执行链的单向信号） ----------------------------------------------------------------------------
 
-/// 取消令牌：队列与执行链共享的「请停止」标志。
+/// 取消令牌：队列与执行链共享的「请停止」标志（`Arc<AtomicBool>`，单标志、无负载）。
 ///
-/// 【为什么是原子布尔而非通道】取消只要单向信号、不携带数据，读侧是「每个检查点看一眼」，
-/// 原子读最轻。`Arc` 让 `QueueState` 与正在跑的任务共享**同一个**标志——分成「队列的取消位」
-/// 和「任务侧的取消位」两套状态，就会出现「队列已判取消、任务仍按旧的 false 派发」。
-///
-/// 【语义：只拦「还没提交」的请求】取消在三个点各查一次——队列派发前（不派发新条目）、
-/// 重试退避结束后（不再发起新的提交）、以及 [`generate`](super::generate) 发 HTTP 之前；
-/// **一旦请求已发出就不再中断**：那笔调用已计费，等它返回、结果照常落盘并记画廊，
-/// 比「钱花了、图也没留下」更有价值。
+/// 【语义：只拦还没提交的请求】派发前、重试退避结束后、发 HTTP 前各查一次；
+/// 请求一旦发出就不再中断——已计费的调用等它返回，结果照常落盘并记画廊。
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
@@ -89,12 +83,13 @@ impl CancelToken {
         self.0.store(false, Ordering::Relaxed);
     }
 
+    /// 是否已请求取消（各检查点读一次）。
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
 }
 
-// ---- 生成链错误分类：类别枚举、结构化错误与厂商错误归类 ------------------------
+// ---- 生成链错误分类：类别枚举、结构化错误与厂商错误归类 -------------------------------------------------------------
 
 /// 生成链错误类别（snake_case 序列化，与前端 `GenErrorKind` 一一对应）：前端据此给出
 /// 处置建议，并判断队列失败条目是否值得重试。
@@ -279,7 +274,7 @@ pub fn classify_provider_error(
     from_http_status(status, message)
 }
 
-// ---- 模型能力集：SizeRules（自由尺寸规则）/ Capabilities（UI 显隐与适配器发参依据） ---
+// ---- 模型能力集：SizeRules（自由尺寸规则）/ Capabilities（UI 显隐与适配器发参依据） ---------------------------------
 
 /// 自由尺寸规则：只约束**不在 `sizes` 预设里的自定义值**（见 `validate_model_caps`），每条 0 = 不检查。
 /// 尺寸字符串为 `宽x高`（小写 x）/ `宽*高` 形态；各模型区间由内置目录逐模型声明，取值逐字对齐官方文档。
@@ -287,9 +282,9 @@ pub fn classify_provider_error(
 #[serde(rename_all = "camelCase")]
 pub struct SizeRules {
     #[serde(default)]
-    pub min_side: u32, // 单边下限像素（宽/高各自，0 = 不检查）
+    pub min_side: u32,  // 单边下限像素（宽/高各自，0 = 不检查）
     #[serde(default)]
-    pub max_side: u32, // 单边上限像素（0 = 不检查）
+    pub max_side: u32,  // 单边上限像素（0 = 不检查）
     #[serde(default)]
     pub total_min: u64, // 总像素（宽×高）下限（0 = 不检查）
     #[serde(default)]
@@ -351,8 +346,8 @@ pub struct Capabilities {
     /// 百炼 `prompt_extend`：大模型智能改写正向提示词（+3–4 秒；关闭可规避版权审核拦截）。
     #[serde(default)]
     pub supports_prompt_extend: bool,
-    /// `prompt_extend` 官方默认开关（千问/万相为开，z-image 为关）；前端切模型时据此初始化。
-    /// 缺省 true 取官方多数系列口径（不发该参数的服务商读不到它）。
+    /// `prompt_extend` 官方默认开关（千问与 wan2.6 为开，z-image 为关）；前端切模型时据此初始化。
+    /// 缺省 true 取官方多数系列口径（不支持该参数的服务商读不到它）。
     #[serde(default = "yes")]
     pub prompt_extend_default: bool,
     /// 百炼 `prompt_extend_mode`：智能改写模式（`direct`=DPE / `agent`=APE）。
@@ -409,7 +404,7 @@ fn direct() -> String {
     "direct".into()
 }
 
-// ---- 配置文件结构：ModelInfo / ProviderConfig / GenSettings / ImageAiFile ------
+// ---- 配置文件结构：ModelInfo / ProviderConfig / GenSettings / ImageAiFile -------------------------------------------
 
 /// 模型明细行（模型名 + 能力集）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -428,7 +423,9 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedKey {
+    /// GCM nonce 的 base64（每次封装随机生成）
     pub nonce: String,
+    /// 「密文‖认证标签」的 base64
     pub data: String,
 }
 
@@ -497,13 +494,15 @@ impl Default for GenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAiFile {
+    /// 服务商列表（内置 + 用户新增/修改）
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// 全局生图设置
     #[serde(default)]
     pub settings: GenSettings,
 }
 
-// ---- 提示词模板：DetailPools（码值映射 + 随机词库）/ PromptTemplate -------------------
+// ---- 提示词模板：DetailPools（码值映射 + 随机词库）/ PromptTemplate -------------------------------------------------
 
 /// 一档景别及其适配的动作池：景别与动作联动随机——「胸像特写」配「进球后滑跪」是矛盾画面。
 /// label 渲染进 `{{shot}}`，poses 是该景别下可行的动作（`{{pose}}`）。
@@ -565,13 +564,13 @@ pub struct DetailPools {
     #[serde(default)]
     pub staff: StaffPools,
     #[serde(default)]
-    pub beard: Vec<String>, // 胡须候选
+    pub beard: Vec<String>,      // 胡须候选
     #[serde(default)]
     pub expression: Vec<String>, // 表情候选
     #[serde(default)]
-    pub lighting: Vec<String>, // 打光候选
+    pub lighting: Vec<String>,   // 打光候选
     #[serde(default)]
-    pub bg_tone: Vec<String>, // 背景候选（色调虚化或实景场景）
+    pub bg_tone: Vec<String>,    // 背景候选（色调虚化或实景场景）
     #[serde(default)]
     pub kit_detail: Vec<String>, // 球衣细节候选
 }
@@ -611,11 +610,16 @@ impl DetailPools {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptTemplate {
+    /// 模板唯一 id（`default` 为内置保留，不可删）
     pub id: String,
+    /// 模板显示名（用户可改）
     pub name: String,
+    /// 正向提示词正文（支持 `{{key}}` / `{{key|默认值}}`）
     pub body: String,
+    /// 反向提示词（可为空；模型不支持时适配器整条省略）
     #[serde(default)]
     pub negative: String,
+    /// 该模板自带的码值映射与随机词库
     #[serde(default)]
     pub pools: DetailPools,
 }
@@ -646,7 +650,7 @@ impl Serialize for SortedCodes<'_> {
     }
 }
 
-// ---- 生成请求：GenRequest（含内部回填字段与能力快照访问器） ---------------------------
+// ---- 生成请求：GenRequest（含内部回填字段与能力快照访问器） ---------------------------------------------------------
 
 /// 一行式人员摘要（日志用）：`李传斌(200204642) 中国/上海海港`；缺项自动省略，
 /// 连姓名与 uid 都没有时返回 `无人员`（无数据源的单张生成）。
@@ -701,8 +705,8 @@ pub fn request_summary(req: &GenRequest) -> String {
     parts.join(" ")
 }
 
-/// 一次生成请求。派生 Serialize：队列条目（`image_ai::gen_queue::QueueEntry` 内嵌本类型）
-/// 需经 IPC 回传快照。
+/// 一次生成请求。队列条目（`image_ai::gen_queue::QueueEntry` 内嵌本类型）经 IPC 双向往返：
+/// 前端提交时反序列化，后端回传快照时序列化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenRequest {
@@ -831,10 +835,10 @@ fn default_caps() -> Capabilities {
     }
 }
 
-// ---- 生成结果：GenImage / GenResult ---------------------------------------------------
+// ---- 生成结果：GenImage / GenResult ---------------------------------------------------------------------------------
 
-/// 一张临时图片元信息。派生 Deserialize：队列条目经 IPC 往返（`image_ai::gen_queue::QueueEntry`
-/// 内嵌本类型）；前端提交的新条目 images 恒为空。
+/// 一张临时图片元信息。随队列条目经 IPC 往返（`image_ai::gen_queue::QueueEntry` 内嵌本类型）；
+/// 前端提交的新条目 images 恒为空。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenImage {
@@ -853,7 +857,7 @@ pub struct GenResult {
     pub images: Vec<GenImage>,
 }
 
-// ---- 画廊记录契约：GalleryRecord（持久记录）/ GalleryItem（查询期现算存在性） ---------
+// ---- 画廊记录契约：GalleryRecord（持久记录）/ GalleryItem（查询期现算存在性） ---------------------------------------
 
 /// 一条画廊记录：持久保存在 `data_dir/.imgtmp/gallery.json`（启动清理只删图片、保留本文件），
 /// 与图片字节是两条独立生命周期。除 id/ts 外字段均可缺省（兼容老文件与字段演进）；
@@ -865,16 +869,22 @@ pub struct GalleryRecord {
     pub id: String,
     /// 写入时间（now_ts 格式，字典序即时间序）
     pub ts: String,
+    /// 球员 UID（可缺省）
     #[serde(default)]
     pub uid: Option<String>,
+    /// 球员名（可缺省）
     #[serde(default)]
     pub name: Option<String>,
+    /// 生成时使用的模型名（老记录可为空串）
     #[serde(default)]
     pub model: String,
+    /// 正向提示词全文（老记录可为空串）
     #[serde(default)]
     pub prompt: String,
+    /// 反向提示词（可缺省）
     #[serde(default)]
     pub negative_prompt: String,
+    /// 提示词模板 id；空串 = 未选模板
     #[serde(default)]
     pub template_id: String,
     /// 「另存为 / 保存并替换」把该图落盘到的绝对路径；从未保存过为 None（不写进 JSON）。
@@ -891,13 +901,16 @@ pub struct GalleryRecord {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GalleryItem {
+    /// 持久记录本体
     #[serde(flatten)]
     pub record: GalleryRecord,
+    /// 图片是否仍在 `.imgtmp`（查询期现算，不持久化）
     pub image_available: bool,
+    /// 现算出的临时图片绝对路径；图片已被清理时为 None
     pub path: Option<String>,
 }
 
-// ===================== 单元测试：serde 契约 / 错误分类 / 错误序列化 ==============================
+// ===================== 单元测试：serde 契约 / 错误分类 / 错误序列化 ==================================================
 
 #[cfg(test)]
 mod tests {

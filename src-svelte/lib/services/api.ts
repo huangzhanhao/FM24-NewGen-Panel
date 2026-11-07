@@ -117,7 +117,7 @@ export const api = {
   // relTarget 显式转 null：invoke 会丢掉 undefined 字段，后端 Option<String> 收不到键会报参数缺失。
   saveAndReplace: (imageId: string, uid: string, saveBackup: boolean, relTarget?: string) =>
     invoke<SaveReplaceResult>('save_and_replace', { imageId, uid, saveBackup, relTarget: relTarget ?? null }),
-  // ---------------- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ----------------
+  // ---- 批量生成队列（命令返回均为全量快照 Vec<QueueEntry>，条目 id 由后端统一补发） ---------------------------------
   // 追加条目到队列（id 由后端补发），返回全量队列。
   addToQueue: (entries: QueueEntry[]) => invoke<QueueEntry[]>('add_to_queue', { entries }),
   // 按 id 移除队列条目，返回全量队列。

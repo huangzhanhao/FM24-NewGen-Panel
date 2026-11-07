@@ -30,7 +30,7 @@
   // 生效筛选：非拓展名单（下拉被隐藏）时强制按「任意」，避免旧筛选残留在视图里
   const newganQuery = $derived<"any" | "yes" | "no">(isExtRoster ? newganFilter : "any");
 
-  // ---- 本地分页骨架：后端一次给全量条目，UID 搜索与随机人筛选都在前端内存完成，翻页不产生请求 ----
+  // ---- 本地分页骨架：后端一次给全量条目，UID 搜索与随机人筛选都在前端内存完成，翻页不产生请求 -----------------------
   //      （显式标注 paged 类型：select 闭包引用 paged，否则 TS 判定循环推断）
   let paneEl = $state<HTMLElement | undefined>(undefined);
   const paged: PagedResource<SnapshotEntry> = createPagedResource<SnapshotEntry>({

@@ -3,7 +3,7 @@
 //! 【族内分工】
 //! - [`openai`]：OpenAI Images 协议。官方 OpenAI 与用户自填的 OpenAI 兼容服务同走这一档
 //!   （含阿里云百炼的 `/compatible-mode/v1`，它额外接受一批平铺在顶层的百炼扩展字段）；
-//! - [`volcano`]：火山方舟豆包 Seedream（5.0 Pro/Flash/Lite、4.5、4.0 五模型），同步 Bearer，
+//! - [`volcano`]：火山方舟豆包 Seedream（5.0 Pro/Flash、4.0 三模型），同步 Bearer，
 //!   响应形态与 OpenAI 同构，模型目录代码内置（缺失即整块注入）；
 //! - [`dashscope`]：阿里云百炼（千问/万相/Z-Image 三系列），同步多模态消息式调用 +
 //!   代码内置模型目录（模型能力不读 image_ai.json）；
@@ -48,7 +48,7 @@ pub struct ProviderOutcome {
     pub images: Vec<FetchedImage>,
 }
 
-// ===================== 共用校验（三家共享的「按模型声明解释约束」）=====================
+// ===================== 共用校验（三家共享的「按模型声明解释约束」） ==================================================
 // 为什么放在族目录：张数/提示词/尺寸的解释口径由协议族共同拥有，留在应用层会让每个调用点
 // 各自复刻一份；收口到 Provider 后，generate 与入队校验都只经 for_kind(...).validate。
 
@@ -163,16 +163,11 @@ pub(crate) fn validate_model_caps(
     Ok(())
 }
 
-// ===================== 共用请求参数（能力位驱动的可选生成参数）=====================
+// ===================== 共用请求参数（能力位驱动的可选生成参数） ======================================================
 
 /// 按模型能力集组装可选生成参数；**不含 `size`**（分隔符按协议不同：DashScope `*`、
 /// OpenAI 兼容 `x`），也不含各家专有的 `quality` / `response_format`。
-///
-/// 【为什么收口到族目录】同一批字段有两种摆放：DashScope 嵌在 `parameters` 下，
-/// 而百炼的 OpenAI 兼容模式把**同名同义**的它们平铺在请求体顶层（官方明确列为
-/// 「阿里云百炼扩展字段，不属于 OpenAI 官方参数」）。两处各写一份必然漂移，漂移的表现
-/// 是「勾了能力位却发不出字段」或「发了模型不认的字段吃 400」。
-/// 「能力不声明就不发字段」这条口径由本函数单点持有。
+/// DashScope 与百炼 OpenAI 兼容模式共用同一批字段，故在此单点收口；能力不声明就不发。
 pub(crate) fn capability_params(req: &GenRequest) -> serde_json::Map<String, serde_json::Value> {
     use serde_json::{json, Map, Value};
     let caps = req.caps();
@@ -230,8 +225,7 @@ pub(crate) fn capability_params(req: &GenRequest) -> serde_json::Map<String, ser
 }
 
 /// 请求体里的 `output_format` 取值（仅声明 `supports_output_format` 的模型用）：
-/// `None` / 越界串 / 大小写不符一律回落 `png`（适配器出厂口径）。火山与硅基流动共用此白名单——
-/// 两处各写一份必然漂移，漂移的表现就是「前端选了 jpeg，发出去的还是 png」。
+/// `None` / 越界串 / 大小写不符一律回落 `png`；火山与硅基流动共用此白名单。
 pub(crate) fn output_format(req: &GenRequest) -> &'static str {
     if req.output_format.as_deref() == Some("jpeg") {
         "jpeg"
@@ -242,10 +236,8 @@ pub(crate) fn output_format(req: &GenRequest) -> &'static str {
 
 /// 统一适配器：一次 async 调用内含 POST → 解析 →（b64 解码 / URL 立即下载）；
 /// 异步厂商在此调用内含 submit → poll → fetch 全流程。
-/// `progress` 为阶段回调：适配器只上报、不感知去重（去重由队列调用方按「阶段」完成）。
-/// 【不接收取消令牌】适配器只在请求发出前受取消约束（那一次检查在
-/// [`crate::image_ai::generate`] 里做）；一次 `generate` 内的多个 HTTP 往返属于「已提交的
-/// 同一次请求」，中途停下只会留下「钱已扣、图未存」的半成品，故此处没有中断点。
+/// `progress` 为阶段回调：适配器只上报、不感知去重（去重由队列调用方完成）。
+/// 不接收取消令牌：取消只在 generate 发 HTTP 前检查一次，调用内没有中断点。
 pub trait ImageProvider: Send + Sync {
     fn generate<'a>(
         &'a self,

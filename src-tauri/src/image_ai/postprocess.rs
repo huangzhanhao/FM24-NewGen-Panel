@@ -1,7 +1,6 @@
-//! 生成图后处理：落盘前把四角裁成圆角（恒输出 RGBA PNG）。
+//! 生成图后处理：落盘前把四角裁成圆角（恒输出 PNG）。
 //!
-//! 【为什么不能只认白角】文生图拿不到真 alpha，圆角只能由后处理给：模型输出多为满幅方图、
-//! 四角没有白弧，只认白等于不裁角。半径取「固定比例」与「实测白弧」的较大值：
+//! 【算法】半径取「固定比例」与「实测白弧」的较大值：
 //! - 固定值 = round(短边 × `RADIUS_RATIO`)，满幅方图也能得到圆角；
 //! - 白弧实测沿用 flood fill（近白 min 通道 ≥ 228、限本角象限），半径超过短边 1/4 视为
 //!   场景级白色、不采信，避免顺着白区吃进大片内容。
@@ -9,7 +8,8 @@
 //! 每个角只在自己的 r×r 方框内把圆弧外置透明，宽高不变（头像包不能变形）。
 //! `Err` = 解码/编码失败，调用方按原图原格式落盘，不拖垮已成功的生成。
 
-/// 落盘前统一把四角裁成圆角，恒输出 RGBA PNG。
+/// 落盘前统一把四角裁成圆角，恒输出 PNG 字节。
+/// `bytes` 为厂商返回的原始图片（PNG/JPEG）；`Err` 表示解码或编码失败。
 pub(super) fn round_corners(bytes: &[u8]) -> Result<Vec<u8>, String> {
     /// 近白判定：用 245 会漏抗锯齿过渡带，裁完沿弧留亮线。
     const EDGE_T: u8 = 228;
@@ -24,15 +24,17 @@ pub(super) fn round_corners(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let (w, h) = (rgba.width(), rgba.height());
     let (wz, hz) = (w as usize, h as usize);
     let mut raw = rgba.into_raw();
+    // 近白判定：RGB 三通道最小值 ≥ EDGE_T（不看 alpha）。
     let white_at = |raw: &[u8], x: u32, y: u32| {
         let i = (y as usize * wz + x as usize) * 4;
         raw[i].min(raw[i + 1]).min(raw[i + 2]) >= EDGE_T
     };
 
+    // 固定半径保底（满幅方图没有白弧可测）；cap 是实测白弧的护栏。
     let fixed = (((w.min(h) as f32) * RADIUS_RATIO).round() as u32).max(1);
     let cap = w.min(h) / 4;
 
-    // 象限 = (起点, x 下界, x 上界, y 下界, y 上界)。
+    // 象限 = (起点 x, 起点 y, x 下界, x 上界, y 下界, y 上界)。
     let quadrants: [(u32, u32, u32, u32, u32, u32); 4] = [
         (0, 0, 0, w / 2, 0, h / 2),
         (w - 1, 0, w / 2, w, 0, h / 2),
@@ -97,7 +99,7 @@ pub(super) fn round_corners(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-// ===================== 单元测试：四角裁圆角 ====================================================
+// ===================== 单元测试：四角裁圆角 ==========================================================================
 
 #[cfg(test)]
 mod tests {

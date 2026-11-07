@@ -59,6 +59,10 @@
   /* ⑱ 动效 */
   --dur-fast:120ms; --dur:160ms; --dur-slow:180ms;
   --ease-out:cubic-bezier(.22,1,.36,1); --ease-inout:cubic-bezier(.4,0,.2,1);
+  /* ⑲ 悬停提示（.tip + use:tip action）：值一律引用既有令牌，随 --bg-base / --hairline-2 / --text-1 / --shadow-pop 自动跟随主题，故 [data-theme='light'] 不重复声明这一组 */
+  --tip-bg:var(--bg-base); --tip-border:var(--hairline-2); --tip-fg:var(--text-1);
+  --tip-radius:var(--radius-md); --tip-pad:var(--sp-2) var(--sp-3); --tip-max-w:320px;
+  --tip-shadow:var(--shadow-pop); --tip-z:9000;    /* 高于 --z-popover-top */
 }
 /* ============================================================
    设计令牌：浅色「日间球场」（只覆写随主题变的值）
@@ -1470,7 +1474,7 @@ button:focus-visible,.link:focus-visible,.chip:focus-visible,.wb:focus-visible{o
   </div>
 
   <h2 id="d-tokens"><span class="no">2</span>设计令牌</h2>
-  <p>令牌分三层：<strong>原始值 → 语义别名 → 组件消费</strong>。组件只允许消费语义层。<code>:root</code> 与 <code>[data-theme='light']</code> 严格同序同组（18 个分组），新增视觉值先复用、将出现第 2 处消费时才新增令牌。</p>
+  <p>令牌分三层：<strong>原始值 → 语义别名 → 组件消费</strong>。组件只允许消费语义层。<code>:root</code> 与 <code>[data-theme='light']</code> 严格同序同组（19 个分组），新增视觉值先复用、将出现第 2 处消费时才新增令牌。</p>
   <h3>2.1 颜色 · 深色主题（默认，教练席海军蓝）</h3>
   <table>
     <tr><th>令牌</th><th>值</th><th>用途</th></tr>
@@ -1576,10 +1580,23 @@ button:focus-visible,.link:focus-visible,.chip:focus-visible,.wb:focus-visible{o
     <li>动画属性白名单：transform / opacity / background-color / border-color / color / box-shadow；进度 width、骨架 background-position 属既有例外。</li>
   </ul>
 
-  <h3>2.8 z-index</h3>
-  <p>遮罩 <code>--z-overlay:40</code> / 抽屉·模态·灯箱 <code>--z-modal:50</code> / 头像气泡捕获层 <code>--z-popover:1000</code> / 气泡本体 <code>--z-popover-top:1001</code>；预览控制条 100 仅本设计稿使用。</p>
+  <h3>2.8 悬停提示（<code>.tip</code> + <code>use:tip</code>）</h3>
+  <table>
+    <tr><th>令牌</th><th>值</th><th>用途</th></tr>
+    <tr><td><code>--tip-bg / --tip-border / --tip-fg</code></td><td>var(--bg-base) / var(--hairline-2) / var(--text-1)</td><td>提示卡底 / 虚线描边 / 文字（引用既有令牌，随主题自动跟随）</td></tr>
+    <tr><td><code>--tip-radius / --tip-pad / --tip-max-w</code></td><td>var(--radius-md) / 6px 8px / 320px</td><td>圆角 / 内边距 / 最大宽</td></tr>
+    <tr><td><code>--tip-shadow / --tip-z</code></td><td>var(--shadow-pop) / 9000</td><td>阴影 / 层级（高于 --z-popover-top，居全界面最高）</td></tr>
+  </table>
+  <ul>
+    <li>整组值一律引用既有令牌，故 <code>[data-theme='light']</code> 不重复声明这一组。</li>
+    <li><code>.tip</code>：position:fixed 落位（随鼠标/目标元素计算坐标）、pointer-events:none 不挡鼠标、font-size:xs、white-space:pre-line 支持多行。</li>
+    <li><code>use:tip</code> action 定义于 <code>stores/app.svelte.ts</code>；悬停提示一律 use:tip（全项目 110 处 / 21 文件），不用原生 <code>title</code>——action 挂载时会移除节点上的 title 属性，避免两套提示并存。</li>
+  </ul>
 
-  <h3>2.9 响应式断点（桌面窗口，无移动端适配）</h3>
+  <h3>2.9 z-index</h3>
+  <p>遮罩 <code>--z-overlay:40</code> / 抽屉·模态·灯箱 <code>--z-modal:50</code> / 头像气泡捕获层 <code>--z-popover:1000</code> / 气泡本体 <code>--z-popover-top:1001</code> / 悬停提示 <code>--tip-z:9000</code> 居最高；预览控制条 100 仅本设计稿使用。</p>
+
+  <h3>2.10 响应式断点（桌面窗口，无移动端适配）</h3>
   <table>
     <tr><th>断点</th><th>行为</th></tr>
     <tr><td>≥1280（基准）</td><td>侧栏 248；三工作台全宽布局；AI 台 340/弹性两栏；替换台 320/弹性两栏</td></tr>
@@ -1603,7 +1620,7 @@ button:focus-visible,.link:focus-visible,.chip:focus-visible,.wb:focus-visible{o
 ├──────────┴──────────────────────────────────────┤
 │ StatusBar 32px（grid-column 2）                  │
 └──────────────────────────────────────────────────┘
-LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
+LogDrawer（左滑）/ Modal / HelpPanel / Lightbox / Popover 浮于布局外</pre>
   <ul>
     <li>根布局：<code>grid-template-columns:248px minmax(0,1fr); grid-template-rows:1fr auto; height:100vh</code>；主列必须 <code>minmax(0,1fr)</code>，宽度约束链（content/card/card-body/table-pane/table-scroll 全补 <code>min-width:0</code>）保证宽表首次挂载不撑破网格。</li>
     <li>TopNav 的<strong>当前台</strong>（chip 高亮，可自由跳转）与<strong>该做哪一步</strong>（连接线点亮 + 状态点 ok/warn/idle，派生）各表达一件事；状态点绝不禁用 chip。③ chip 挂队列待跑+在跑数角标，右回显始终是<strong>激活档</strong>作用域（档名 · 组短名）。</li>
@@ -1617,12 +1634,12 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
       <li>中文文案后接西文/数字留半角空格，由 <code>text.ts</code> 三语字典统一保证；zh-CN / zh-TW / en 结构同构。</li>
       <li>卡片标题、Tab 用 15px/600；品牌名 / 球员姓名才用 700。</li>
       <li>路径、UID、文件名、日志、尺寸、Seed、页码、队列计数一律等宽体；长路径在只读输入框中钉尾。</li>
-      <li>省略号只用于：侧栏组名、球员姓名、状态栏日志预览、队列副行/详情、dense 姓名列（全文在 title）；<strong>按钮文字不允许截断</strong>。</li>
+      <li>省略号只用于：侧栏组名、球员姓名、状态栏日志预览、队列副行/详情、dense 姓名列（全文经 use:tip 悬停提示）；<strong>按钮文字不允许截断</strong>。</li>
     </ul>
   </div>
 
   <h2 id="d-components"><span class="no">5</span>组件库规范</h2>
-  <p>全局类位于 <code>app.css</code>，组件一文件一个并按业务域分组于 <code>src-svelte/lib/components/</code>：<code>layout/</code>（Sidebar、TopNav、StatusBar、LogDrawer）、<code>setup/</code>（SetupCard、RuleEditor）、<code>replace/</code>（ReplacePanel、PlayerViewer）、<code>results/</code>（RosterSnapshotTabs、PlayersTable、SnapshotPreview、TablePager）、<code>imageai/</code>（ImageAiPanel、ConnectionBar 内联、GenSettingsCard、SourcePlayerCard、ResultGallery、QueueDock、ProviderDialog、TemplateDialog、NumberStepper）、<code>shared/</code>（AvatarThumb、AvatarPopover）。支撑模块：<code>services/</code>（api、images）、<code>ui/</code>（actions、icons、dialog、Icon、pagedResource）；横切件 <code>types.ts / text.ts / avatarBlobs.svelte.ts</code> 在 lib 根。</p>
+  <p>全局类位于 <code>app.css</code>，组件一文件一个并按业务域分组于 <code>src-svelte/lib/components/</code>：<code>layout/</code>（Sidebar、TopNav、StatusBar、LogDrawer）、<code>setup/</code>（SetupCard、RuleEditor、NationalityEditor）、<code>replace/</code>（ReplacePanel、PlayerViewer）、<code>results/</code>（RosterSnapshotTabs、PlayersTable、SnapshotPreview、TablePager）、<code>imageai/</code>（ImageAiPanel、ConnectionBar 内联、GenSettingsCard、SourcePlayerCard、ResultGallery、QueueDock、ProviderDialog、TemplateDialog、NumberStepper）、<code>help/</code>（HelpPanel）、<code>shared/</code>（AvatarThumb、AvatarPopover）。支撑模块：<code>services/</code>（api、images）、<code>ui/</code>（actions、icons、dialog、Icon、pagedResource、generatedImageSave）；横切件 <code>types.ts / text.ts / rules.ts / help.ts / avatarBlobs.svelte.ts</code> 在 lib 根。</p>
 
   <h3>5.1 Button</h3>
   <table>
@@ -1641,7 +1658,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
   </div>
   <ul>
     <li>主 CTA 运行态：按钮作定位容器，<code>.btn-fill</code> 平涂 accent 按百分比铺底，文字统一 contrast；不套全局禁用透明度。</li>
-    <li>仅图标按钮必须带 <code>title</code> 与 <code>aria-label</code>；空间不够优先缩短 <code>text.ts</code> 文案，不截断按钮。</li>
+    <li>仅图标按钮必须带 <code>use:tip</code> 与 <code>aria-label</code>；空间不够优先缩短 <code>text.ts</code> 文案，不截断按钮。</li>
   </ul>
 
   <h3>5.2 表单控件</h3>
@@ -1694,7 +1711,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <tr><td>SourcePlayerCard</td><td>左栏「球员源 · 单人」：30px 头像 + 15px 姓名 + 等宽 UID + 信息胶囊（不含随机人/RCA）+ 满宽主钮；无名单时引导「去存档资料台」；支持台内 UID 查询与清除</td></tr>
     <tr><td>GenSettingsCard</td><td>模板栏（无内框 select 容器，focus-within 环）→ 提示词 textarea（4 行，数据源模式右下浮「重掷」胶囊，超限红边 + 计数）→ 负向词折叠条（能力位声明才渲染）→ 调用方式（仅异步模型）→ <strong>画幅区</strong>：左 120px stage 舞台内实时比例帧（实线=标准比例/虚线=自定义/红=违规，角标 ×n，下方等宽尺寸），右参数流（比例/宽×高/张数 NumberStepper/Seed/步数/引导系数/质量分段/水印/改写模式/思考模式/智能改写，全部 label 与控件同行，按模型 capabilities 显隐）</td></tr>
     <tr><td>CTA</td><td>sticky 贴底满宽 primary；生成中转圈（<code>.cta-spin</code>，白轨 + contrast 顶色）+ 秒数；禁用三条件：生成中 / 尺寸违规 / 提示词超长</td></tr>
-    <tr><td>内联错误条</td><td><code>.inline-alert</code> 红软底 + 结构化错误标题/正文（省略号 + title）+ 就地重试 + 关闭</td></tr>
+    <tr><td>内联错误条</td><td><code>.inline-alert</code> 红软底 + 结构化错误标题/正文（省略号 + use:tip 全文）+ 就地重试 + 关闭</td></tr>
     <tr><td>ResultGallery</td><td>空态 / 骨架（按 n 出等比微光卡）/ <code>auto-fill minmax(200px,1fr)</code> 网格三态；图卡 = 真实比例框（inset 底、contain）+ 等宽尺寸/Seed + 保存 / 保存并替换 / 同参重生 / 放大 / 移除；持久记录图被清理显示占位卡</td></tr>
     <tr><td>Lightbox</td><td><code>--scrim</code> 遮罩 + 84vw/88vh  contain 图；关闭钮用媒体浮层令牌（半透黑底白字，两主题同值）；Esc / 点遮罩关闭，<code>role=dialog aria-modal</code></td></tr>
     <tr><td>QueueDock</td><td>左栏常驻卡（空队列也显示空态）：2×2 工具钮（启动生成/取消/查看单人/移除选中）+ 进度行（<code>role=progressbar</code>）+ 条目列表（勾选 + 姓名/UID·年龄·所在地 + 30px 头像 + 四态胶囊 + 运行阶段；成功显张数与「查看图片」展开 118px 缩略图，失败显原因+类别建议+重试本条，<code>attempts&gt;1</code> 挂「已重试 N 次」）+ 底部全选与「共 N 条」</td></tr>
@@ -1707,7 +1724,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <tr><td>Modal</td><td>类名刻意用 <code>.modal-overlay</code>（避开 Edge 注入的 <code>.modal-backdrop</code> 冲突）；900×600 上限（92vw/86vh）；fade+pop 180ms（8px）；<code>role=dialog aria-modal</code>；Esc = 关闭（脏数据先确认）</td></tr>
     <tr><td>Drawer</td><td><code>.drawer-backdrop</code> + 左侧 560px（82vw）；slide 180ms；窗口级 Esc；工具条 = 标题 + 「仅该级别」switch + 级别 select + 打开日志文件 + 清空显示；<code>virtua</code> 虚拟列表，等宽 11.5px/1.75</td></tr>
     <tr><td>Popover</td><td>AvatarPopover：悬停 160ms 延迟关闭、点击钉住、Esc/点外部关；大图 blob 独立于缩略图</td></tr>
-    <tr><td>Tooltip / 确认框</td><td>短说明一律原生 <code>title</code>；确认/报错一律 Tauri 原生 ask/message/confirm，不做皮肤化</td></tr>
+    <tr><td>Tooltip / 确认框</td><td>悬停提示一律 <code>use:tip</code> + <code>.tip</code> 富提示（虚线描边、≤320px、fixed 落位、<code>--tip-z:9000</code> 高于一切弹层、pointer-events:none，见 §2.8），不用原生 <code>title</code>；确认/报错一律 Tauri 原生 ask/message/confirm，不做皮肤化</td></tr>
   </table>
 
   <h3>5.8 应用框架组件</h3>
@@ -1716,6 +1733,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <li><strong>TopNav</strong>：见 §5.3；取代旧版五步 Stepper。</li>
     <li><strong>StatusBar</strong>：32px；状态点（忙碌琥珀呼吸）+ 状态文字 + mini 5px 进度 + <code>n/total · pct</code>（total=0 只显百分比）+ 末行日志省略 + 描边胶囊「日志」钮（红错误徽章）；替换与轻量任务两条进度通道，跑完 100% 停留 20s。</li>
     <li><strong>LogDrawer</strong>：见 §5.7。</li>
+    <li><strong>HelpPanel</strong>：内置文档浮层（<code>modal-overlay</code> + <code>.modal.help-modal</code>，与 LogDrawer 同置主布局外）；侧栏底栏「教程/FAQ」写入 <code>ui.helpTab</code> 打开，seg3 页签切换两页；左栏章节导航 + 右栏滚动正文（rAF 滚动监听高亮当前章节），顶部全文搜索（Ctrl/Cmd+F 聚焦、命中词 <code>&lt;mark&gt;</code> 高亮）；Esc/点遮罩关闭；内容来自 <code>lib/help.ts</code> 三语条目，随版本统一维护。</li>
   </ul>
 
   <h3>5.9 图标</h3>
@@ -1740,14 +1758,14 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <li><strong>全局忙碌</strong>：替换期 <code>appStore.busy</code> 锁定写控件；轻量任务（检查完整性/扫描/读取快照）走状态栏 task 通道，结束 100% 停留 20s。</li>
     <li><strong>破坏性操作</strong>：删 Profile、删组、补目录、覆写/未知结构继续、清空生成结果、移除队列条目、启动计费队列一律原生确认；AI 队列运行中切档/切组/删档走统一 <code>confirmScopeChange</code>（先取消队列，一次操作只弹一次框）。</li>
     <li><strong>错误</strong>：单张生成失败进结果区内联错误条（结构化 GenError：类别 + userAction，可重试）；其余走 <code>showError()</code> 原生框；错误数红徽章挂「日志」。</li>
-    <li><strong>空态 / 浏览态</strong>：每个数据区都有引导式空态；浏览未激活 Profile 时写控件禁用并给 title 与顶部提示。</li>
+    <li><strong>空态 / 浏览态</strong>：每个数据区都有引导式空态；浏览未激活 Profile 时写控件禁用并给 use:tip 与顶部提示。</li>
   </ul>
   <h3>7.2 键盘与可达性</h3>
   <ul>
     <li>Tab 顺序 = 视觉顺序；自定义可点击元素（switch、排序列头、chip、灯箱）键盘可达且 Enter/Space 等价；表头 <code>role=button tabindex=0</code>。</li>
     <li>焦点环唯一形态：3px <code>--focus-ring</code>（表头焦点为内嵌双环）；禁止 <code>outline:none</code> 后不补环。</li>
     <li>进度条 <code>role=progressbar</code> + aria-value*；复选框全选用 indeterminate + aria-label；状态不只靠颜色（圆点/文案伴随）。</li>
-    <li>Esc 关抽屉/模态/灯箱（窗口级监听）；对比底线正文 4.5:1、大字/控件 3:1，双主题达标。</li>
+    <li>Esc 关抽屉/模态/灯箱/帮助面板（窗口级监听）；对比底线正文 4.5:1、大字/控件 3:1，双主题达标。</li>
   </ul>
   <h3>7.3 性能约束</h3>
   <ul>
@@ -1776,8 +1794,8 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
 <div class="doc hidden" id="view-roadmap">
  <div class="doc-inner">
   <h1>改造与实施路径（已落地）</h1>
-  <p class="lead">本页是 NGM DS 的落地记录：B0–B4 完成 v2 视觉重排，<strong>B5 完成三工作台改造与 AI 生图全链路</strong>，均已实施并通过验收（最近一次复验 2026-10-14）。业务流与 Rust/IPC 契约在既有批次内零破坏；B5 为新增工作台与新增 Rust 模块，不动替换流水线。</p>
-  <div class="callout info"><span class="ic">✓</span><p><strong>当前状态（2026-10-14）</strong>：<code>svelte-check</code> 0 error / 0 warning；vitest <strong>66/66</strong> 通过（6 个测试文件：services/api、stores/app×2、stores/log、stores/imageai、ui/pagedResource）；<code>vite build</code> 成功（174 模块，CSS 61.78KB）。</p></div>
+  <p class="lead">本页是 NGM DS 的落地记录：B0–B4 完成 v2 视觉重排，<strong>B5 完成三工作台改造与 AI 生图全链路</strong>，均已实施并通过验收（最近一次复验 2026-11-07）。业务流与 Rust/IPC 契约在既有批次内零破坏；B5 为新增工作台与新增 Rust 模块，不动替换流水线。</p>
+  <div class="callout info"><span class="ic">✓</span><p><strong>当前状态（2026-11-07）</strong>：<code>svelte-check</code> 0 error / 0 warning；vitest <strong>98/98</strong> 通过（8 个测试文件：services/api、stores/app×2、stores/log、stores/imageai、ui/pagedResource、rules、help）；<code>vite build</code> 成功（181 模块，CSS 93.29KB）。</p></div>
   <div class="toc"><a href="#r-guard">硬约束</a><a href="#r-batches">批次</a><a href="#r-files">文件对照</a><a href="#r-gate">质量门</a><a href="#r-scope">范围边界</a></div>
 
   <h2 id="r-guard"><span class="no">0</span>实施硬约束（不可突破）</h2>
@@ -1802,7 +1820,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     </div>
   </div>
 
-  <h2 id="r-batches"><span class="no">1</span>B0–B5 实施记录（全部已完成 ✅）</h2>
+  <h2 id="r-batches"><span class="no">1</span>B0–B5 实施记录与 B5 后演进（全部已完成 ✅）</h2>
   <div class="batch">
     <div class="b-id">B0</div><div class="b-title">✅ 基座：双主题令牌与全局样式</div>
     <div class="b-body"><p>重写 <code>app.css</code> 双套令牌 + 基础控件 + 工具类；新建 <code>icons.ts</code>。</p></div>
@@ -1834,7 +1852,19 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     </div>
   </div>
 
-  <h2 id="r-files"><span class="no">2</span>文件落地对照（当前路径，B5 增量）</h2>
+  <div class="batch">
+    <div class="b-id">B5+</div><div class="b-title">✅ 帮助与规则维护演进（B5 之后落地）</div>
+    <div class="b-body">
+      <p><strong>内置帮助</strong>：新增 <code>components/help/HelpPanel.svelte</code> 与 <code>lib/help.ts</code> 三语条目；侧栏底栏「教程/FAQ」写入 <code>ui.helpTab</code> 打开同一浮层，seg3 页签 + 左章节导航 + 右滚动正文 + 全文搜索（Ctrl/Cmd+F 聚焦，命中词 <code>&lt;mark&gt;</code> 高亮），Esc/点遮罩关闭。</p>
+      <p><strong>国籍对照表编辑</strong>：新增 <code>setup/NationalityEditor.svelte</code> 对话框，应用内增删改「三字码 ↔ 各语言国籍全称」映射（含「只有码」条目与语言节点管理），保存时后端统一校验并<strong>原子写回 <code>data/nationalities.json</code></strong>，成功后立即生效。</p>
+      <p><strong>规则模块抽取</strong>：规则文档解析/序列化/健康检查抽至 <code>lib/rules.ts</code>（parseRuleFile/formatDoc/healthIssues 等 20 个导出），RuleEditor 改为消费方。</p>
+      <p><strong>悬停提示</strong>：新增令牌组 ⑲（<code>--tip-*</code> 8 个，值一律引用既有令牌故 light 不覆写）+ <code>.tip</code> 类 + <code>use:tip</code> action（<code>stores/app.svelte.ts</code>）；提示一律 use:tip，不再使用原生 title。</p>
+      <p><strong>图片另存共用动作</strong>：<code>ui/generatedImageSave.ts</code> 的 <code>saveGeneratedImageAs(imgId)</code> 收敛画廊与队列坞的另存为逻辑。</p>
+      <ul><li><strong>验收（2026-11-07）</strong>：G1 0/0；G2 98/98（8 文件：api 3、app 11、app.based 3、log 2、imageai 58、pagedResource 6、rules 11、help 4）；G3 build 成功（181 模块，CSS 93.29KB / gzip 15.40KB，JS 451.87KB / gzip 148.57KB）。</li></ul>
+    </div>
+  </div>
+
+  <h2 id="r-files"><span class="no">2</span>文件落地对照（当前路径，B5/B5+ 增量）</h2>
   <table>
     <tr><th>文件</th><th>批次</th><th>说明</th></tr>
     <tr><td><code>app.css</code>、<code>App.svelte</code></td><td>B0/B5</td><td>令牌新增（stage/媒体浮层/胶囊族/行高/队列尺寸等）；三工作台装配</td></tr>
@@ -1845,11 +1875,15 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <tr><td><code>components/imageai/*.svelte</code>（9 个）</td><td>B5</td><td>全新增域：Panel/ConnBar/Settings/Source/Gallery/QueueDock/两个 Dialog/NumberStepper</td></tr>
     <tr><td><code>stores/imageai.svelte.ts</code>、<code>types.ts</code>（Gen*/Queue*/Provider*）、<code>text.ts</code> 三语</td><td>B5</td><td>生图状态/队列事件/契约类型/文案</td></tr>
     <tr><td><code>src-tauri/src/image_ai*.rs</code>、<code>image_ai_providers/*.rs</code>（6 适配器）、<code>assets/image_ai*.json</code></td><td>B5</td><td>生成链、队列、画廊与内置服务商/模板</td></tr>
+    <tr><td><code>components/setup/NationalityEditor.svelte</code></td><td>B5+</td><td>国籍对照表编辑对话框（三字码 ↔ 各语言全称，含「只有码」条目与语言节点管理，原子写回 data/nationalities.json）</td></tr>
+    <tr><td><code>components/help/HelpPanel.svelte</code>、<code>lib/help.ts</code></td><td>B5+</td><td>内置教程/FAQ 浮层（seg3 页签、章节导航、全文搜索）与三语条目</td></tr>
+    <tr><td><code>lib/rules.ts</code></td><td>B5+</td><td>规则文档解析/序列化/健康检查抽取（20 个导出，RuleEditor 消费）</td></tr>
+    <tr><td><code>lib/ui/generatedImageSave.ts</code></td><td>B5+</td><td>生成图另存为共用动作（画廊与队列坞单点）</td></tr>
   </table>
 
   <h2 id="r-gate"><span class="no">3</span>每批合并门槛</h2>
   <div class="grid3">
-    <div class="principle"><div class="p-no">门槛 A</div><h4>自动化</h4><p>pnpm check 0 error、vitest 全绿（当前 66/6 文件）、pnpm build 成功。</p></div>
+    <div class="principle"><div class="p-no">门槛 A</div><h4>自动化</h4><p>pnpm check 0 error、vitest 全绿（当前 98/8 文件）、pnpm build 成功。</p></div>
     <div class="principle"><div class="p-no">门槛 B</div><h4>视觉走查</h4><p>双主题 × 断点 × 三工作台状态矩阵；令牌覆盖率 100%；键盘与动效合规。</p></div>
     <div class="principle"><div class="p-no">门槛 C</div><h4>回归走查</h4><p>建档/关联/扫描/三模式替换/取消/单人三动作；AI 单张生成、批量队列（启动/取消/重试/移除/查看图片/保存并替换）。</p></div>
   </div>
@@ -1863,7 +1897,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     </ul>
   </div>
 
-  <div class="doc-footer"><span>NewGAN Manager v2.0 · 实施路径（B0–B5 已全部落地）</span><span>验收见「质量保障」§10</span></div>
+  <div class="doc-footer"><span>NewGAN Manager v2.0 · 实施路径（B0–B5 及 B5 后演进已全部落地）</span><span>验收见「质量保障」§10</span></div>
  </div>
 </div>
 
@@ -1879,11 +1913,11 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
   <h2 id="q-gates"><span class="no">1</span>质量门槛</h2>
   <table>
     <tr><th>#</th><th>门槛</th><th>命令</th><th>通过标准</th></tr>
-    <tr><td><code>G1</code></td><td>类型与模板检查</td><td><code>pnpm check</code></td><td>0 error / 0 warning（2026-10-14 实测）</td></tr>
-    <tr><td><code>G2</code></td><td>单元测试</td><td><code>pnpm test</code></td><td>66/66 通过（6 文件：api 3、app 11、app.based 3、log 2、imageai 41、pagedResource 6）</td></tr>
-    <tr><td><code>G3</code></td><td>生产构建</td><td><code>pnpm build</code></td><td>成功：174 模块，CSS 61.78KB / gzip 11.00KB，JS 260.51KB / gzip 86.92KB</td></tr>
+    <tr><td><code>G1</code></td><td>类型与模板检查</td><td><code>pnpm check</code></td><td>0 error / 0 warning（2026-11-07 实测）</td></tr>
+    <tr><td><code>G2</code></td><td>单元测试</td><td><code>pnpm test</code></td><td>98/98 通过（8 文件：api 3、app 11、app.based 3、log 2、imageai 58、pagedResource 6、rules 11、help 4）</td></tr>
+    <tr><td><code>G3</code></td><td>生产构建</td><td><code>pnpm build</code></td><td>成功：181 模块，CSS 93.29KB / gzip 15.40KB，JS 451.87KB / gzip 148.57KB</td></tr>
     <tr><td><code>G4</code></td><td>视觉走查矩阵</td><td>§3/§4</td><td>双主题 × 断点 × 三工作台全项通过</td></tr>
-    <tr><td><code>G5</code></td><td>键盘与焦点</td><td>§5/§7</td><td>Tab 全可达、焦点环无缺失、Esc 三浮层可关</td></tr>
+    <tr><td><code>G5</code></td><td>键盘与焦点</td><td>§5/§7</td><td>Tab 全可达、焦点环无缺失、Esc 四浮层可关（抽屉/模态/灯箱/帮助面板）</td></tr>
     <tr><td><code>G6</code></td><td>动效合规</td><td>§6</td><td>≤200ms/≤8px，reduced-motion 全静默（spinner 降速）</td></tr>
     <tr><td><code>G7</code></td><td>业务回归</td><td>§8</td><td>替换三流程 + AI 生图两流程在真窗口跑通</td></tr>
   </table>
@@ -1927,7 +1961,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <li>表格全选 indeterminate、排序 Enter/Space、跳页夹取、搜索 300ms 防抖（本地分页即时过滤）。</li>
     <li>队列：启动计费 confirm、取消/移除 warning confirm、运行中切档统一护栏先取消队列；失败条「重试本条」仅可重试类别出现。</li>
     <li>灯箱：点图打开、Esc/点遮罩/关闭钮退出；画廊「再生成」带原图 size/seed。</li>
-    <li>Esc 关抽屉/模态/灯箱；模态脏数据切换/关闭先确认；保存按钮无修改时禁用。</li>
+    <li>Esc 关抽屉/模态/灯箱/帮助面板；模态脏数据切换/关闭先确认；保存按钮无修改时禁用。</li>
   </ul>
 
   <h2 id="q-a11y"><span class="no">7</span>可访问性</h2>
@@ -1953,6 +1987,7 @@ LogDrawer（左滑）/ Modal / Lightbox / Popover 浮于布局外</pre>
     <tr><td class="nowrap">2026-09-15</td><td>NGM DS 1.0 基线审计与落地复验</td><td>令牌化双主题落地；按钮截断/焦点环/空态等 P1/P2 修复；Esc、reduced-motion 通过</td></tr>
     <tr><td class="nowrap">2026-09-27</td><td>目录按域归组 + 宽表撑宽 P1 修复</td><td>17/17 通过；minmax(0,1fr) 宽度约束链补齐</td></tr>
     <tr><td class="nowrap">2026-10-14</td><td>design-preview.html 同步 NGM DS 1.1；三工作台 + AI 生图链路复验</td><td>G1 <code>svelte-check</code> 0 错 0 警；G2 <strong>66/66</strong>（6 文件，含 imageai store 41 用例、pagedResource 6 用例）；G3 build 成功（174 模块，CSS 61.78KB）。预览稿令牌与 <code>app.css</code> 逐组对齐（stage/媒体浮层/胶囊族/--table-row-h/--control-h-xs/--shadow-side 等新增组全覆盖），界面预览改为三工作台可切换结构（TopNav chip 即切换器），名单表按现协议改为勾选+去抽图 20 列、dense 10 列，结果区二 Tab，新增 AI 台全要素 mock（配置条/画幅帧/参数流/队列四态/画廊/灯箱）；文档（设计系统/实施路径/质量保障）同步至当前组件与 stores 结构</td></tr>
+    <tr><td class="nowrap">2026-11-07</td><td>B5 后演进（内置帮助 / NationalityEditor / rules.ts 抽取 / ⑲ 悬停提示 / 另存共用动作）复验回写本稿</td><td>G1 <code>svelte-check</code> 0 错 0 警；G2 <strong>98/98</strong>（8 文件，新增 rules 11、help 4 用例，imageai 增至 58）；G3 build 成功（181 模块，CSS 93.29KB / gzip 15.40KB，JS 451.87KB / gzip 148.57KB）。设计令牌补 ⑲ 组、新增 §2.8 悬停提示节，组件清单补 help/、NationalityEditor、rules.ts、generatedImageSave</td></tr>
   </table>
 
   <div class="doc-footer"><span>NewGAN Manager · UI 质量保障方案 v2</span><span>G1–G7 全绿方可合并 · 本页为当前唯一 QA 依据</span></div>
@@ -2021,7 +2056,7 @@ function toggleTheme(){
   if(label)label.textContent=light?'深色':'浅色';
   document.getElementById('theme-btn').textContent=light?'切换浅色':'切换深色';
 }
-/* ---- 窗口级 Esc：关灯箱 / 抽屉 / 模态 ---- */
+/* ---- 窗口级 Esc：关灯箱 / 抽屉 / 模态（真实应用另有帮助面板，同为窗口级 Esc） ---- */
 document.addEventListener('keydown',(e)=>{
   if(e.key!=='Escape')return;
   if(!document.getElementById('lightbox-layer').classList.contains('hidden')){closeLightbox();return;}

@@ -35,7 +35,7 @@ use tauri::{AppHandle, Emitter, State};
 // 标准三目录清单已由 rule_config 的 standard3.json（FolderList）取代，不再有硬编码常量。
 pub use crate::facepack_scanner::FACEPACK_DIRS;
 
-// ---------------- ① 公共设施（状态 / 缓存 / 进度上报，跨域共用） ----------------
+// ===================== ① 公共设施（状态 / 缓存 / 进度上报，跨域共用） ================================================
 
 /// 应用全局状态（lib.rs 的 setup 里 app.manage 交给 Tauri 托管）。
 /// 命令与后台替换线程并发，故共享数据用 Mutex、跨线程引用用 Arc、标志用 AtomicBool。
@@ -164,7 +164,7 @@ impl TaskProgress {
     }
 }
 
-// ---------------- ② 存档与组 ----------------
+// ===================== ② 存档与组 ====================================================================================
 
 /// 一个头像包（组）的摘要：目录 + 已设 RTF。
 #[derive(Serialize, Clone)]
@@ -370,7 +370,7 @@ pub fn preview_profile(state: State<'_, AppState>, name: String) -> Result<AppSn
     })
 }
 
-// ---------------- ③ 完整性校验与扫描 ----------------
+// ===================== ③ 完整性校验与扫描 ============================================================================
 
 // 「检查完整性」结果 IntegrityResult 已下沉到 facepack_scanner（属头像包分类判定的领域产物）。
 
@@ -537,7 +537,7 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
     Ok(summary)
 }
 
-// ---------------- ④ 批量替换 ----------------
+// ===================== ④ 批量替换 ====================================================================================
 
 /// 替换进度载荷（replace:progress 事件）。current/total 是阶段内计数，无可数单位时为 0/0（前端只显示百分比）。
 #[derive(Serialize, Clone)]
@@ -917,7 +917,7 @@ pub fn cancel_replace(state: State<'_, AppState>) {
     state.logger.info("replace", "用户请求取消");
 }
 
-// ---------------- ⑤ 单人换脸与名单预览 ----------------
+// ===================== ⑤ 单人换脸与名单预览 ==========================================================================
 
 // 名单分页查询参数 PlayerQuery 与筛选/排序/分页逻辑已下沉到 rtf_scanner::query_page（名单领域）。
 
@@ -1324,7 +1324,7 @@ pub fn resolve_avatar(state: State<'_, AppState>, avatar: String) -> Result<Opti
     Ok(None)
 }
 
-// ---------------- ⑥ 快照与工作区文件 ----------------
+// ===================== ⑥ 快照与工作区文件 ============================================================================
 
 /// 「读取快照」返回摘要：快照里的映射总条数。
 #[derive(Serialize, Clone)]
@@ -1384,7 +1384,7 @@ fn sync_group_snapshot(
     logger: &impl LogSink,
 ) {
     let src = Path::new(img_dir).join("config.xml");
-    // 计时现在只覆盖拷贝一步（原来是「拷贝 + 重解析整表」）——这条日志的数值应明显变小。
+    // 计时只覆盖拷贝一步（不含映射回读/重解析）——这条日志的数值应明显偏小。
     let t_sync = Instant::now();
     if !src.is_file() {
         return; // 没有 config.xml（替换成功时必有，这里只做防御）
@@ -1553,7 +1553,7 @@ pub fn query_logs(state: State<'_, AppState>, level: String, only: bool, offset:
     state.logger.query(&level, only, offset, limit)
 }
 
-// ---------------- ⑦ AI 文生图 ----------------
+// ===================== ⑦ AI 文生图 ===================================================================================
 
 #[tauri::command]
 pub fn get_image_ai_state(state: State<'_, AppState>) -> Result<Config, String> {
@@ -2315,7 +2315,7 @@ pub fn query_queue(state: State<'_, AppState>) -> Result<Vec<gen_queue::QueueEnt
     Ok(state.queue.lock().unwrap().snapshot())
 }
 
-// ---------------- ⑧ 单元测试 ----------------
+// ===================== ⑧ 单元测试 ====================================================================================
 
 #[cfg(test)]
 mod tests {
@@ -2538,7 +2538,7 @@ mod tests {
         assert!(err.contains("命名模板"), "报错应指引补 {{index}}：{err}");
     }
 
-    // ---------------- 生成图落点：池分层 / 用户可编辑路径 ----------------
+    // ---- 生成图落点：池分层 / 用户可编辑路径 ------------------------------------------------------------------------
 
     #[test]
     fn normalize_rel_target_normalizes_and_rejects_unsafe() {
@@ -2637,7 +2637,7 @@ mod tests {
         assert!(err2.contains("临时目录"), "实际报错：{err2}");
     }
 
-    // ---------------- 批量队列的命令层契约 ----------------
+    // ---- 批量队列的命令层契约 ---------------------------------------------------------------------------------------
 
     /// 造一条干净的排队条目（id 留空：由 QueueState::add 统一补发）。
     /// 本助手随用例从队列单测迁到此处——「整批拒绝时队列不变」是命令层的契约，

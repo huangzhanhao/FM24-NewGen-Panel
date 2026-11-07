@@ -40,7 +40,7 @@ const zhCN = {
     brandVer: "v2.0",
   },
 
-  /** 顶栏三工作台（由原五步旅程引导改造：chip 可点击切换，右侧状态点随就绪度变色） */
+  /** 顶栏三工作台（chip 可点击切换，右侧状态点随就绪度变色） */
   workbench: {
     archive: "存档资料",
     replace: "批量/单人头像替换",
@@ -515,7 +515,7 @@ const zhCN = {
       infoNegative: "负向",
       colPlayer: "球员",
       colDetail: "详情",
-      // ---- 启动方式（手动确认 / 全自动）与队列行的逐条确认 ----
+      // ---- 启动方式（手动确认 / 全自动）与队列行的逐条确认 ----------------------------------------------------------
       /** 确认方式分段控件：左「手动确认」、右「全自动」（用户指定的顺序） */
       confirmModeManual: "手动确认",
       confirmModeAuto: "全自动",
@@ -987,7 +987,7 @@ const zhTW: Dict = {
     brandVer: "v2.0",
   },
 
-  /** 顶栏三工作台（由原五步旅程引导改造：chip 可点击切换，右侧状态点随就绪度变色） */
+  /** 顶栏三工作台（chip 可点击切换，右侧状态点随就绪度变色） */
   workbench: {
     archive: "存檔資料",
     replace: "批次/單人頭像替換",
@@ -1462,7 +1462,7 @@ const zhTW: Dict = {
       infoNegative: "負向",
       colPlayer: "球員",
       colDetail: "詳情",
-      // ---- 啟動方式（手動確認 / 全自動）與佇列列的逐條確認 ----
+      // ---- 啟動方式（手動確認 / 全自動）與佇列列的逐條確認 ----------------------------------------------------------
       /** 確認方式分段控件：左「手動確認」、右「全自動」（使用者指定的順序） */
       confirmModeManual: "手動確認",
       confirmModeAuto: "全自動",
@@ -1931,7 +1931,7 @@ const en: Dict = {
     brandVer: "v2.0",
   },
 
-  /** 顶栏三工作台（由原五步旅程引导改造：chip 可点击切换，右侧状态点随就绪度变色） */
+  /** 顶栏三工作台（chip 可点击切换，右侧状态点随就绪度变色） */
   workbench: {
     archive: "Profiles",
     replace: "Face replacement",
@@ -2434,7 +2434,7 @@ const en: Dict = {
       infoNegative: "Negative",
       colPlayer: "Player",
       colDetail: "Detail",
-      // ---- Start mode (manual confirm / fully automatic) and per-entry confirmation ----
+      // ---- Start mode (manual confirm / fully automatic) and per-entry confirmation ---------------------------------
       /** Segmented control: manual on the left, fully automatic on the right. */
       confirmModeManual: "Confirm manually",
       confirmModeAuto: "Fully automatic",

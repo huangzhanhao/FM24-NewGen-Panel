@@ -433,8 +433,8 @@ pub fn scan_pack_progress(
     }
     // faces_map：一级子目录 → 其直接图片词干。**直接从 recursive_pools 取**，不单独 read_dir：
     // 标准二主池按 FolderList 过滤 faces_map、标准三也拿它判目录名，而标准三 / Unknown 的池取
-    // recursive_pools——两份索引同源取值才保证逐字同键同值，词干规则一旦分歧（历史上 "a.1.png"
-    // 在两边一个成 "a" 一个成 "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、
+    // recursive_pools——两份索引同源取值才保证逐字同键同值；词干规则一旦分歧（"a.1.png" 在两边
+    // 一个成 "a" 一个成 "a.1"），同一张图就有两个身份，禁重复与 Preserve 剔除只摘得掉一份、
     // 这张图会被发出两次。顺带省掉每个一级目录的第二遍 read_dir。
     for (fname, _path) in subdirs.iter() {
         let imgs = recursive_pools.get(fname).cloned().unwrap_or_default();
@@ -446,7 +446,7 @@ pub fn scan_pack_progress(
 }
 
 /// 扫描结果的布局判定：垃圾目录（__MACOSX 等）不参与，与 FaceMapper::from_scan 同口径。
-/// 「扫描头像」与「建立映射索引」两处共用此前导，避免各自重列一遍 faces_map 过滤。
+/// 「扫描头像」与「建立映射索引」两处共用本函数，避免各自重列一遍 faces_map 过滤。
 pub fn classify_scan(scan: &PackScan, folder_lists: &[(u8, &Vec<String>)]) -> PackLayout {
     let subdirs: BTreeSet<String> = scan
         .faces_map
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn cancel_stops_pack_scan_and_never_returns_a_partial_index() {
         // 取消检查点必须落在最耗时的这一步（冷扫整包实测 14.6–39 s）：
-        // 原来只有阶段之间有感，用户按取消后几十秒无反应 → 判定假死 → 强杀进程。
+        // 只在阶段之间检查会让用户按取消后几十秒无反应 → 判定假死 → 强杀进程。
         // 半途的索引尤其不能当结果返回——残缺的目录集会把包判成另一个标准。
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -946,7 +946,7 @@ mod tests {
         assert_eq!((r.standard, r.found), (2, 1), "完整性检查也必须把软链目录算作目录");
     }
 
-    // ---------------- 完整性检查 / 扫描总数 ----------------
+    // ---- 完整性检查 / 扫描总数 --------------------------------------------------------------------------------------
 
     /// 在临时目录下按 names 建子目录。
     fn mk_dirs(root: &Path, names: &[&str]) {

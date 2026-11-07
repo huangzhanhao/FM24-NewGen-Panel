@@ -1,8 +1,8 @@
 //! 硅基流动（SiliconFlow）适配器 + 内置模型目录（同步 Bearer）。
 //!
-//! 【为什么单列一档】它虽自称 OpenAI 兼容，但官方 API 参考的**响应不是 `data[]`**，
-//! 而是 `{ "images": [ { "url" } ], "timings", "seed" }`；尺寸字段是 `image_size`（非 `size`）——
-//! 契约差异超出「改 base_url」，`openai::parse_images` 直接复用会报「响应缺少 data 数组」。
+//! 【协议差异】它虽自称 OpenAI 兼容，但响应不是 `data[]`，而是
+//! `{ "images": [ { "url" } ], "timings", "seed" }`；尺寸字段是 `image_size`（非 `size`）。
+//! 差异超出「改 base_url」，不能复用 OpenAI 的响应解析。
 //!
 //! Endpoint：`POST https://api.siliconflow.cn/v1/images/generations`（Bearer 鉴权）。
 //! 请求体（官方「创建图片生成请求」逐字）：
@@ -11,9 +11,10 @@
 //! - `batch_size`(1–4，**仅 Kwai-Kolors/Kolors 适用**)；`guidance_scale`(0–20，**仅 Kolors 适用**)；
 //! - `output_format`(png/jpeg，值随用户选择，未选默认 png)。
 //!
-//! 【内置目录】只接入两个官方明列推荐分辨率的模型：
+//! 【内置目录】只接入官方推荐分辨率的模型：
 //! - `Qwen/Qwen-Image`（出厂默认）
 //! - `Kwai-Kolors/Kolors`
+//! - `Tongyi-MAI/Z-Image-Turbo`、`Tongyi-MAI/Z-Image`（常用 1K 档，自定义尺寸交服务端）
 //!
 //! 用户配置里已存在该服务商时，模型行归用户所有、代码不接管
 //! （见 [`crate::image_ai::reconcile_builtin_providers`]）。
@@ -44,7 +45,7 @@ const KOLORS_SIZES: &[&str] = &["1024x1024", "960x1280", "768x1024", "720x1440",
 /// Tongyi-MAI/Z-Image(-Turbo) 常用 1K 档。官方未给固定枚举，自定义尺寸交服务端校验。
 const ZIMAGE_SIZES: &[&str] = &["1024x1024", "768x1344", "1344x768"];
 
-// ===================== 内置模型目录 =====================
+// ===================== 内置模型目录 ==================================================================================
 
 /// 硅基流动内置服务商：模型目录代码托管（不读 assets/image_ai.json）。
 pub(crate) fn builtin_provider() -> ProviderConfig {
@@ -109,7 +110,7 @@ fn siliconflow_caps(sizes: &[&str], max_n: u32, supports_n: bool, supports_guida
     }
 }
 
-// ===================== 请求体（纯函数，字段逐字照抄官方文档）=====================
+// ===================== 请求体（纯函数，字段逐字照抄官方文档） ========================================================
 
 /// 组装硅基流动文生图请求体：恒发 `model`/`prompt`/`image_size`；其余按能力位门控。
 /// **不发** `size`/`n`（官方字段名是 `image_size`/`batch_size`）。
@@ -151,7 +152,7 @@ pub(crate) fn build_siliconflow_body(req: &GenRequest) -> serde_json::Value {
     v
 }
 
-// ===================== 响应解析 =====================
+// ===================== 响应解析 ======================================================================================
 
 /// 解析响应：成功取 `images[].url`；无 `images` 时按 `message` 归为服务商错误。
 pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<String>, ImageGenError> {
@@ -174,6 +175,7 @@ pub(crate) fn parse_images(resp: &serde_json::Value) -> Result<Vec<String>, Imag
     Err(ImageGenError::provider(format!("服务商返回错误：{msg}"), false))
 }
 
+/// 硅基流动适配器（同步 Bearer；响应取 `images[].url`）。
 pub struct SiliconflowProvider;
 
 impl ImageProvider for SiliconflowProvider {
@@ -255,7 +257,7 @@ mod tests {
         v.iter().map(|s| (*s).to_string()).collect()
     }
 
-    // ===================== 内置目录 =====================
+    // ===================== 内置目录 ==================================================================================
 
     #[test]
     fn catalog_lists_builtin_models() {
@@ -295,7 +297,7 @@ mod tests {
         assert!(kolors.supports_steps);
     }
 
-    // ===================== 请求体组装 =====================
+    // ===================== 请求体组装 ================================================================================
 
     #[test]
     fn body_qwen_image_sends_image_size_not_size_or_n() {
@@ -332,7 +334,7 @@ mod tests {
 
     #[test]
     fn body_output_format_follows_user_choice() {
-        // 用户在能力位上勾了 output_format 就该能选到 jpeg（此前适配器写死 png，界面无处可选）。
+        // 用户在能力位上勾了 output_format 就能选到 jpeg：请求体与落盘后缀都跟着走。
         let mut r = req_for("Qwen/Qwen-Image");
         r.output_format = Some("jpeg".into());
         assert_eq!(build_siliconflow_body(&r)["output_format"], "jpeg");
@@ -343,7 +345,7 @@ mod tests {
         assert_eq!(build_siliconflow_body(&r)["output_format"], "png");
     }
 
-    // ===================== 响应解析 =====================
+    // ===================== 响应解析 ==================================================================================
 
     #[test]
     fn parse_images_reads_images_list() {
@@ -363,7 +365,7 @@ mod tests {
         assert_eq!(parse_images(&v).unwrap_err().message, "images 数组为空");
     }
 
-    // ===================== 校验 =====================
+    // ===================== 校验 ======================================================================================
 
     #[test]
     fn validate_rejects_steps_and_guidance_over_max() {

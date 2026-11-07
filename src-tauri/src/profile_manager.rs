@@ -8,7 +8,7 @@
 //!   再把目标存档的快照恢复回头像包目录——这样不同存档共享同一头像包目录也不会互相覆盖。
 //! 【线程安全】ProfileManager 自身可变且非线程安全，由 commands::AppState 包在 Mutex 里串行化访问。
 use crate::json_store::{self, LoadError};
-use crate::logger::LogSinkDyn; // 档景（快照）存取异常要进日志：此前这些分支全是静默的
+use crate::logger::LogSinkDyn; // 档景（快照）存取异常要进日志（不能静默失败）
 use crate::paths::{group_xml_path, norm_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap; // 有序字典：保证组/存档的遍历顺序稳定
@@ -202,7 +202,7 @@ impl ProfileManager {
                         }
                         let cfg = PrfCfg::default();
                         json_store::save(&path, &cfg)?;
-                        // 兼容清理：此前版本为 No Profile 套过的子目录（现已回归根直存），空则移除。
+                        // 兼容清理：No Profile 旧布局可能残留的子目录，空则移除。
                         if name == "No Profile" {
                             let legacy_dir = user_dir.join(crate::paths::sanitize(name));
                             if legacy_dir.is_dir() {
@@ -255,7 +255,7 @@ impl ProfileManager {
         Ok(cfg)
     }
 
-    // ---------------- Profile 管理 ----------------
+    // ---- Profile 管理 -----------------------------------------------------------------------------------------------
     /// 新建档：建好空档文件并立即切档（v1 交互：新建即激活）。
     pub fn create_profile(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
@@ -368,7 +368,7 @@ impl ProfileManager {
             self.restore_group_xml(name, &img_dir);
         }
         // 4) 更新全局激活位：只有目标档为 true，其余置 false；并落盘 profiles.json
-        //    （激活位必须落盘：此前漏写时新建存档重启会回到 No Profile）。
+        //    （激活位必须落盘，否则新建存档重启会回到 No Profile）。
         for k in self.config.profile.keys().cloned().collect::<Vec<_>>() {
             if let Some(flag) = self.config.profile.get_mut(&k) {
                 *flag = k == name;
@@ -414,7 +414,7 @@ impl ProfileManager {
         }
         // 【原子写 + 写前备份】两处拷贝都不走截断覆写：档景是替换判据源、恢复目标又是用户的
         // config.xml。覆盖档景之前先把盘上那一份轮转备份到同目录（见 overwrite_snapshot）——
-        // 一次误替换或一次被跳过的 restore 就能把它改成别档的内容，而它原来是唯一的记录。
+        // 一次误替换或一次被跳过的 restore 就能把它改成别档的内容，而它是唯一的记录。
         if let Err(e) = crate::xml_parser::overwrite_snapshot(&src, &dst) {
             self.warn(format!(
                 "保存档景失败：{e}。{profile} 在 {img_dir} 的档景未更新（仍为上一次的内容）"
@@ -493,7 +493,7 @@ impl ProfileManager {
         }
     }
 
-    // ---------------- 组管理 ----------------
+    // ---- 组管理 -----------------------------------------------------------------------------------------------------
     /// 把用户给的头像包目录对上**已登记**的组键：等价写法（大小写、正/反斜杠、尾斜杠）复用同一个键。
     /// 【为什么要这一步】组键只经 `norm_dir` 归一，`C:\FM\NG` 与 `C:\fm\ng` 会记成两个组，
     /// 而快照名是按 Windows 语义折过大小写的——两个组于是共用一份档景，

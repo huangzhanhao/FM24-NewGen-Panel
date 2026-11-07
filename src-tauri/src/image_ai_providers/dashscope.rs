@@ -51,7 +51,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-/// 内置百炼服务商的固定 ID（配置合并/迁移按此 ID 认领）。
+/// 内置百炼服务商的固定 ID（配置合并按此 ID 认领）。
 pub(crate) const PROVIDER_ID: &str = "dashscope";
 
 /// 阿里云直连默认基址（华北2·北京公共域）。官方文档已把**业务空间专属域**
@@ -75,7 +75,7 @@ const POLL_TOTAL_BUDGET: Duration = Duration::from_secs(120);
 /// 默认模型（Z-Image Turbo：极速低成本，适合批量出图）。
 const DEFAULT_MODEL: &str = "z-image-turbo";
 
-// ===================== 内置模型目录 =====================
+// ===================== 内置模型目录 ==================================================================================
 
 /// 百炼内置服务商：模型目录代码托管（不读 JSON）。
 pub(crate) fn builtin_provider() -> ProviderConfig {
@@ -86,7 +86,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
         base_url: DEFAULT_BASE.into(),
         default_model: DEFAULT_MODEL.into(),
         models: vec![
-            // ---------- 千问 Qwen-Image ----------
+            // ---- 千问 Qwen-Image ------------------------------------------------------------------------------------
             ModelInfo {
                 model: "qwen-image-3.0-pro".into(),
                 capabilities: qwen_caps(),
@@ -95,7 +95,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 model: "qwen-image-3.0".into(),
                 capabilities: qwen_caps(),
             },
-            // ---------- 万相 Wan ----------
+            // ---- 万相 Wan -------------------------------------------------------------------------------------------
             ModelInfo {
                 model: "wan2.7-image-pro".into(),
                 capabilities: wan27_caps(&["1K", "2K", "4K"], &REC_4K, 4096 * 4096),
@@ -108,7 +108,7 @@ pub(crate) fn builtin_provider() -> ProviderConfig {
                 model: "wan2.6-t2i".into(),
                 capabilities: wan26_caps(),
             },
-            // ---------- Z-Image ----------
+            // ---- Z-Image --------------------------------------------------------------------------------------------
             ModelInfo {
                 model: "z-image-turbo".into(),
                 capabilities: zimage_caps(),
@@ -275,7 +275,7 @@ fn zimage_caps() -> Capabilities {
     }
 }
 
-// ===================== URL 与请求体（纯函数）=====================
+// ===================== URL 与请求体（纯函数） ========================================================================
 
 /// 解析基址：空白配置回落默认值，统一去掉结尾 '/'（官方 SDK base_http_api_url 口径）。
 pub(crate) fn base(base_url: &str) -> String {
@@ -401,9 +401,13 @@ pub(crate) fn parse_submit(resp: &Value) -> Result<String, ImageGenError> {
 
 /// 异步任务查询响应的归类。
 pub(crate) enum TaskState {
+    /// 任务仍在排队。
     Pending,
+    /// 仍在运行（与 Pending 分开仅用于阶段区分）。
     Running,
+    /// 成功：图片 URL 列表。
     Succeeded(Vec<String>),
+    /// 失败：已分类的厂商错误。
     Failed(ImageGenError),
 }
 
@@ -488,6 +492,7 @@ async fn download_all(
     Ok(images)
 }
 
+/// 百炼适配器（同步/异步双链；无状态）。
 pub struct DashscopeProvider;
 
 impl ImageProvider for DashscopeProvider {
@@ -599,10 +604,7 @@ async fn run_async(
     loop {
         // 退避取「本轮退避值」与「剩余预算」的较小者，避免最后一次退避把墙钟顶过 120s；
         // 睡满后若预算已耗尽就径直超时、不再发 GET ⇒ 轮询阶段墙钟不超过 120s。
-        // 【单次尝试口径】超时判据 `started` 建在**建任务之后**：一次尝试的墙钟 =
-        // submit（建任务，S，不计入 120s 预算）+ 120s 轮询预算 + 至多一次在途 GET（G，预算
-        // 耗尽时可能已在发出的那次）。故调用方（队列重试）估算单条最坏墙钟时须按
-        // `尝试数 × (S + 120s + G) + 退避之和` 计，不能只算 3×120s。
+        // 超时判据 `started` 建在建任务之后：单次尝试墙钟 = submit + 120s 轮询预算 + 至多一次在途 GET。
         let remaining = POLL_TOTAL_BUDGET.saturating_sub(started.elapsed());
         let delay = poll_delay(attempt).min(remaining);
         if !delay.is_zero() {
@@ -693,7 +695,7 @@ mod tests {
         }
     }
 
-    // ===================== 内置目录 =====================
+    // ===================== 内置目录 ==================================================================================
 
     #[test]
     fn catalog_lists_six_models() {
@@ -908,7 +910,7 @@ mod tests {
         assert_eq!((r.ratio_min, r.ratio_max), (0.0, 0.0));
     }
 
-    // ===================== 请求体组装 =====================
+    // ===================== 请求体组装 ================================================================================
 
     #[test]
     fn body_uses_messages_shape_with_star_size() {
@@ -1009,7 +1011,7 @@ mod tests {
         assert_eq!(build_body(&r)["parameters"]["watermark"], false);
     }
 
-    // ===================== 响应解析与 URL =====================
+    // ===================== 响应解析与 URL ============================================================================
 
     #[test]
     fn sync_response_extracts_image_urls() {
@@ -1051,7 +1053,7 @@ mod tests {
         );
     }
 
-    // ===================== 异步：URL / 常量 / 解析 / 退避 / 分流 =====================
+    // ===================== 异步：URL / 常量 / 解析 / 退避 / 分流 =====================================================
 
     #[test]
     fn async_urls_and_header_constants() {

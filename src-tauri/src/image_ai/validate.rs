@@ -14,14 +14,13 @@ pub fn validate_complete(cfg: &Config, req: &GenRequest) -> Result<(), ImageGenE
     }
     cfg.provider(&req.provider_id)
         .ok_or_else(|| ImageGenError::not_configured("请先选择服务商"))?;
-    cfg.model(&req.provider_id, &req.model).ok_or_else(|| {
-        ImageGenError::not_configured("请先选择模型，或在服务商设置中为该服务添加模型")
-    })?;
+    cfg.model(&req.provider_id, &req.model)
+        .ok_or_else(|| ImageGenError::not_configured("请先选择模型，或在服务商设置中为该服务添加模型"))?;
     Ok(())
 }
 
-/// 生图准入校验的**唯一入口**：解析服务商/模型，并按协议解释厂商约束（张数上限/提示词长度/
-/// 尺寸规则）。`generate` 与回归测试都经此函数——删掉校验必然触发断言失败（结构性覆盖）。
+/// 生图准入校验的**唯一入口**：解析服务商/模型，并按协议解释厂商约束（张数上限/提示词长度/尺寸规则）。
+/// `generate` 与回归测试都经此函数——删掉校验必然触发断言失败（结构性覆盖）。
 pub(crate) fn validate_for_generate(cfg: &Config, req: &GenRequest) -> Result<(), ImageGenError> {
     let provider = cfg
         .provider(&req.provider_id)
@@ -38,7 +37,7 @@ pub(crate) fn validate_for_generate(cfg: &Config, req: &GenRequest) -> Result<()
     crate::image_ai_providers::for_kind(provider.kind).validate(&probe, &model.capabilities)
 }
 
-// ===================== 单元测试：两层准入校验 ==================================================
+// ===================== 单元测试：两层准入校验 ========================================================================
 
 #[cfg(test)]
 mod tests {

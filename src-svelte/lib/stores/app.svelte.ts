@@ -40,7 +40,7 @@ export const appStore = $state({
   snapshotReadPath: null as string | null,
   snapshotVersion: 0,                          // 快照预览版本号：读取快照成功或替换成功后 +1，触发快照预览重载（同路径重读也生效）
 
-  // ---- 展示态派生 getter（核心业务规则单点维护，各组件只消费）----
+  // ---- 展示态派生 getter（核心业务规则单点维护，各组件只消费） ------------------------------------------------------
   /** 展示用快照：浏览态优先，否则真实激活快照。侧栏/当前任务卡/快照预览等展示类组件统一用它。 */
   get displaySnapshot(): AppSnapshot | null {
     return this.profilePreview ?? this.snapshot;

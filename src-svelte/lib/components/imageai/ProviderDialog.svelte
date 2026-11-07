@@ -203,7 +203,7 @@
       bindLabels: [t.gen.callModeSync, t.gen.callModeAsync],
       subs: [],
     },
-    // ---- 非 DashScope 协议的专有行：由 KIND_ROWS 决定是否出现在编辑区 ----
+    // ---- 非 DashScope 协议的专有行：由 KIND_ROWS 决定是否出现在编辑区 -----------------------------------------------
     {
       key: "quality",
       label: t.gen.capProtoQuality,

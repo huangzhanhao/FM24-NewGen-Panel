@@ -62,10 +62,8 @@ const STAGE_NAMES: [&str; 8] = [
 
 /// 版本判定完成前的版本槽位文案。
 const VERSION_UNKNOWN: &str = "未知（版本判定未完成）";
-/// 版本串的 +build 形态正则（第 1 组为 major）。
-const VERSION_BUILD_RE: &str = r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,4})\+([0-9]{1,10})";
-/// 无 +build 段的版本串正则（第 1 组为 major）。
-const VERSION_PLAIN_RE: &str = r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,4})";
+/// 版本号串的两种形态：`x.y.z` 与 `x.y.z+build`；第 1 组为 major，原始串取整段命中。
+const VERSION_RE: &str = r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,4})(?:\+([0-9]{1,10}))?";
 /// 俱乐部名的合法字符类；Unicode 字母/数字 + 常见标点，长度 1..90。
 const NAME_CHARS_RE: &str = r"^[\p{L}\p{N} ·&()（）./,'‘’“”:；;!！?？*_*%#@=\-]{1,90}$";
 
@@ -527,7 +525,7 @@ fn read_toc_block(
 
 // ===================== 版本判定 ================================================================
 
-/// 长度前缀字符串扫描：版本串在 game_info / save_game_summary 里都是 {u32 len}{utf8} 形态。
+/// 扫描 {u32 len}{utf8} 形态的字符串；版本号在 `save_game_summary` 里就是这种形态。
 fn length_prefixed_strings(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -545,46 +543,29 @@ fn length_prefixed_strings(bytes: &[u8]) -> Vec<String> {
     out
 }
 
-/// 解版本节 → 取 major。搜索对象按 `game_info` / `save_game_summary` 双路兜底：真档里
-/// `save_game_summary` 只有无 build 段的 `24.4.2`，`game_info` 才是 `24.3.0+0`。
+/// 版本号只从 `save_game_summary` 取：`game_info` 里的 `24.3.0+0` 是 build tag，不是版本号。
+/// 用 build tag 做闸门，改了 summary major 的档会被旧 tag 顶回 24，闸门与版本上下文都会失真。
 fn read_version(
     path: &Path,
     toc: &Toc,
     version: &str,
     diag: &mut Diag,
 ) -> Result<(u8, String), String> {
-    let mut summary: Vec<String> = Vec::new();
-    let mut info: Vec<String> = Vec::new();
-    if let Some(e) = toc.find("save_game_summary") {
-        summary = length_prefixed_strings(&decompress_section(path, e, version, diag)?);
-    }
-    if let Some(e) = toc.find("game_info") {
-        info = length_prefixed_strings(&decompress_section(path, e, version, diag)?);
-    }
-    if summary.is_empty() && info.is_empty() {
+    let Some(e) = toc.find("save_game_summary") else {
         return Err(fail(
             diag,
             path,
             version,
             STAGE_SECTION,
-            "期望 TOC 含 save_game_summary 或 game_info 版本节，实际两者都缺或为空",
+            format!(
+                "期望 TOC 含 save_game_summary 版本节，实际 {} 个条目中未找到",
+                toc.entries.len()
+            ),
         ));
-    }
-
-    // +build 优先：save_game_summary → game_info；再退到无 build 形态。
-    let build_re = regex::Regex::new(VERSION_BUILD_RE).expect("版本正则为字面量常量");
-    let plain_re = regex::Regex::new(VERSION_PLAIN_RE).expect("版本正则为字面量常量");
-    let sources: [(&[String], &str); 2] = [(&summary, "save_game_summary"), (&info, "game_info")];
-    let found = sources
-        .iter()
-        .find_map(|(cands, _)| find_major_in(cands, &build_re))
-        .or_else(|| {
-            sources
-                .iter()
-                .find_map(|(cands, _)| find_major_in(cands, &plain_re))
-        });
-
-    let (major, raw) = match found {
+    };
+    let summary = length_prefixed_strings(&decompress_section(path, e, version, diag)?);
+    let re = regex::Regex::new(VERSION_RE).expect("版本正则为字面量常量");
+    let (major, raw) = match find_major_in(&summary, &re) {
         Some(v) => v,
         None => {
             return Err(fail(
@@ -593,9 +574,8 @@ fn read_version(
                 version,
                 STAGE_VERSION,
                 format!(
-                    "期望在版本节找到 x.y.z[+build] 串，实际 save_game_summary {} 项、game_info {} 项候选均无匹配",
-                    summary.len(),
-                    info.len()
+                    "期望 save_game_summary 含 x.y.z[+build] 版本串，实际 {} 项候选均无匹配",
+                    summary.len()
                 ),
             ))
         }
@@ -2511,9 +2491,17 @@ mod tests {
         decomp_len: Option<u64>,
     }
 
-    /// 版本节：长度前缀字符串形态的 `major.3.0+0`，与档内 game_info / save_game_summary 一致。
+    /// 版本节：长度前缀字符串形态的 `major.3.0+0`，覆盖带 +build 段的版本串形态。
     fn version_section(major: u8) -> Vec<u8> {
         let s = format!("{major}.3.0+0");
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    /// 任意版本串的长度前缀节：用于让无 +build 段的版本号与 build tag 在同一档里共存。
+    fn version_string_section(s: &str) -> Vec<u8> {
         let mut v = Vec::with_capacity(4 + s.len());
         v.extend_from_slice(&(s.len() as u32).to_le_bytes());
         v.extend_from_slice(s.as_bytes());
@@ -2722,6 +2710,64 @@ mod tests {
             !logs.iter().any(|l| l.message.contains("节 game_db")),
             "版本闸门之后才允许出现 game_db 解压记录"
         );
+
+        // V-E：summary 报 major=26 且不带 +build 段，game_info 仍是 24 的 build tag。
+        // 闸门只认 summary，build tag 不得把 major 顶回 24，也不得先解压 game_db。
+        let ve_path = temp_fm(
+            &dir,
+            "ve26.fm",
+            &build_container(&[
+                Section { name: "save_game_summary", raw: version_string_section("26.4.2"), decomp_len: None },
+                Section { name: "game_info", raw: version_string_section("24.3.0+0"), decomp_len: None },
+                Section { name: "game_db", raw: vec![0u8; 16], decomp_len: Some(999) },
+            ]),
+        );
+        let (ve_res, ve_logs) = run_parse(&ve_path);
+        let ve_err = ve_res.unwrap_err();
+        assert!(ve_err.contains("阶段：版本判定"), "{ve_err}");
+        assert!(ve_err.contains("版本：FM26 (major=26)"), "{ve_err}");
+        assert!(ve_err.contains("未解压 game_db"), "{ve_err}");
+        assert!(
+            !ve_logs.iter().any(|l| l.message.contains("节 game_db")),
+            "版本闸门之前不得解压 game_db：{ve_err}"
+        );
+        assert!(
+            ve_logs.iter().any(|l| l.message.contains("版本原始串=26.4.2")),
+            "版本上下文应取 summary 的 26.4.2"
+        );
+        assert!(
+            !ve_logs.iter().any(|l| l.message.contains("24.3.0+0")),
+            "game_info 的 build tag 不得进入版本上下文"
+        );
+
+        // 无 +build 段的 24.4.2 必须过闸门；后续 game_db 太短在目标节解压失败是预期的。
+        let plain_path = temp_fm(
+            &dir,
+            "plain24.fm",
+            &build_container(&[
+                Section { name: "save_game_summary", raw: version_string_section("24.4.2"), decomp_len: None },
+                Section { name: "game_info", raw: version_string_section("24.3.0+0"), decomp_len: None },
+                Section { name: "game_db", raw: vec![0u8; 12], decomp_len: Some(100) },
+            ]),
+        );
+        let (plain_res, plain_logs) = run_parse(&plain_path);
+        let plain_err = plain_res.unwrap_err();
+        assert!(plain_err.contains("阶段：目标节解压"), "{plain_err}");
+        assert!(plain_err.contains("版本：FM24 (major=24)"), "{plain_err}");
+        let full = plain_logs
+            .iter()
+            .find(|l| l.level == "ERROR" && l.message.contains("完整路径="))
+            .expect("缺少完整上下文 Error 日志");
+        assert!(full.message.contains("版本原始串=24.4.2"), "{}", full.message);
+        assert!(!full.message.contains("24.3.0+0"), "{}", full.message);
+
+        // 两种版本串形态都取第 1 组 major，且原始串保留命中的全串。
+        let re = regex::Regex::new(VERSION_RE).expect("版本正则为字面量常量");
+        assert_eq!(find_major_in(&["24.4.2".to_string()], &re), Some((24, "24.4.2".to_string())));
+        assert_eq!(find_major_in(&["24.4.28".to_string()], &re), Some((24, "24.4.28".to_string())));
+        assert_eq!(find_major_in(&["24.3.0+0".to_string()], &re), Some((24, "24.3.0+0".to_string())));
+        assert_eq!(find_major_in(&["26.4.2".to_string()], &re), Some((26, "26.4.2".to_string())));
+        assert_eq!(find_major_in(&["no version here".to_string()], &re), None);
     }
 
     // ---- 2. 截断 TOC -------------------------------------------------------------------------------

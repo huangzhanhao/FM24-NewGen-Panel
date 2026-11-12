@@ -2484,7 +2484,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::logger::{ChannelLogger, LogLine};
     use crate::nationality::{NationalityDoc, NationalityMapping};
-    use crate::rtf_scanner::PersonKind;
+    use crate::rtf_scanner::{PersonKind, RtfScanner};
 
     /// 一节合成存档内容。`decomp_len` 允许谎报声明长度，用来构造「压缩帧不完整」负样本。
     struct Section {
@@ -3334,25 +3334,256 @@ pub(crate) mod tests {
         assert!(filtered.data.iter().all(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)));
     }
 
-    // ---- 13. 真档判卷（T05 逐列 harness 在此骨架上扩展） -----------------------------------------------
+    // ---- 13. 真档判卷（RTF 真值逐列 + 全局不变量） ---------------------------------------------------
 
     /// 环境变量 `FM_SAVE_DIR` 解门控；`-- --ignored` 才运行。缺档打印后跳过，不留悬挂失败。
-    /// 只判产出条数 ±0.5% 与全局不变量：逐列 rate / 汉字名比例依赖外部 verify.json 判卷资产，
-    /// 不属于单测能自洽判定的范围。
+    /// zq25 / liv 走全量判卷：.fm 产出对 rtf_scanner 解析的 RTF 真值按 uid join 逐列比对，
+    /// rate 红线取 §14 显式下限，不足 100% 的列用「参考实测 − 0.05pp」容真值解析器间的单格
+    /// 噪声；20261023 只跑全局不变量与时点一致性打印（无参考基线，跨档结论只认 liv↔zq25）。
     fn real_save_dir() -> Option<PathBuf> {
         std::env::var_os("FM_SAVE_DIR").map(PathBuf::from)
     }
 
+    /// 逐列 rate 红线（百分数）。
+    struct JudgeLimits {
+        recall_player: f64,
+        recall_staff: f64,
+        nation: f64,
+        hair_len: f64,
+        hair: f64,
+        eth: f64,
+        skin: f64,
+        newgen: f64,
+        sex: f64,
+        age: f64,
+        height: f64,
+        club: f64,
+        ca: f64,
+        pa: f64,
+    }
+
+    /// 全量判卷档。`newgen_pct` 是参考流水线同档**全量**产出的新生占比：真值 RTF 的职员
+    /// 覆盖面（zq25 仅 10.6%、liv 66%）会把判卷行占比推偏 6~9pp，与全量口径不可比。
     struct JudgeCase {
         file: &'static str,
         expect: usize,
+        rtf_player: &'static str,
+        rtf_staff: &'static str,
+        newgen_pct: f64,
+        lim: JudgeLimits,
     }
 
-    fn judge_one(dir: &Path, case: &JudgeCase) -> bool {
+    /// 一列的判卷账目：rate = 命中/全部判卷行（空对空计命中）；knownRate = 命中/真值非空
+    /// 行，只打印不设红线。nation2 不设 rate 红线，只判 FP（真值空而我侧非空）。
+    #[derive(Default)]
+    struct ColAcc {
+        hit: usize,
+        total: usize,
+        known: usize,
+        known_hit: usize,
+    }
+
+    impl ColAcc {
+        fn feed(&mut self, ours: &str, truth: &str) {
+            self.total += 1;
+            if ours == truth {
+                self.hit += 1;
+            }
+            if !truth.is_empty() {
+                self.known += 1;
+                if ours == truth {
+                    self.known_hit += 1;
+                }
+            }
+        }
+
+        fn rate(&self) -> f64 {
+            100.0 * self.hit as f64 / self.total.max(1) as f64
+        }
+
+        fn known_rate(&self) -> f64 {
+            100.0 * self.known_hit as f64 / self.known.max(1) as f64
+        }
+    }
+
+    /// 判卷列打印顺序（与参考实现对齐）。loc/job/rca 只累计打印不设红线：我侧 L8 恒空、
+    /// 参考实现这三列 rate 同样为 0%，恒空语义已由全局不变量断言覆盖。
+    const JUDGE_COLS: [&str; 17] = [
+        "nation", "nation2", "name", "hairLen", "hair", "eth", "skin", "newgen", "sex", "age",
+        "height", "club", "loc", "job", "ca", "pa", "rca",
+    ];
+
+    /// 取拓展列原文；一侧没有拓展信息时按空串参与比对（空对空计命中）。
+    fn dstr(d: Option<&DetailedInfo>, f: fn(&DetailedInfo) -> &str) -> &str {
+        d.map(f).unwrap_or("")
+    }
+
+    /// 参考实现的 num：取串中首个整数（可带前导负号），无整数返回空串。身高两侧分别是
+    /// 「182 cm」与「181厘米」这类带单位文本，必须抽数字再比。
+    fn num_of(s: &str) -> String {
+        let b = s.as_bytes();
+        let mut i = 0usize;
+        while i < b.len() {
+            let neg_run = b[i] == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit();
+            if neg_run || b[i].is_ascii_digit() {
+                let start = if neg_run { i + 1 } else { i };
+                let mut end = start;
+                while end < b.len() && b[end].is_ascii_digit() {
+                    end += 1;
+                }
+                let digits = s[start..end].to_string();
+                return if neg_run { format!("-{digits}") } else { digits };
+            }
+            i += 1;
+        }
+        String::new()
+    }
+
+    /// 纯拉丁字符集名字（字母/空格/连字符/点）：两侧译名规则不同，逐值不可判，拉丁
+    /// 占比只作观察指标打印。
+    fn is_latin_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphabetic() || matches!(c, ' ' | '-' | '.'))
+    }
+
+    /// 判卷一行的逐列喂账。两侧同为 crate 的 PlayerRecord：newgen 两侧同用 uid r- 前缀
+    /// 判据（不比标志原文，译文随导出语言变化）；sex 用 kind 的女性位（语言无关，也不受
+    /// 球员/职员折叠影响）；球员 loc 对 based、职员 job 对 preferred_job——真值职员表的
+    /// 职务同样落在第 15 列的 preferred_job，两列分母各自独立。
+    fn feed_columns(ours: &PlayerRecord, truth: &PlayerRecord, cols: &mut HashMap<&'static str, ColAcc>) {
+        let d = ours.detailed.as_ref();
+        let t = truth.detailed.as_ref();
+        cols.entry("nation").or_default().feed(&ours.primary_nat, &truth.primary_nat);
+        cols.entry("nation2").or_default().feed(&ours.sec_nat, &truth.sec_nat);
+        cols.entry("name").or_default().feed(&ours.name, &truth.name);
+        cols.entry("hairLen").or_default().feed(&ours.hair_length, &truth.hair_length);
+        cols.entry("hair").or_default().feed(&ours.hair_color, &truth.hair_color);
+        cols.entry("eth").or_default().feed(&ours.ethnicity_code, &truth.ethnicity_code);
+        cols.entry("skin").or_default().feed(dstr(d, |x| &x.skin_code), dstr(t, |x| &x.skin_code));
+        let ng = |r: &PlayerRecord| if r.uid.starts_with(NEWGAN_UID_PREFIX) { "Yes" } else { "No" };
+        cols.entry("newgen").or_default().feed(ng(ours), ng(truth));
+        let sex = |r: &PlayerRecord| if r.kind.is_female() { "Female" } else { "Male" };
+        cols.entry("sex").or_default().feed(sex(ours), sex(truth));
+        cols.entry("age").or_default().feed(dstr(d, |x| &x.age), dstr(t, |x| &x.age));
+        cols.entry("height")
+            .or_default()
+            .feed(&num_of(dstr(d, |x| &x.height)), &num_of(dstr(t, |x| &x.height)));
+        cols.entry("club").or_default().feed(dstr(d, |x| &x.club), dstr(t, |x| &x.club));
+        if ours.kind.is_staff() {
+            cols.entry("job")
+                .or_default()
+                .feed(dstr(d, |x| &x.preferred_job), dstr(t, |x| &x.preferred_job));
+        } else {
+            cols.entry("loc").or_default().feed(dstr(d, |x| &x.based), dstr(t, |x| &x.based));
+        }
+        cols.entry("ca").or_default().feed(&num_of(dstr(d, |x| &x.ca)), &num_of(dstr(t, |x| &x.ca)));
+        cols.entry("pa").or_default().feed(&num_of(dstr(d, |x| &x.pa)), &num_of(dstr(t, |x| &x.pa)));
+        cols.entry("rca")
+            .or_default()
+            .feed(&num_of(dstr(d, |x| &x.rca)), &num_of(dstr(t, |x| &x.rca)));
+    }
+
+    /// 解析一份 RTF 真值。缺文件打印后返回 None；存在但识别/解析失败直接 panic——真值
+    /// 损坏是环境问题，静默降级会让红线断言退化成空判。
+    fn parse_truth_rtf(dir: &Path, name: &str) -> Option<Vec<PlayerRecord>> {
+        let path = dir.join(name);
+        if !path.is_file() {
+            eprintln!("[real_saves_judging] 缺真值跳过：{}", path.display());
+            return None;
+        }
+        let logger = ChannelLogger::channel().0;
+        let mut scanner = RtfScanner::new();
+        scanner
+            .detect_format(&path, &logger)
+            .unwrap_or_else(|e| panic!("真值格式识别失败（{}）：{e}", path.display()));
+        let data = scanner
+            .parse_roster(&path, false, &logger)
+            .unwrap_or_else(|e| panic!("真值解析失败（{}）：{e}", path.display()));
+        Some(data)
+    }
+
+    /// 全局不变量（不依赖外部基线）：摘要与行账目自洽、skin 值域与 255、detailed 恒 Some、
+    /// L8 恒空、kind 四值全覆盖。返回 (kind 直方图, skin 越界数, detailed Some 数) 供打印；
+    /// 条数 ±0.5% 需要外部基线，留在全量判卷用例里判，时点用例不适用。
+    fn assert_global_invariants(
+        tag: &str,
+        data: &[PlayerRecord],
+        summary: &RosterSummary,
+        counts: &RosterCounts,
+    ) -> ([usize; 4], usize, usize) {
+        assert_eq!(summary.total, data.len(), "{tag} 摘要 total 应与产出一致");
+        assert!(summary.detailed, "{tag} 摘要 detailed 应为 true");
+        assert_eq!(summary.format, "FM 存档名单（球员+职员）");
+        assert_eq!(summary.format_code, RtfFormat::ExtPlayer);
+        assert_eq!(summary.language, "English");
+        assert_eq!(
+            summary.newgan,
+            data.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count(),
+            "{tag} 摘要 newgan 应与 r- 前缀计数一致"
+        );
+        assert_eq!(counts.kept, data.len(), "{tag} 扫描阶段 kept == 产出条数");
+        assert_eq!(counts.rows, counts.kept + counts.dropped, "{tag} rows == kept + dropped");
+        assert_eq!(counts.filtered, 0, "{tag} 扫描阶段 filtered 恒 0");
+        assert_eq!(counts.stray, 0, "{tag} 扫描阶段 stray 恒 0");
+        assert!(counts.dropped > 0, "{tag} 真档应存在 Q10 person 跳过");
+
+        let mut skin_oob = 0usize;
+        let mut skin_255 = 0usize;
+        let mut detailed_some = 0usize;
+        let mut kinds = [0usize; 4];
+        for p in data {
+            if let Some(d) = p.detailed.as_ref() {
+                detailed_some += 1;
+                if let Ok(v) = d.skin_code.parse::<u32>() {
+                    if !(0..=19).contains(&v) {
+                        skin_oob += 1;
+                    }
+                    if v == 255 {
+                        skin_255 += 1;
+                    }
+                }
+                assert_eq!(d.avatar, "");
+                assert_eq!(d.based, "");
+                assert_eq!(d.preferred_job, "");
+                assert_eq!(d.rca, "");
+                assert!(d.extra_fields.is_empty());
+            }
+            let k = match p.kind {
+                PersonKind::PlayerMale => 0,
+                PersonKind::PlayerFemale => 1,
+                PersonKind::StaffMale => 2,
+                PersonKind::StaffFemale => 3,
+            };
+            kinds[k] += 1;
+        }
+        assert_eq!(skin_oob, 0, "{tag} skin_code 越 0..19 的条数");
+        assert_eq!(skin_255, 0, "{tag} skin_code 写成 255 的条数");
+        assert_eq!(detailed_some, data.len(), "{tag} detailed 必须恒 Some");
+        assert!(kinds[0] > 0 && kinds[2] > 0, "{tag} 球员与职员两族都应出现");
+        assert_eq!(kinds.iter().sum::<usize>(), data.len(), "{tag} kind 四值覆盖全量");
+        (kinds, skin_oob, detailed_some)
+    }
+
+    /// 单列红线：无判卷行直接失败——join 或真值解析出问题时静默 0% 会让红线失守。
+    fn gate(tag: &str, col: &str, acc: &ColAcc, lim: f64) {
+        assert!(acc.total > 0, "{tag} 列 {col} 没有任何判卷行");
+        let rate = acc.rate();
+        assert!(
+            rate >= lim,
+            "{tag} 列 {col} rate {rate:.3}% 低于红线 {lim}%（命中 {}/{}）",
+            acc.hit,
+            acc.total
+        );
+    }
+
+    /// 全量判卷一档：解析 .fm、跑条数/全局不变量/分布断言，再对 RTF 真值按 uid join
+    /// 逐列判卷。返回产出 uid 集（时点用例做交集观察用）。缺档返回 None；缺真值只跳过
+    /// 逐列部分——不变量与分布断言不依赖真值，仍完整执行。
+    fn judge_one(dir: &Path, case: &JudgeCase) -> Option<HashSet<String>> {
         let path = dir.join(case.file);
         if !path.is_file() {
             eprintln!("[real_saves_judging] 缺档跳过：{}", path.display());
-            return false;
+            return None;
         }
         let nat = NationalityTable::builtin();
         let (logger, rx) = ChannelLogger::channel();
@@ -3383,52 +3614,47 @@ pub(crate) mod tests {
             data.len(),
             case.expect
         );
-        assert_eq!(summary.total, data.len(), "摘要 total 应与产出一致");
-        assert!(summary.detailed, "摘要 detailed 应为 true");
-        assert_eq!(summary.format, "FM 存档名单（球员+职员）");
-        assert_eq!(summary.format_code, RtfFormat::ExtPlayer);
-        assert_eq!(summary.language, "English");
-        assert_eq!(summary.newgan, data.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count());
-        assert_eq!(counts.kept, data.len(), "扫描阶段 kept == 产出条数");
-        assert_eq!(counts.rows, counts.kept + counts.dropped, "rows == kept + dropped");
-        assert_eq!(counts.filtered, 0, "扫描阶段 filtered 恒 0");
-        assert_eq!(counts.stray, 0, "扫描阶段 stray 恒 0");
-        assert!(counts.dropped > 0, "真档应存在 Q10 person 跳过");
 
-        let mut skin_oob = 0usize;
-        let mut skin_255 = 0usize;
-        let mut detailed_some = 0usize;
-        let mut kinds = [0usize; 4];
-        for p in &data {
-            if let Some(d) = p.detailed.as_ref() {
-                detailed_some += 1;
-                if let Ok(v) = d.skin_code.parse::<u32>() {
-                    if !(0..=19).contains(&v) {
-                        skin_oob += 1;
-                    }
-                    if v == 255 {
-                        skin_255 += 1;
-                    }
-                }
-                assert_eq!(d.avatar, "");
-                assert_eq!(d.based, "");
-                assert_eq!(d.preferred_job, "");
-                assert_eq!(d.rca, "");
-                assert!(d.extra_fields.is_empty());
-            }
-            let k = match p.kind {
-                PersonKind::PlayerMale => 0,
-                PersonKind::PlayerFemale => 1,
-                PersonKind::StaffMale => 2,
-                PersonKind::StaffFemale => 3,
-            };
-            kinds[k] += 1;
-        }
-        assert_eq!(skin_oob, 0, "skin_code 越 0..19 的条数");
-        assert_eq!(skin_255, 0, "skin_code 写成 255 的条数");
-        assert_eq!(detailed_some, data.len(), "detailed 必须恒 Some");
-        assert!(kinds[0] > 0 && kinds[2] > 0, "球员与职员两族都应出现");
-        assert_eq!(kinds.iter().sum::<usize>(), data.len(), "kind 四值覆盖全量");
+        let (kinds, skin_oob, detailed_some) =
+            assert_global_invariants(case.file, &data, &summary, &counts);
+
+        // 分布类断言（对全量产出计，不对判卷行计）：空国籍红线源于参考侧空国籍为 0，
+        // 留 0.05% 容 FM 国籍码个位数不可译；名字逐值相等不可判（两侧译名规则不同），
+        // 退为非空比例区间；新生占比对全量基线 ±1pp；女性按实测 0.60%/1.19% 收紧到
+        // 2.0% 上限（PlayerFemale 实测恒 0，女性仅零星出现在职员侧）。
+        let total = data.len();
+        let empty_nat = data.iter().filter(|p| p.primary_nat.is_empty()).count();
+        assert!(
+            (empty_nat as f64) < 0.0005 * total as f64,
+            "{} 空国籍 {} / {total} 超过 0.05%",
+            case.file,
+            empty_nat
+        );
+        let nonempty_name = total - data.iter().filter(|p| p.name.is_empty()).count();
+        let nonempty_name_pct = 100.0 * nonempty_name as f64 / total as f64;
+        assert!(
+            (99.0..=100.0).contains(&nonempty_name_pct),
+            "{} 名字非空比例 {nonempty_name_pct:.3}% 落在 [99,100] 之外",
+            case.file
+        );
+        let our_ng_pct = 100.0 * summary.newgan as f64 / total as f64;
+        assert!(
+            (our_ng_pct - case.newgen_pct).abs() <= 1.0,
+            "{} 新生占比 {our_ng_pct:.3}% 偏离全量基线 {} 超过 1pp",
+            case.file,
+            case.newgen_pct
+        );
+        let female = kinds[1] + kinds[3];
+        let female_pct = 100.0 * female as f64 / total as f64;
+        assert!(
+            female_pct < 2.0,
+            "{} 女性占比 {female_pct:.3}% 超过 2.0% 上限",
+            case.file
+        );
+
+        let latin = data.iter().filter(|p| is_latin_name(&p.name)).count();
+        let latin_pct = 100.0 * latin as f64 / total as f64;
+        let uids: HashSet<String> = data.iter().map(|p| p.uid.clone()).collect();
 
         eprintln!(
             "[real_saves_judging] {}｜产出={} 条｜dropped={}｜耗时={} ms｜skin 越界={}｜detailed Some={}｜kind={:?}",
@@ -3440,7 +3666,124 @@ pub(crate) mod tests {
             detailed_some,
             kinds,
         );
-        true
+
+        let tp = parse_truth_rtf(dir, case.rtf_player);
+        let ts = parse_truth_rtf(dir, case.rtf_staff);
+        let (Some(tp), Some(ts)) = (tp, ts) else {
+            eprintln!("[real_saves_judging] {} 缺真值 RTF，跳过逐列判卷", case.file);
+            return Some(uids);
+        };
+
+        // 真值合并：球员先入表、职员只补 uid 未出现者——与参考实现的合并次序一致。
+        let mut truth: HashMap<&str, &PlayerRecord> = HashMap::with_capacity(tp.len() + ts.len());
+        for r in &tp {
+            truth.insert(r.uid.as_str(), r);
+        }
+        for r in &ts {
+            truth.entry(r.uid.as_str()).or_insert(r);
+        }
+
+        let mut cols: HashMap<&'static str, ColAcc> = HashMap::new();
+        for col in JUDGE_COLS {
+            cols.entry(col).or_default();
+        }
+        let mut rows_player = 0usize;
+        let mut rows_staff = 0usize;
+        let mut nation2_fp = 0usize;
+        let mut truth_ng_judged = 0usize;
+        for p in &data {
+            let Some(t) = truth.get(p.uid.as_str()) else {
+                continue;
+            };
+            if p.kind.is_staff() {
+                rows_staff += 1;
+            } else {
+                rows_player += 1;
+            }
+            if t.sec_nat.is_empty() && !p.sec_nat.is_empty() {
+                nation2_fp += 1;
+            }
+            if t.uid.starts_with(NEWGAN_UID_PREFIX) {
+                truth_ng_judged += 1;
+            }
+            feed_columns(p, t, &mut cols);
+        }
+
+        // 编号召回按 role 分开：分母是两份真值 RTF 各自的行数。跨角色 uid 命中会让
+        // 召回略超 100%，因此只设下限不设上限。
+        let judged = rows_player + rows_staff;
+        assert!(judged > 0, "{} 与真值 uid 交集为空", case.file);
+        assert!(rows_player > 0, "{} 判卷行中没有任何球员", case.file);
+        assert!(rows_staff > 0, "{} 判卷行中没有任何职员", case.file);
+        let recall_player = 100.0 * rows_player as f64 / tp.len().max(1) as f64;
+        let recall_staff = 100.0 * rows_staff as f64 / ts.len().max(1) as f64;
+        assert!(
+            recall_player >= case.lim.recall_player,
+            "{} 球员召回 {recall_player:.3}% 低于红线 {}%（{}/{}）",
+            case.file,
+            case.lim.recall_player,
+            rows_player,
+            tp.len()
+        );
+        assert!(
+            recall_staff >= case.lim.recall_staff,
+            "{} 职员召回 {recall_staff:.3}% 低于红线 {}%（{}/{}）",
+            case.file,
+            case.lim.recall_staff,
+            rows_staff,
+            ts.len()
+        );
+
+        // 逐列红线。nation2 不设 rate 红线（真值第二国籍大量为空，空对空命中率无鉴别
+        // 力），改判 FP：真值为空而我侧非空即计一条，必须为 0。
+        let lims = [
+            ("nation", case.lim.nation),
+            ("hairLen", case.lim.hair_len),
+            ("hair", case.lim.hair),
+            ("eth", case.lim.eth),
+            ("skin", case.lim.skin),
+            ("newgen", case.lim.newgen),
+            ("sex", case.lim.sex),
+            ("age", case.lim.age),
+            ("height", case.lim.height),
+            ("club", case.lim.club),
+            ("ca", case.lim.ca),
+            ("pa", case.lim.pa),
+        ];
+        for (col, lim) in lims {
+            let acc = cols
+                .get(col)
+                .unwrap_or_else(|| panic!("{} 列 {col} 无判卷账目", case.file));
+            gate(case.file, col, acc, lim);
+        }
+        assert_eq!(nation2_fp, 0, "{} nation2 真值空而我侧非空的条数", case.file);
+
+        eprintln!(
+            "[real_saves_judging] {}｜判卷行={}（球员 {rows_player}/职员 {rows_staff}）｜召回 球员 {recall_player:.3}% 职员 {recall_staff:.3}%｜nation2 FP={nation2_fp}",
+            case.file,
+            judged
+        );
+        for col in JUDGE_COLS {
+            let acc = &cols[col];
+            eprintln!(
+                "[real_saves_judging] {}｜列 {:>7}｜命中 {}/{}｜rate={:.3}%｜knownRate={:.3}%（known {}/{}）",
+                case.file,
+                col,
+                acc.hit,
+                acc.total,
+                acc.rate(),
+                acc.known_rate(),
+                acc.known_hit,
+                acc.known
+            );
+        }
+        let truth_ng_pct = 100.0 * truth_ng_judged as f64 / judged as f64;
+        eprintln!(
+            "[real_saves_judging] {}｜空国籍={}｜名字非空={nonempty_name_pct:.3}%｜拉丁名字={latin_pct:.3}%｜新生 产出={our_ng_pct:.3}% 真值判卷行={truth_ng_pct:.3}%｜女性={female_pct:.3}%",
+            case.file,
+            empty_nat
+        );
+        Some(uids)
     }
 
     #[test]
@@ -3450,17 +3793,126 @@ pub(crate) mod tests {
             eprintln!("[real_saves_judging] 未设置 FM_SAVE_DIR，跳过");
             return;
         };
+        // 红线来源：§14 显式下限 + 参考流水线同档实测减 0.05pp（容两侧真值解析器
+        // 的单格噪声）；召回分母是两份真值 RTF 各自行数。
         let cases = [
-            JudgeCase { file: "ZhanHao Huang-肇庆天峰东湖20261025.fm", expect: 219_014 },
-            JudgeCase { file: "ZhanHao Huang-利物浦.fm", expect: 297_262 },
+            JudgeCase {
+                file: "ZhanHao Huang-肇庆天峰东湖20261025.fm",
+                expect: 219_014,
+                rtf_player: "ZhanHao Huang-肇庆天峰东湖20261025.rtf",
+                rtf_staff: "ZhanHao Huang-肇庆天峰东湖20261025职员.rtf",
+                // 参考全量产出新生 151987/219014。
+                newgen_pct: 69.396,
+                lim: JudgeLimits {
+                    recall_player: 99.95,
+                    recall_staff: 99.60,
+                    nation: 99.96,
+                    hair_len: 99.95,
+                    hair: 98.30,
+                    eth: 99.95,
+                    skin: 99.95,
+                    newgen: 99.95,
+                    sex: 99.95,
+                    age: 99.95,
+                    height: 99.95,
+                    club: 99.15,
+                    ca: 99.95,
+                    pa: 99.95,
+                },
+            },
+            JudgeCase {
+                file: "ZhanHao Huang-利物浦.fm",
+                expect: 297_262,
+                rtf_player: "ZhanHao Huang-利物浦导出球员.rtf",
+                rtf_staff: "ZhanHao Huang-利物浦导出职员.rtf",
+                // 参考全量产出新生 54864/297262。
+                newgen_pct: 18.456,
+                lim: JudgeLimits {
+                    recall_player: 99.95,
+                    recall_staff: 97.73,
+                    nation: 99.96,
+                    hair_len: 99.95,
+                    hair: 98.30,
+                    eth: 99.95,
+                    skin: 99.95,
+                    newgen: 99.95,
+                    sex: 99.95,
+                    age: 99.95,
+                    height: 99.95,
+                    club: 94.95,
+                    ca: 99.90,
+                    pa: 99.90,
+                },
+            },
         ];
         let mut ran = 0usize;
+        let mut base: Option<HashSet<String>> = None;
         for case in &cases {
-            if judge_one(&dir, case) {
+            if let Some(uids) = judge_one(&dir, case) {
                 ran += 1;
+                if base.is_none() {
+                    // 时点交集的基准取第一档（zq25）的全量产出 uid 集。
+                    base = Some(uids);
+                }
             }
         }
         assert!(ran > 0, "FM_SAVE_DIR={} 下没有任何可判真档", dir.display());
+        light_timepoint(&dir, base.as_ref());
+    }
+
+    /// 20261023 时点轻判卷：无条数基线，只跑全局不变量；与 zq25 全量产出、与自身
+    /// chn 真值做 uid 交集观察打印，不做逐列红线（跨档结论只认 liv↔zq25 两份全量
+    /// 判卷——该档导出语言不同且无参考基线）。
+    fn light_timepoint(dir: &Path, base: Option<&HashSet<String>>) {
+        let path = dir.join("ZhanHao Huang-肇庆天峰东湖20261023.fm");
+        if !path.is_file() {
+            eprintln!("[real_saves_judging] 缺档跳过：{}", path.display());
+            return;
+        }
+        let nat = NationalityTable::builtin();
+        let (logger, rx) = ChannelLogger::channel();
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_: usize, _: usize| {};
+        let started = Instant::now();
+        let res = parse_fm_save(&path, &nat, false, &logger, &cancel, &mut progress);
+        let elapsed_ms = started.elapsed().as_millis();
+        drop(logger);
+        let logs: Vec<LogLine> = rx.try_iter().collect();
+        let (data, summary, counts) = match res {
+            Ok(v) => v,
+            Err(e) => {
+                let tail: Vec<&str> = logs.iter().map(|l| l.message.as_str()).collect();
+                panic!("真档解析失败：{e}\n阶段日志：{tail:#?}");
+            }
+        };
+        let (kinds, skin_oob, detailed_some) =
+            assert_global_invariants("20261023", &data, &summary, &counts);
+        let uids: HashSet<String> = data.iter().map(|p| p.uid.clone()).collect();
+        eprintln!(
+            "[real_saves_judging] 20261023｜产出={} 条｜dropped={}｜耗时={} ms｜skin 越界={}｜detailed Some={}｜kind={:?}",
+            data.len(),
+            counts.dropped,
+            elapsed_ms,
+            skin_oob,
+            detailed_some,
+            kinds,
+        );
+        if let Some(b) = base {
+            let inter = b.intersection(&uids).count();
+            eprintln!(
+                "[real_saves_judging] 20261023｜与 zq25 产出 uid 交集 {inter}/{}（占 zq25 {:.3}%）",
+                b.len(),
+                100.0 * inter as f64 / b.len().max(1) as f64
+            );
+        }
+        if let Some(chn) = parse_truth_rtf(dir, "ZhanHao Huang-肇庆天峰东湖20261023chn.rtf") {
+            let hit = chn.iter().filter(|r| uids.contains(r.uid.as_str())).count();
+            eprintln!(
+                "[real_saves_judging] 20261023｜对 chn 真值命中 {hit}/{}（{:.3}%）",
+                chn.len(),
+                100.0 * hit as f64 / chn.len().max(1) as f64
+            );
+        }
     }
 }
 

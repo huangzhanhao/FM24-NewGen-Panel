@@ -654,8 +654,6 @@ impl ProfileManager {
     }
 
     /// 取当前组的 .fm 存档路径（链式安全取值，任何一环为 None 都回退空串）。
-    // 命令层登记在 T03（届时 set_current_fm 命令接线），先豁免未使用告警；接线后删除本行。
-    #[allow(dead_code)]
     pub fn get_cur_fm(&self) -> String {
         let fm = self
             .cur_group
@@ -675,8 +673,6 @@ impl ProfileManager {
     }
 
     /// 设置当前组的 .fm 存档路径，并落盘。无当前组时返回 false。
-    // 同上：T03 接线前豁免未使用告警，接线后删除本行。
-    #[allow(dead_code)]
     pub fn set_cur_fm(&mut self, fm: &str) -> Result<bool, String> {
         let Some(g) = self.cur_group.clone() else {
             self.log(

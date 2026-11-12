@@ -1,8 +1,10 @@
 //! Replace Faces 流水线：
-//! 「识别并解析 RTF → 布局判定与拦截 → 逐球员抽图 → 写 config.xml」四阶段串行编排。
+//! 「读取名单缓存并过滤 → 布局判定与拦截 → 逐球员抽图 → 写 config.xml」四阶段串行编排。
 //!
-//! 【约定】进度经 progress 回调上报：阶段锚点与阶段占比**全部由下方 STAGE_* 常量定义**
-//! （0 起步，解析 0→10、索引 10→20、读映射 20→30、抽图 30→90、写盘 92、元数据 96、完成 100），
+//! 【约定】名单只来自缓存快照（ReplaceParams.roster）：本模块不读名单文件、不区分名单
+//! 来源（Q0；扫描与来源分派收敛在扫描命令与命令层的线程内缓存保障）。
+//! 进度经 progress 回调上报：阶段锚点与阶段占比**全部由下方 STAGE_* 常量定义**
+//! （0 起步，读缓存+过滤 0→10、索引 10→20、读映射 20→30、抽图 30→90、写盘 92、元数据 96、完成 100），
 //! 阶段内部再按「第 n 个 / 共 total 个」线性折算进该阶段占用的百分比区间（见 item()），
 //! 于是状态栏既有总进度条、又能显示「映射球员头像… 3500/30000 · 51%」。取消经 AtomicBool
 //! 在阶段之间与映射循环内部逐项生效；关键步骤经 LogSink 记 INFO（模块 replace）——
@@ -11,8 +13,7 @@
 use crate::face_mapper::{FaceMapper, MapStep, Mode};
 use crate::facepack_scanner::{self, PackLayout, PackScan};
 use crate::logger::LogSink;
-use crate::nationality::NationalityTable;
-use crate::rtf_scanner::{PlayerRecord, RosterSummary, RtfScanner};
+use crate::rtf_scanner::{PlayerRecord, RosterCounts, RosterSummary, NEWGAN_UID_PREFIX};
 use crate::templates::{RuleConfig, IMPLEMENTED_STANDARDS};
 use crate::xml_parser::{self, MappingEntry};
 use std::path::{Path, PathBuf};
@@ -37,7 +38,7 @@ pub type ProgressFn<'a> = &'a mut dyn FnMut(&str, u8, usize, usize);
 /// 同一场景整包仅 1.4 s、读现有映射约 1.2 s，常态下索引已不再是大头；于是把最宽的区间
 /// （30→90）留给逐球员抽图，让大名单替换时主计数阶段的进度条平滑推进，索引 / 读映射 /
 /// 解析各收窄为 10 个百分点；写盘、元数据、完成三个尾部锚点（92/96/100）维持不动。
-const STAGE_RTF: (u8, u8) = (0, 10); // 阶段2：解析 RTF 数据行（实测量级最小）
+const STAGE_RTF: (u8, u8) = (0, 10); // 阶段2：读名单缓存并过滤（内存操作，实测量级最小）
 const STAGE_INDEX: (u8, u8) = (10, 20); // 阶段3a：读头像包索引（扫盘或复用缓存）
 const STAGE_XML: (u8, u8) = (20, 30); // 阶段3b：读现有 config.xml（Preserve/Overwrite）
 const STAGE_PLAYERS: (u8, u8) = (30, 90); // 阶段3c：逐球员抽图（大名单替换的主计数阶段，区间最宽）
@@ -64,8 +65,9 @@ fn item(progress: ProgressFn, status: &str, (from, to): (u8, u8), done: usize, t
 }
 
 /// 一次替换所需的全部参数（由 commands 层从前端收集后组装）。
+/// 名单以缓存快照传入：流水线只读缓存，不读名单文件、不区分名单来源（扫描与来源分派
+/// 都收敛在扫描命令与命令层的线程内缓存保障）。
 pub struct ReplaceParams {
-    pub rtf_path: String,       // RTF 名单文件路径
     pub img_dir: String,        // 头像包目录
     pub mode: Mode,             // 替换模式
     pub filter_newgen: bool,    // 是否只处理随机人
@@ -87,9 +89,12 @@ pub struct ReplaceParams {
     pub source_xml: Option<PathBuf>,
     /// 标准规则配置（命令层已从 data/rules 加载；测试用 RuleConfig::builtin()）。
     pub rule_config: RuleConfig,
-    /// 本轮使用的国籍对照表（命令层由 nationality::refresh 读盘得到；测试可注入自定义表，
-    /// 用于验证「改对照表 → 替换结果随之变化」）。解析阶段用它构造扫描器，整轮固定一份。
-    pub nationality: Arc<NationalityTable>,
+    /// 最近一次扫描的全量名单快照（rtf_cache 的副本句柄）：Arc 共享避免整表复制。
+    /// 「仅随机人」过滤在本流水线的名单阶段完成，缓存本身保持全量口径。
+    pub roster: Arc<Vec<PlayerRecord>>,
+    /// 名单摘要伴随态（最近一次扫描带出）：format / format_code / language 三件套沿用扫描结论，
+    /// 计数字段由 parse_stage 按全量缓存覆写，保证与 query_players 条数一致。
+    pub roster_meta: RosterSummary,
 }
 
 /// 流水线最终结果：成功 / 被取消 / 失败（带错误信息）。
@@ -141,7 +146,7 @@ pub fn run(
         ),
     );
     logger.info("replace", format!("头像包：{}", params.img_dir));
-    logger.info("replace", format!("RTF 名单：{}", params.rtf_path));
+    logger.info("replace", format!("名单缓存 {} 条（最近一次扫描）", params.roster.len()));
     // 【判据来源写进日志】保留/覆写读的是**本档本组的存档快照**（见 ReplaceParams::source_xml）。
     // 快照缺失＝本档在此目录还没换过脸，按无历史处理。把来源写在明处，两档共用同一头像包时
     // 一查日志就能确认有没有读到别档的内容；Generate 不读判据，省略此行。
@@ -212,11 +217,21 @@ fn run_body(
     cancel: &AtomicBool,
     logger: &impl LogSink,
 ) -> RunResult {
-    // 阶段1+2：校验并解析 RTF（0 → 10%），得到结构化球员列表与名单摘要（内部会做中文国籍翻译）。
-    let (rtf_data, roster) = match parse_stage(params, progress, cancel, logger) {
+    // 阶段1+2：读取名单缓存并按「仅随机人」过滤（0 → 10%），得到目标名单、全量口径摘要与替换阶段账目。
+    let t_read = Instant::now();
+    let (rtf_data, roster, counts) = match parse_stage(params, progress, cancel, logger) {
         Ok(d) => d,
         Err(r) => return r,
     };
+    logger.info(
+        "replace",
+        format!(
+            "读取名单缓存完成：{} 条{}，读取缓存耗时 {:.1?}",
+            counts.rows,
+            counts.log_tail(),
+            t_read.elapsed()
+        ),
+    );
     // 阶段3：映射。优先用「扫描头像」的缓存索引建 mapper，否则现场扫描（并把扫出来的索引带回来）。
     let (mapping, fresh_scan) = match map_stage(params, &rtf_data, progress, cancel, logger) {
         Ok(v) => v,
@@ -288,65 +303,58 @@ fn run_body(
     }
 }
 
-/// 阶段1+2：识别 RTF 格式并解析出结构化名单（0 → 10%），连同名单摘要一并返回。
-/// 格式识别失败 → failed("RTF 格式不合法：…")（带首个不合法字段定位，前端弹窗展示）。
+/// 阶段1+2：读取名单缓存并过滤（0 → 10%），连同全量口径摘要与替换阶段账目一并返回。
+/// 缓存是唯一名单数据源：本阶段不读文件、不重新解析；空表是内部守卫（不套存档解析错误契约），
+/// 与命令层的线程内缓存保障互为双保险。过滤判据与扫描侧同源：uid 带 r- 前缀即随机人。
 fn parse_stage(
     params: &ReplaceParams,
     progress: ProgressFn,
     cancel: &AtomicBool,
-    logger: &impl LogSink,
-) -> Result<(Vec<PlayerRecord>, RosterSummary), RunResult> {
-    progress("识别 RTF 格式…", 0, 0, 0);
-    let t_detect = Instant::now();
-    // 用本轮参数携带的对照表：扫描命令与本轮替换共享同一份「刚读盘」的快照。
-    let mut scanner = RtfScanner::with_nationality(Arc::clone(&params.nationality));
-    if let Err(e) = scanner.detect_format(Path::new(&params.rtf_path), logger) {
-        return Err(failed(&e));
+    // 阶段管线签名统一保留日志出口；本阶段不再发日志（读取耗时与账目由 run_body 统一记），
+    // 故带下划线前缀。
+    _logger: &impl LogSink,
+) -> Result<(Vec<PlayerRecord>, RosterSummary, RosterCounts), RunResult> {
+    progress("读取名单缓存…", STAGE_RTF.0, 0, 0);
+    let full = params.roster.as_ref();
+    if full.is_empty() {
+        return Err(failed("名单缓存为空"));
     }
-    // 识别只读文件头（HEAD_BYTES），耗时应远小于解析；单独记出来才能确认它确实不是瓶颈。
-    let detect_elapsed = t_detect.elapsed();
     if is_cancelled(cancel) {
         return Err(cancelled());
     }
-    progress("解析 RTF 文件…", STAGE_RTF.0, 0, 0);
-    let t = Instant::now(); // 计时只覆盖解析（识别在上一步，另行计时）
-                            // 逐行上报（大名单上万行；订阅方按百分比去重后才 emit，不会刷爆 IPC），
-                            // 百分比落在 STAGE_RTF 区间上，计数用原始行数（含表头行，与「扫描RTF」同口径）。
-    let (rtf_data, counts) = scanner
-        .parse_roster_progress(
-            Path::new(&params.rtf_path),
-            params.filter_newgen,
-            logger,
-            cancel,
-            &mut |done, total| item(&mut *progress, "解析 RTF 文件…", STAGE_RTF, done, total),
-        )
-        // 取消检查点在解析循环内部，中止时抛出的是 Err：按标志把它同真正的失败分开（真实失败保留原文）。
-        .map_err(|e| {
+    let filtered: Vec<PlayerRecord> = if params.filter_newgen {
+        full.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).cloned().collect()
+    } else {
+        full.to_vec()
+    };
+    // 每 4096 条上报一次进度并检查取消（对齐扫描器的批量粒度；大名单在此期间可取消）。
+    for (i, _) in full.iter().enumerate() {
+        if (i + 1) % 4096 == 0 {
+            item(&mut *progress, "筛选名单…", STAGE_RTF, i + 1, full.len());
             if is_cancelled(cancel) {
-                cancelled()
-            } else {
-                failed(&e)
+                return Err(cancelled());
             }
-        })?;
-    // 解析完立即检查取消（原版口径）：不等头像包扫描跑完才停，大包扫描可能耗时很久。
+        }
+    }
+    item(&mut *progress, "筛选名单…", STAGE_RTF, full.len(), full.len());
     if is_cancelled(cancel) {
         return Err(cancelled());
     }
-    let parse_elapsed = t.elapsed();
-    logger.info(
-        "replace",
-        format!(
-            "解析名单完成：{} 名球员{}，耗时 {:.1?}（识别 {:.1?} + 解析 {:.1?}）",
-            rtf_data.len(),
-            counts.log_tail(),
-            detect_elapsed + parse_elapsed,
-            detect_elapsed,
-            parse_elapsed
-        ),
-    );
-    // 摘要就地从扫描器状态 + 记录列表汇总（趁 rtf_data 交出去之前），随结果回传前端。
-    let summary = RosterSummary::from_records(&scanner, &rtf_data);
-    Ok((rtf_data, summary))
+    // 替换阶段账目：rows/kept 以缓存全量与过滤后子集计，dropped 恒 0（校验跳过发生在扫描阶段，
+    // 两份 RosterCounts 字段同名但语义不同，互不套用）。
+    let counts = RosterCounts {
+        rows: full.len(),
+        kept: filtered.len(),
+        filtered: full.len() - filtered.len(),
+        dropped: 0,
+        stray: 0,
+    };
+    // 摘要按全量缓存口径覆写计数字段（与 query_players 条数一致），格式三件套保留扫描结论。
+    let mut summary = params.roster_meta.clone();
+    summary.total = full.len();
+    summary.newgan = full.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count();
+    summary.detailed = full.iter().any(|p| p.detailed.is_some());
+    Ok((filtered, summary, counts))
 }
 
 /// 把 face_mapper 报上来的子步骤计数折算进对应区间（MapStep → 区间 + 阶段文案的唯一定点）。
@@ -609,11 +617,34 @@ mod tests {
         )
     }
 
+    /// 预解析夹具名单：扫描器只出现在测试里——生产链路的名单一律来自 rtf_cache，
+    /// 本模块不读名单文件（Q0 静态判据只约束非测试代码）。
+    fn test_roster(path: &Path, nat: Arc<crate::nationality::NationalityTable>) -> Arc<Vec<PlayerRecord>> {
+        let logger = ChannelLogger::channel().0;
+        let mut scanner = crate::rtf_scanner::RtfScanner::with_nationality(nat);
+        scanner.detect_format(path, &logger).unwrap();
+        let data = scanner.parse_roster(path, false, &logger).unwrap();
+        Arc::new(data)
+    }
+
+    /// 夹具名单的摘要（format 三件套按扫描结论；计数字段会被 parse_stage 按全量缓存覆写）。
+    fn test_roster_meta(roster: &[PlayerRecord]) -> RosterSummary {
+        RosterSummary {
+            total: roster.len(),
+            newgan: roster.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).count(),
+            detailed: roster.iter().any(|p| p.detailed.is_some()),
+            format: "基础名单",
+            format_code: crate::rtf_scanner::RtfFormat::Basic,
+            language: "English".to_string(),
+        }
+    }
+
     #[test]
     fn happy_path_writes_config_xml() {
         let (_dir, rtf, img) = setup();
+        let roster = test_roster(Path::new(&rtf), crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf,
             img_dir: img,
             mode: Mode::Generate,
             filter_newgen: true,
@@ -623,7 +654,8 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let mut steps = Vec::new();
@@ -661,8 +693,9 @@ mod tests {
 
     #[test]
     fn custom_nationality_table_drives_replace() {
-        // 名单写「火星」：带进自定义对照表后解析得到 ESP，经标准二 Ethnics（ESP→SpanMed）
-        // 落到 SpanMed 目录。验证「改表 → 解析 → 抽图 → 写 config.xml」整条链路随之变化。
+        // 名单写「火星」：用自定义对照表预解析得到 ESP，经标准二 Ethnics（ESP→SpanMed）
+        // 落到 SpanMed 目录。验证「改表 → 扫描（入缓存）→ 替换 → 写 config.xml」整条链路随之变化
+        // ——解析在测试侧完成（等价于扫描命令写缓存），替换只消费缓存快照。
         let (_dir, rtf, img) = setup();
         fs::write(
             &rtf,
@@ -679,8 +712,10 @@ mod tests {
                 name: "火星".into(),
             }],
         };
+        let custom_nat = Arc::new(crate::nationality::NationalityTable::from_doc(doc).unwrap());
+        let roster = test_roster(Path::new(&rtf), custom_nat);
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf,
             img_dir: img.clone(),
             mode: Mode::Generate,
             filter_newgen: true,
@@ -690,7 +725,8 @@ mod tests {
             pre_scan: None,
             source_xml: None,
             rule_config: RuleConfig::builtin(),
-            nationality: Arc::new(NationalityTable::from_doc(doc).unwrap()),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -731,10 +767,12 @@ mod tests {
     }
 
     /// 上面那套布置的入参（Generate + 空映射 + 非空档景），allow_blank 由用例决定。
+    /// 名单用夹具预解析的 1 人快照：包里没有图片 → 映射必为 0 条，写前守卫因此触发。
     fn blanking_params(img: &Path, snap: &Path, allow_blank: bool) -> ReplaceParams {
         let dir = img.parent().unwrap();
+        let roster = test_roster(&dir.join("list.rtf"), crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         ReplaceParams {
-            rtf_path: dir.join("list.rtf").to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate,
             filter_newgen: true,
@@ -744,7 +782,8 @@ mod tests {
             pre_scan: None,
             source_xml: Some(snap.to_path_buf()),
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         }
     }
 
@@ -806,10 +845,11 @@ mod tests {
 
     #[test]
     fn progress_carries_item_counts_and_never_goes_backwards() {
-        // 两段窗口（解析 0→10、抽图 30→90）分开，正是为了抽图不会从 0% 起算把进度条拉回去。
+        // 两段窗口（读缓存+过滤 0→10、抽图 30→90）分开，正是为了抽图不会从 0% 起算把进度条拉回去。
         let (_dir, rtf, img) = setup();
+        let roster = test_roster(Path::new(&rtf), crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf,
             img_dir: img,
             mode: Mode::Generate,
             filter_newgen: true,
@@ -819,7 +859,8 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -839,14 +880,14 @@ mod tests {
         );
         assert_eq!(steps.last().unwrap().1, 100);
 
-        // 解析阶段：带行数计数，且最后一条走满（done == total）
+        // 名单阶段：带条数计数，且最后一条走满（done == total）
         let parse: Vec<_> = steps
             .iter()
-            .filter(|s| s.0.starts_with("解析 RTF 文件"))
+            .filter(|s| s.0.starts_with("筛选名单"))
             .collect();
-        let last_parse = parse.last().expect("解析阶段应上报逐行进度");
-        assert!(last_parse.3 > 0, "解析阶段应带总行数：{steps:?}");
-        assert_eq!(last_parse.2, last_parse.3, "解析进度应走满：{steps:?}");
+        let last_parse = parse.last().expect("名单阶段应上报逐条进度");
+        assert!(last_parse.3 > 0, "名单阶段应带总条数：{steps:?}");
+        assert_eq!(last_parse.2, last_parse.3, "名单进度应走满：{steps:?}");
 
         // 抽图阶段：Generate 模式没有「读现有映射」那一步，计数就是名单人数
         let players: Vec<_> = steps
@@ -864,12 +905,13 @@ mod tests {
 
     #[test]
     fn cancel_after_parse_skips_pack_scan() {
-        // 在 progress(0)（解析名单中）置位取消：应在解析完成后立即停，
+        // 在名单阶段置位取消：应在过滤完成后立即停，
         // 不进入头像包扫描。img_dir 故意指向不存在的目录——若取消检查失效，
         // 流程会走到扫描并以 Failed（目录不存在）收场，用结果状态区分两条路径。
         let (dir, rtf, _img) = setup();
+        let roster = test_roster(Path::new(&rtf), crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf,
             img_dir: dir.path().join("nonexistent").to_string_lossy().to_string(),
             mode: Mode::Generate,
             filter_newgen: true,
@@ -879,16 +921,17 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
         // 取消时机用**阶段文案**而不是魔法数字：进度区间按实测量级重排过一次，写死 20/40 会随之失效。
-        // 「解析 RTF 文件…」是解析阶段的锚点，在此置位等价于「解析过程中点取消」。
+        // 「筛选名单」是名单阶段的锚点，在此置位等价于「过滤过程中点取消」。
         let result = run(
             &params,
             &mut |s, _, _, _| {
-                if s.starts_with("解析 RTF 文件") {
+                if s.starts_with("筛选名单") {
                     cancel.store(true, Ordering::Relaxed);
                 }
             },
@@ -899,34 +942,37 @@ mod tests {
     }
 
     #[test]
-    fn invalid_rtf_fails() {
+    fn empty_roster_cache_fails() {
+        // 名单缓存为空是内部守卫（不走 .fm 错误契约）：与命令层的线程内缓存保障互为双保险。
+        // 坏名单文件的失败如今发生在自动扫描阶段（commands 侧用例覆盖），这里只锁「空表必拦」。
         let dir = tempfile::tempdir().unwrap();
-        let bad = dir.path().join("bad.rtf");
-        fs::write(&bad, "not an rtf").unwrap();
+        let img = dir.path().join("pack");
+        fs::create_dir_all(&img).unwrap();
         let params = ReplaceParams {
-            rtf_path: bad.to_string_lossy().to_string(),
-            img_dir: dir.path().to_string_lossy().to_string(),
+            img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate,
             filter_newgen: true,
             allow_duplicates: true,
             save_backup: false,
             allow_blank: false,
             pre_scan: None,
-            source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
+            source_xml: None,
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster: Arc::new(Vec::new()),
+            roster_meta: test_roster_meta(&[]),
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
         let result = run(&params, &mut |_, _, _, _| {}, &cancel, &logger);
-        assert!(matches!(result.outcome, Outcome::Failed(m) if m.contains("RTF 格式不合法")));
+        assert!(matches!(result.outcome, Outcome::Failed(m) if m.contains("名单缓存为空")));
     }
 
     #[test]
     fn cancel_before_write_leaves_no_config() {
         let (_dir, rtf, img) = setup();
+        let roster = test_roster(Path::new(&rtf), crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf,
             img_dir: img,
             mode: Mode::Generate,
             filter_newgen: true,
@@ -936,7 +982,8 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -982,8 +1029,9 @@ mod tests {
              | 2000472010| USA  |         | Jack   | 1  | 12 | 0 |\n",
         )
         .unwrap();
+        let roster = test_roster(&rtf, crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate,
             filter_newgen: true,
@@ -993,7 +1041,8 @@ mod tests {
             pre_scan: None,
             source_xml: None, // Generate 模式不读判据
             rule_config,
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -1046,8 +1095,9 @@ mod tests {
              | 2000472010| FRA  |         | Pierre | 1  | 12 | 3 |\n",
         )
         .unwrap();
+        let roster = test_roster(&rtf, crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
             mode: Mode::Generate,
             filter_newgen: true,
@@ -1057,7 +1107,8 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -1104,8 +1155,9 @@ mod tests {
              | 2000472010| FRA  |         | Pierre | 1  | 12 | 3 |\n",
         )
         .unwrap();
+        let roster = test_roster(&rtf, crate::nationality::NationalityTable::builtin_shared());
+        let meta = test_roster_meta(&roster);
         let params = ReplaceParams {
-            rtf_path: rtf.to_string_lossy().to_string(),
             img_dir: img.to_string_lossy().to_string(),
             // 禁重复：池恰好 3 张、名单 3 人 → from 全集必等于递归池全集（确定性断言）。
             mode: Mode::Generate,
@@ -1116,7 +1168,8 @@ mod tests {
             pre_scan: None,
             source_xml: None, // 测试都是 Generate 模式（不读判据）；Preserve/Overwrite 的来源另有用例
             rule_config: RuleConfig::builtin(),
-            nationality: NationalityTable::builtin_shared(),
+            roster,
+            roster_meta: meta,
         };
         let cancel = AtomicBool::new(false);
         let (logger, _log_rx) = ChannelLogger::channel();
@@ -1149,5 +1202,88 @@ mod tests {
             )
             .is_some());
         }
+    }
+
+    // ---- Q0 静态判据：名单只读缓存，扫描器/文件路径/扩展名分派不得回流本模块 -------------------------------
+
+    #[test]
+    fn q0_static_assertion() {
+        // Q0 判据只约束生产代码（#[cfg(test)] 之前的部分）：测试模块用 RtfScanner
+        // 预解析夹具不违反判据——生产链路的名单一律来自缓存快照。
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/replace_flow.rs")).unwrap();
+        let prod = src.split_once("#[cfg(test)]").map(|(p, _)| p).unwrap_or(&src);
+        for banned in ["RtfScanner", "detect_format", "parse_roster_progress", "rtf_path", ".fm"] {
+            assert!(!prod.contains(banned), "生产代码不得出现 {banned}（名单只读缓存，不读文件不按来源分派）");
+        }
+    }
+
+    // ---- 两份 RosterCounts 互不套用 ---------------------------------------------------------------------------
+
+    #[test]
+    fn two_rostercounts_are_independent() {
+        // 扫描阶段账目：行校验失败计 dropped、filtered 恒 0。用一行国籍非法的名单驱动真实
+        // 扫描器账目（XXX 不在对照表 → 该行被丢弃），而非手捏数字。
+        let dir = tempfile::tempdir().unwrap();
+        let rtf = dir.path().join("list.rtf");
+        fs::write(
+            &rtf,
+            "| UID       | Nat  | 2nd Nat | Name   |    |    |   |\n\
+             | 2000472008| ESP  |         | Pepe   | 1  | 12 | 1 |\n\
+             | 2000472009| XXX  |         | John   | 1  | 12 | 0 |\n",
+        )
+        .unwrap();
+        let (logger, _log_rx) = ChannelLogger::channel();
+        let mut scanner = crate::rtf_scanner::RtfScanner::with_nationality(
+            crate::nationality::NationalityTable::builtin_shared(),
+        );
+        scanner.detect_format(&rtf, &logger).unwrap();
+        let (scan_data, scan_counts) = scanner
+            .parse_roster_progress(&rtf, false, &logger, &AtomicBool::new(false), &mut |_, _| {})
+            .unwrap();
+        assert!(scan_counts.dropped > 0 && scan_counts.filtered == 0, "扫描阶段账目：{scan_counts:?}");
+        assert_eq!(scan_data.len(), scan_counts.kept);
+
+        // 替换阶段账目（parse_stage 产出）：dropped 恒 0、过滤差量进 filtered。
+        // 名单放一条非随机人（uid 无 r- 前缀）+ 一条随机人，filter_newgen=true 时被过滤 1 条。
+        let mut mixed = scan_data.clone();
+        mixed.push(PlayerRecord {
+            uid: "2000472099".to_string(), // 无 r- 前缀：非随机人
+            primary_nat: "ESP".to_string(),
+            ..PlayerRecord::default()
+        });
+        let roster = Arc::new(mixed);
+        let params = ReplaceParams {
+            img_dir: dir.path().join("pack").to_string_lossy().to_string(),
+            mode: Mode::Generate,
+            filter_newgen: true,
+            allow_duplicates: true,
+            save_backup: false,
+            allow_blank: false,
+            pre_scan: None,
+            source_xml: None,
+            rule_config: RuleConfig::builtin(),
+            roster: Arc::clone(&roster),
+            roster_meta: test_roster_meta(&roster),
+        };
+        let (filtered, _summary, replace_counts) = match parse_stage(
+            &params,
+            &mut |_, _, _, _| {},
+            &AtomicBool::new(false),
+            &logger,
+        ) {
+            Ok(v) => v,
+            Err(r) => panic!("parse_stage 不应失败：{:?}", r.outcome),
+        };
+        // RosterCounts 未实现 PartialEq（rtf_scanner 零改），逐字段断言：
+        // rows=缓存全量、kept=过滤后子集、filtered=差量、dropped/stray 恒 0。
+        assert_eq!((replace_counts.rows, replace_counts.kept, replace_counts.filtered, replace_counts.dropped, replace_counts.stray), (2, 1, 1, 0, 0), "替换阶段账目");
+        assert_eq!(filtered.len(), 1);
+        assert!(
+            replace_counts.dropped == 0 && scan_counts.dropped > 0 && replace_counts.filtered > 0 && scan_counts.filtered == 0,
+            "两份账目字段同名但语义不同，禁止互相套用：scan={scan_counts:?} replace={replace_counts:?}"
+        );
+        // log_tail 的口径也不同：扫描侧报「跳过不合法」，替换侧报「按仅随机人过滤」。
+        assert!(scan_counts.log_tail().contains("跳过不合法"));
+        assert!(replace_counts.log_tail().contains("按仅随机人过滤"));
     }
 }

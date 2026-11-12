@@ -2477,8 +2477,10 @@ fn keep_parse_chain_live(
 
 // ===================== 单元测试 =================================================================
 
+// 模块可见性放宽到 crate：commands.rs 的「线程内自动扫描 .fm」用例要复用本模块的落盘夹具
+// write_minimal_fm（以及其依赖的 build_container/version_section），不为此复制一份容器构造。
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::logger::{ChannelLogger, LogLine};
     use crate::nationality::{NationalityDoc, NationalityMapping};
@@ -2557,6 +2559,75 @@ mod tests {
         let path = dir.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    /// 落盘一份能被 parse_fm_save 完整解析出 1 名球员的最小 .fm（commands.rs 的
+    /// 「线程内自动扫描 .fm」用例用）。字节布局与各阶段判据一一对应：40 B 头部（含游戏日
+    /// 2032 年第 100 天）、三段各 1 条的名池（Ada / Byron / C）、1 个球员记录体（b=600，
+    /// pindex=9、self_uid=42、kind=2、身高 180、cid=无）、1 个人员块（r=8092，名池三下标全
+    /// 0、出生 1990-04-10）、1 个双写槽位（i=8192，uid=42、seq=10 → 记录体 pindex=9、
+    /// newgen → uid 带 r- 前缀）。只依赖测试内的容器构造器，不触产品代码。
+    pub(crate) fn write_minimal_fm(path: &Path) {
+        let mut db = vec![0u8; 8300];
+        // 游戏日（game_date 只读 db[36..40]）。
+        db[36..38].copy_from_slice(&100u16.to_le_bytes());
+        db[38..40].copy_from_slice(&2032u16.to_le_bytes());
+        // 名池签名区（p=64）：{sig 0 c1 c2 c3 0}{key0=0}，c0 = p+24 起三段 {n}{key=len=utf8}。
+        let p = 64usize;
+        db[p..p + 4].copy_from_slice(&46421u32.to_le_bytes());
+        db[p + 8..p + 12].copy_from_slice(&8u32.to_le_bytes()); // c1 = 4*c2
+        db[p + 12..p + 16].copy_from_slice(&2u32.to_le_bytes()); // c2
+        db[p + 16..p + 20].copy_from_slice(&16u32.to_le_bytes()); // c3 = 8*c2
+        let mut q = p + 24;
+        for name in ["Ada", "Byron", "C"] {
+            db[q..q + 4].copy_from_slice(&1u32.to_le_bytes()); // n = 1
+            q += 4;
+            db[q..q + 4].copy_from_slice(&0u32.to_le_bytes()); // key = 0（即 first_key）
+            q += 4;
+            db[q..q + 4].copy_from_slice(&(name.len() as u32).to_le_bytes());
+            q += 4;
+            db[q..q + name.len()].copy_from_slice(name.as_bytes());
+            q += name.len();
+        }
+        // 球员记录体（b=600）：pos0..pos1 ∈ 1..=20、pos1..attr1 ∈ 1..=100；ca/pa/身高在值域内。
+        let b = 600usize;
+        db[b - 19..b - 15].copy_from_slice(&9u32.to_le_bytes()); // pindex
+        db[b - 15..b - 11].copy_from_slice(&42u32.to_le_bytes()); // self_uid
+        db[b - 7] = 2; // kind（球员）
+        for k in b + 23..b + 38 {
+            db[k] = 5;
+        }
+        for k in b + 38..b + 92 {
+            db[k] = 10;
+        }
+        db[b + 15..b + 18].copy_from_slice(&[0xFF, 0xFF, 0xFF]); // cid = CID_NONE → 俱乐部留空
+        db[b..b + 2].copy_from_slice(&100u16.to_le_bytes()); // ca
+        db[b + 2..b + 4].copy_from_slice(&120u16.to_le_bytes()); // pa
+        db[b + 122..b + 124].copy_from_slice(&180u16.to_le_bytes()); // 身高
+        // 人员块（r=8092）：db[r-4..r] = 0 走 cur = r-19 路径；名池三下标 0（a/b/c 处全 0）。
+        let r = 8092usize;
+        db[r..r + 2].copy_from_slice(&100u16.to_le_bytes()); // 出生 day
+        db[r + 2..r + 4].copy_from_slice(&1990u16.to_le_bytes()); // 出生 year
+        db[r + 5] = 2; // eth（码 2 的 CodeRules fallback=MENA，与 ALG 主国籍的目录一致）
+        db[r + 6] = 5; // 发色
+        db[r + 7] = 2; // 发长
+        db[r + 8] = 5; // 肤色（非 0xFF，不触发渲染）
+        db[r + 9] = 0; // rank 0 → ALG
+        for k in r + 17..r + 25 {
+            db[k] = 5;
+        }
+        // 槽位（i=8192）：uid 双写（dual）、seq=10、kind=2、男性、db[i-12] ≥ 8 → 随机人。
+        let i = 8192usize;
+        db[i..i + 4].copy_from_slice(&42u32.to_le_bytes());
+        db[i - 4..i].copy_from_slice(&10u32.to_le_bytes());
+        db[i + 4..i + 8].copy_from_slice(&42u32.to_le_bytes());
+        db[i + 8] = 2;
+        db[i - 12] = 8;
+        let bytes = build_container(&[
+            Section { name: "save_game_summary", raw: version_section(24), decomp_len: None },
+            Section { name: "game_db", raw: db, decomp_len: None },
+        ]);
+        std::fs::write(path, bytes).unwrap();
     }
 
     fn run_parse(path: &Path) -> (Result<(Vec<PlayerRecord>, RosterSummary, RosterCounts), String>, Vec<LogLine>) {

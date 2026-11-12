@@ -331,6 +331,7 @@ pub fn run() {
             commands::switch_profile,         // 切换存档（含快照存取）
             commands::select_image_directory, // 关联头像包目录（建组）
             commands::set_current_rtf,        // 设置当前组的 RTF 名单
+            commands::set_current_fm,         // 设置当前组的 FM 存档（不清名单缓存）
             commands::set_current_group,      // 切换当前头像包（组）
             commands::delete_group,           // 删除组
             commands::validate_image_dirs,    // 校验 14 个种族目录是否齐全
@@ -338,6 +339,7 @@ pub fn run() {
             commands::create_missing_dirs, // 批量创建缺失目录
             commands::scan_images,     // 扫描头像：建图片索引缓存（供替换复用），结果写日志
             commands::scan_rtf,        // 扫描RTF：解析名单并填充预览缓存，结果写日志
+            commands::scan_fm,         // 扫描FM存档：解析 .fm 并填充预览缓存，结果写日志
             commands::open_rules_dir,  // 打开标准规则目录（data/rules/，用户编辑 templateN.json）
             commands::open_snapshot_dir, // 打开存档 XML 快照所在目录（查看位置）
             commands::preview_profile, // 预览指定存档（下拉浏览展示，不切换当前档）
@@ -348,7 +350,8 @@ pub fn run() {
             commands::preflight_replace, // 发起前预检：本次会不会清空本档既有映射（需要就先弹确认）
             commands::start_replace,   // 启动批量替换（后台线程）
             commands::cancel_replace,  // 请求取消正在进行的替换
-            commands::query_players,   // 名单预览取全量（分页/筛选/排序在前端）
+            commands::query_players,   // 名单预览取全量（回归基准，前端不再调用）
+            commands::query_players_chunk, // 名单预览分块取数（前端聚合，逐块校验 total）
             commands::query_players_by_uids, // 按 uid 批量取球员记录（队列坞条目行身份信息）
             commands::read_snapshot,   // 读取快照：解析存档 XML 快照并缓存（快照预览数据源）
             commands::query_snapshot,  // 快照预览取全量条目（imagePath 留空，按页解析）

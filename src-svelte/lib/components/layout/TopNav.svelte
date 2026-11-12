@@ -32,7 +32,7 @@
     const s = appStore.snapshot;
     if (id === 'archive') {
       if (!s || s.currentProfile === 'No Profile' || !s.currentGroup) return 'idle';
-      return s.currentRtf && snapshotRead ? 'ok' : 'warn';
+      return (s.currentRtf || s.currentFm) && snapshotRead ? 'ok' : 'warn';
     }
     if (id === 'replace') {
       if (!s || !s.currentGroup) return 'idle';

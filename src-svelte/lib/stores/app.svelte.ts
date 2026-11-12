@@ -32,6 +32,9 @@ export const appStore = $state({
    *  名单预览/单人替换据此判断名单格式——拓展格式才有「随机人」筛选，extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
   rosterReady: false,                          // 后端名单缓存里有没有数据；名单预览据此决定是否渲染工具条
+  /** 名单预览的视图过滤：'all' 全部 / 'player' 仅球员 / 'staff' 仅职员。
+   *  纯前端视图态：切换只重算过滤，不触发重取、不作废 rosterReady；换代复位见 resetRosterView。 */
+  rosterView: 'all' as 'all' | 'player' | 'staff',
   /** 预览区当前 Tab（'table'=名单预览 / 'snapshot'=快照预览）。存档资料台与替换台共用同一份：
    *  在存档台「读取快照」后翻到快照 Tab，切到替换台仍停在快照 Tab（两处状态一致，2026-09-30 用户拍板）。 */
   rtfPreview: 'table' as 'table' | 'snapshot',
@@ -54,19 +57,19 @@ export const appStore = $state({
     const active = this.snapshot;
     return !!active && this.selectedProfile !== active.currentProfile;
   },
-  /** 替换就绪：作用于激活档——「已选 Profile + 已选头像包 + 已设 RTF」三者齐备才允许开始替换。 */
+  /** 替换就绪：作用于激活档——「已选 Profile + 已选头像包 + 已设名单（RTF 或 .fm）」三者齐备才允许开始替换。 */
   get replaceReady(): boolean {
     const s = this.snapshot;
-    return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && !!s.currentRtf;
+    return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && !!(s.currentRtf || s.currentFm);
   },
-  /** 替换台顶部的缺失项清单：未选 Profile / 未选组 / 未设 RTF，缺哪条列哪条文案。
+  /** 替换台顶部的缺失项清单：未选 Profile / 未选组 / 未设名单（RTF 或 .fm），缺哪条列哪条文案。
    *  与 replaceReady 同一套条件（数组非空 ⇔ 未就绪），单点维护免得两处口径漂移。 */
   get missingPrerequisites(): string[] {
     const s = this.snapshot;
     return [
       !s || s.currentProfile === 'No Profile' ? t.replace.needProfile : '',
       s && !s.currentGroup ? t.replace.needGroup : '',
-      s && !s.currentRtf ? t.replace.needRtf : '',
+      s && !(s.currentRtf || s.currentFm) ? t.replace.needRoster : '',
     ].filter(Boolean);
   },
   /** 第 15 列语义单点：extStaff（拓展职员）名单的「所在地」列实为「偏好工作」。
@@ -83,6 +86,22 @@ export const appStore = $state({
 /** 第 15 列取值：球员读 based，职员读 preferredJob（另一个在解析侧恒为空串）。 */
 export function basedValue(detailed: PlayerRecord['detailed'] | null): string {
   return (appStore.isStaffRoster ? detailed?.preferredJob : detailed?.based) ?? '';
+}
+
+/** 人员分组（kind 的行级派生）：staffMale/staffFemale 归「职员」，其余归「球员」。
+ *  判据是 types.ts 的 PersonKind 协议值，不从可空的拓展字段反推。 */
+export function personKindGroup(r: PlayerRecord): 'player' | 'staff' {
+  return r.kind === 'staffMale' || r.kind === 'staffFemale' ? 'staff' : 'player';
+}
+
+/** 判定列：该行的名单格式口径（不渲染成表格列），供混合名单下第 15 列逐行取值。 */
+export function rowFormatOf(r: PlayerRecord): 'extPlayer' | 'extStaff' {
+  return personKindGroup(r) === 'staff' ? 'extStaff' : 'extPlayer';
+}
+
+/** 名单视图复位为「全部」（名单预览 onReset 调用，与 newganFilter 复位同款口径）。 */
+export function resetRosterView() {
+  appStore.rosterView = 'all';
 }
 
 /** 名单搜索口径（名单预览表格 / 单人替换卡共用这一份实现）：

@@ -55,6 +55,22 @@
     }
   }
 
+  /** 浏览并选择 .fm 存档：open 返回选中路径或 null（取消） */
+  async function browseFm() {
+    const file = await open({
+      filters: [{ name: "FM", extensions: ["fm"] }],
+      title: t.setup.selectFmDialogTitle,
+    });
+    if (typeof file === "string") {
+      try {
+        await applySnapshot(await api.setCurrentFm(file));
+        integrity = null;
+      } catch (e) {
+        await showError(e);
+      }
+    }
+  }
+
   /** 检查完整性：按规则 json 的 FolderList 识别头像包归属哪个标准（用户改坏 json 会报错） */
   async function checkIntegrity() {
     if (!snap?.currentGroup) return;
@@ -123,6 +139,18 @@
     try {
       const scan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
       markRosterFilled(scan); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与替换收尾共用）
+      appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
+    } catch (e) {
+      await showError(e);
+    }
+  }
+
+  /** 扫描.fm：解析当前 .fm 存档填充名单预览缓存，摘要存入全局态供名单预览与替换共用 */
+  async function scanFm() {
+    if (!snap?.currentFm) return;
+    try {
+      const scan = await runTask(t.setup.scanFmBtn, () => api.scanFm());
+      markRosterFilled(scan); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与扫描RTF/替换收尾共用）
       appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
     } catch (e) {
       await showError(e);
@@ -214,6 +242,45 @@
         >
       </div>
     </div>
+    <!-- FM 存档路径行（与 RTF 行并立的名单来源）：只读输入框（前置文件图标）+ [选择.fm | 扫描.fm] 按钮组 -->
+    <div class="path-row">
+      <label for="sc-fm">{t.setup.fmLabel}</label>
+      <div class="input-wrap">
+        <Icon name="file" />
+        <input
+          id="sc-fm"
+          type="text"
+          readonly
+          value={snap.currentFm || t.setup.fmUnsetValue}
+          use:tip={snap.currentFm}
+          use:pinScrollEnd={snap.currentFm}
+        />
+      </div>
+      <div class="path-actions">
+        <button
+          class="btn"
+          onclick={browseFm}
+          disabled={busy || browseMode || !snap.currentGroup}
+          use:tip={snap.currentGroup ? t.setup.selectFmHint : t.setup.noGroupHint}>{t.setup.selectFmBtn}</button
+        >
+        <button class="btn" onclick={scanFm} disabled={busy || !snap.currentFm} use:tip={t.setup.scanFmHint}
+          >{t.setup.scanFmBtn}</button
+        >
+      </div>
+    </div>
+    <!-- FM 状态行：已选路径时可观测扫描状态（名单缓存是否已填充由 store 的 rosterReady 单点判定） -->
+    {#if snap.currentFm}
+      <div class="statusline">
+        {#if appStore.rosterReady && appStore.lastRtfScan}
+          <span class="pill ok"
+            ><span class="dot"></span>{t.setup.fmScannedTag}（{t.table.recordCount(appStore.lastRtfScan.total)}）</span
+          >
+        {:else}
+          <span class="pill warn"><span class="dot"></span>{t.setup.fmUnscannedTag}</span>
+        {/if}
+        <span class="note">{t.setup.fmRosterHelp}</span>
+      </div>
+    {/if}
     <!-- config.xml 行：当前展示档的存档 XML 快照路径（前置文件图标）+ [读取快照 | 查看位置]（左读取右位置）；
          两者都依赖快照文件已生成（执行替换后才有），未生成时一并禁用 -->
     <div class="path-row">

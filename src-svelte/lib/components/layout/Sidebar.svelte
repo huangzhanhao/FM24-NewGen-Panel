@@ -317,6 +317,9 @@
               <span class="g-rtf" class:ok={!!g.rtf}
                 >{g.rtf ? t.sidebar.rtfSet : t.sidebar.rtfUnset}</span
               >
+              <span class="g-rtf" class:ok={!!g.fm}
+                >{g.fm ? t.sidebar.fmSet : t.sidebar.fmUnset}</span
+              >
             </button>
             <button
               class="icon-btn danger"

@@ -5,7 +5,7 @@
   import { api } from "../../services/api";
   import { showError } from "../../ui/dialog"; // 查询失败要弹窗，否则 rejection 被静默吞掉
   import { message } from "@tauri-apps/plugin-dialog"; // 「加入队列」成功提示（与 ImageAiPanel 保存同款）
-  import { appStore, basedValue, filterPlayers, tip } from "../../stores/app.svelte";
+  import { appStore, basedValue, filterPlayers, personKindGroup, resetRosterView, rowFormatOf, tip } from "../../stores/app.svelte";
   import { ui } from "../../stores/ui.svelte"; // 「送生图」要切到 AI 生成头像工作台
   import {
     enqueuePlayers,
@@ -62,6 +62,7 @@
       sortKey = null; // 新名单也从自然顺序看起
       sortDesc = false;
       newganFilter = "any";
+      resetRosterView(); // 视图过滤同样复位：新名单从「全部」看起
       extCols = false;
       avatars.clear(); // 旧名单的头像路径与缩略图一并作废回收（新名单的图在装载 effect 里重取）
     },
@@ -73,6 +74,10 @@
       if (isExtRoster && newganQuery !== "any") {
         const want = newganQuery === "yes";
         out = out.filter((r) => r.uid.startsWith("r-") === want);
+      }
+      // 球员/职员视图过滤：纯本地重算，不产生请求（切换只复位页码，不 bump rosterVersion）
+      if (appStore.rosterView !== "all") {
+        out = out.filter((r) => personKindGroup(r) === appStore.rosterView);
       }
       if (sortKey) {
         const key = sortKey;
@@ -96,6 +101,27 @@
       return [];
     },
   });
+
+  // 混合名单判定：按当前缓存记录的人员类别（kind）派生，不按 formatCode——.fm 混合名单
+  // 也是 extPlayer，只有两类记录都在场才渲染「球员/职员」视图切换（RTF 单格式名单自动隐藏）
+  const hasPlayer = $derived((paged.result ?? []).some((r) => personKindGroup(r) === "player"));
+  const hasStaff = $derived((paged.result ?? []).some((r) => personKindGroup(r) === "staff"));
+  const mixedRoster = $derived(hasPlayer && hasStaff);
+
+  // 第 15 列在混合名单下的局部口径（Q7）：表头随视图三态切换，单元格按行的人员类别取值；
+  // RTF 单格式名单仍走 appStore.basedLabel/basedValue 全局单点（本组件不反向驱动全局 getter）
+  const viewBasedLabel = $derived(
+    appStore.rosterView === "player"
+      ? t.table.colBased
+      : appStore.rosterView === "staff"
+        ? t.table.colJob
+        : t.table.rosterViewMixedHeader,
+  );
+
+  /** 混合名单下第 15 列的行级取值：职员行读 preferredJob，球员行读 based（另一列在解析侧恒空）。 */
+  function rowBasedValue(r: PlayerRecord): string {
+    return (rowFormatOf(r) === "extStaff" ? r.detailed?.preferredJob : r.detailed?.based) ?? "";
+  }
 
   /** 点表头排序：同一列切换升/降序，不同列切到该列并重置为升序（初始 null 时点任意列即按该列升序） */
   function sortBy(key: string) {
@@ -167,7 +193,8 @@
     ui.workbench = "ai";
   }
 
-  // 第 15 列口径单点在 appStore 的 isStaffRoster/basedLabel/basedValue（本组件只消费）
+  // 第 15 列口径：RTF 单格式名单走 appStore 的 isStaffRoster/basedLabel/basedValue 单点；
+  // .fm 混合名单走本组件的 viewBasedLabel/rowBasedValue 局部派生（见上方注释）
 
   // ---- 头像列：按球员 UID 批量取路径 + 装载缩略图（共用 createAvatarSource） ----------------------------------------
   // 查路径/令牌作废/blob 装载的骨架在 createAvatarSource 单点维护，本组件只剩两条本地策略：
@@ -220,6 +247,17 @@
             <option value="any">{t.table.newganAny}</option>
             <option value="yes">{t.table.newganYes}</option>
             <option value="no">{t.table.newganNo}</option>
+          </select>
+        </label>
+      {/if}
+      <!-- 球员/职员视图切换：仅混合名单（两类记录都在场）显示；切换只回第 1 页，不触发重取 -->
+      {#if mixedRoster}
+        <label class="newgan-filter">
+          <span class="muted small">{t.table.rosterViewLabel}</span>
+          <select bind:value={appStore.rosterView} onchange={() => (paged.page = 0)} aria-label={t.table.rosterViewLabel}>
+            <option value="all">{t.table.rosterViewAll}</option>
+            <option value="player">{t.table.rosterViewPlayer}</option>
+            <option value="staff">{t.table.rosterViewStaff}</option>
           </select>
         </label>
       {/if}
@@ -346,7 +384,7 @@
               <th class="static c">{t.table.colAge}</th>
               <th class="static c">{t.table.colHeight}</th>
               <th class="static">{t.table.colClub}</th>
-              <th class="static clamp clamp-based">{appStore.basedLabel}</th>
+              <th class="static clamp clamp-based">{mixedRoster ? viewBasedLabel : appStore.basedLabel}</th>
               <th class="static c">{t.table.colCa}</th>
               <th class="static c">{t.table.colPa}</th>
               <th class="static c">{t.table.colRca}</th>
@@ -397,7 +435,9 @@
                 <td class="c">{d?.age || "—"}</td>
                 <td class="c">{d?.height || "—"}</td>
                 <td use:tip={d?.club ?? ""}>{d?.club || "—"}</td>
-                <td class="clamp clamp-based" use:tip={basedValue(r.detailed)}>{basedValue(r.detailed) || "—"}</td>
+                <td class="clamp clamp-based" use:tip={mixedRoster ? rowBasedValue(r) : basedValue(r.detailed)}
+                  >{(mixedRoster ? rowBasedValue(r) : basedValue(r.detailed)) || "—"}</td
+                >
                 <td class="c">{d?.ca || "—"}</td>
                 <td class="c">{d?.pa || "—"}</td>
                 <td class="c">{d?.rca || "—"}</td>
@@ -421,7 +461,7 @@
   {:else}
     <div class="empty">
       <Icon name="search" stroke={1.8} />
-      <p>{paged.search ? t.table.noMatchHint : t.table.emptyHint}</p>
+      <p>{paged.search ? t.table.noMatchHint : appStore.rosterView !== "all" ? t.table.rosterViewEmpty : t.table.emptyHint}</p>
     </div>
   {/if}
 </div>

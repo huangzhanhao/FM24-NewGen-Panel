@@ -8,15 +8,16 @@ const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
 
-import { appStore, applySnapshot, BAR_LINGER_MS, runTask } from './app.svelte';
-import type { AppSnapshot, RtfScanResult } from '../types';
+import { appStore, applySnapshot, BAR_LINGER_MS, markRosterFilled, personKindGroup, resetRosterView, rowFormatOf, runTask } from './app.svelte';
+import { t } from '../text';
+import type { AppSnapshot, PersonKind, PlayerRecord, RtfScanResult } from '../types';
 
 /** 两条进度通道的清空态（store 里这两个字段的形状一致）。 */
 const blank = { status: '', value: 0, current: 0, total: 0 };
 /** 状态栏「替换中」的判据来自快照的 replacing 字段。 */
 const snap = (replacing: boolean) => ({
   profiles: [], currentProfile: 'No Profile', groups: [], currentGroup: null,
-  currentRtf: '', replacing, configXml: null, logPath: '',
+  currentRtf: '', currentFm: '', replacing, configXml: null, logPath: '',
 });
 /** 构造一个任意快照（applySnapshot 的入参）。 */
 const snapOf = (over: Partial<AppSnapshot> = {}): AppSnapshot => ({ ...snap(false), ...over });
@@ -168,5 +169,69 @@ describe('applySnapshot', () => {
 
     expect(appStore.rosterReady).toBe(true);
     expect(appStore.rosterVersion).toBe(0);
+  });
+});
+
+/** 名单双路径（RTF / .fm）与视图切换：replaceReady 就绪判据、markRosterFilled 三标记、
+ *  rosterView 复位、全局 basedLabel 不随视图漂移、kind 四值的人员分组与判定列映射。 */
+describe('名单双路径与视图切换', () => {
+  beforeEach(() => {
+    appStore.snapshot = null;
+    appStore.rosterReady = false;
+    appStore.lastRtfScan = null;
+    appStore.rosterVersion = 0;
+    appStore.rosterView = 'all';
+  });
+
+  it('replaceReady：RTF 与 .fm 任一已选即就绪，两空未就绪', () => {
+    const base = { currentProfile: '档A', currentGroup: 'C:/pack' };
+    appStore.snapshot = snapOf({ ...base, currentRtf: '', currentFm: 'X.fm' });
+    expect(appStore.replaceReady).toBe(true);
+    appStore.snapshot = snapOf({ ...base, currentRtf: 'C:/a.rtf', currentFm: '' });
+    expect(appStore.replaceReady).toBe(true);
+    appStore.snapshot = snapOf({ ...base, currentRtf: '', currentFm: '' });
+    expect(appStore.replaceReady).toBe(false);
+    expect(appStore.missingPrerequisites).toContain(t.replace.needRoster);
+  });
+
+  it('markRosterFilled 置位三标记：rosterReady / lastRtfScan / rosterVersion', () => {
+    const scan: RtfScanResult = {
+      total: 3, newgan: 0, detailed: true, format: '拓展名单', formatCode: 'extPlayer', language: 'en',
+    };
+    markRosterFilled(scan);
+    expect(appStore.rosterReady).toBe(true);
+    expect(appStore.lastRtfScan).toEqual(scan);
+    expect(appStore.rosterVersion).toBe(1);
+  });
+
+  it('resetRosterView 复位为 all', () => {
+    appStore.rosterView = 'staff';
+    resetRosterView();
+    expect(appStore.rosterView).toBe('all');
+  });
+
+  it('三种 rosterView 下全局 basedLabel 恒为 colBased（不随视图漂移）', () => {
+    appStore.lastRtfScan = {
+      total: 1, newgan: 0, detailed: true, format: '拓展名单', formatCode: 'extPlayer', language: 'en',
+    };
+    for (const v of ['all', 'player', 'staff'] as const) {
+      appStore.rosterView = v;
+      expect(appStore.basedLabel).toBe(t.table.colBased);
+    }
+  });
+
+  it('personKindGroup / rowFormatOf：kind 四值映射', () => {
+    const rec = (kind: PersonKind): PlayerRecord => ({
+      uid: '1', primaryNat: '', secNat: '', name: '',
+      hairLength: '', hairColor: '', ethnicityCode: '', kind,
+    });
+    expect(personKindGroup(rec('playerMale'))).toBe('player');
+    expect(personKindGroup(rec('playerFemale'))).toBe('player');
+    expect(personKindGroup(rec('staffMale'))).toBe('staff');
+    expect(personKindGroup(rec('staffFemale'))).toBe('staff');
+    expect(rowFormatOf(rec('playerMale'))).toBe('extPlayer');
+    expect(rowFormatOf(rec('playerFemale'))).toBe('extPlayer');
+    expect(rowFormatOf(rec('staffMale'))).toBe('extStaff');
+    expect(rowFormatOf(rec('staffFemale'))).toBe('extStaff');
   });
 });

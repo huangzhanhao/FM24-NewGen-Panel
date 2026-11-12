@@ -121,6 +121,8 @@ const zhCN = {
     queueScopeAppend: "\n\nAI 头像队列正在运行，继续将取消未完成的生成任务。",
     rtfSet: "RTF ✓",
     rtfUnset: "未设置 RTF",
+    fmSet: "FM ✓",
+    fmUnset: "未设置 FM",
     emptyGroups: "暂无头像包。点上方 ＋ 关联头像包目录。",
     linkHome: "首页",
     linkTutorial: "教程",
@@ -148,6 +150,16 @@ const zhCN = {
     selectRtfBrowseHint: "请先点击「激活」后再设置 RTF（当前为浏览预览）",
     scanRtfBtn: "扫描RTF",
     scanRtfHint: "解析 RTF 并填充名单预览（结果写入日志）",
+    fmLabel: "FM 存档：",
+    fmUnsetValue: "未设置",
+    selectFmBtn: "选择.fm",
+    selectFmDialogTitle: "选择 FM 存档",
+    selectFmHint: "选择 FM 存档（.fm）作为名单来源",
+    scanFmBtn: "扫描.fm",
+    scanFmHint: "解析 .fm 存档并填充名单预览（结果写入日志）",
+    fmScannedTag: "已扫描 .fm 名单",
+    fmUnscannedTag: "已选 .fm（未扫描）",
+    fmRosterHelp: "扫描后名单预览与替换取数均来自该存档；混合名单可在预览中切换球员/职员视图。",
     viewConfigBtn: "读取快照",
     viewConfigHint: "解析存档 XML 快照，在结果区「快照预览」中查看映射列表",
     viewSnapshotBtn: "查看位置",
@@ -623,6 +635,7 @@ const zhCN = {
     needProfile: "选择 Profile",
     needGroup: "选择头像包",
     needRtf: "设置 RTF 名单",
+    needRoster: "设置名单文件",
     todoPrefix: "还需完成：",
     missingDirsTitle: "缺失目录",
     missingDirsConfirm: (standard: number, count: number) =>
@@ -690,6 +703,14 @@ const zhCN = {
     newganAny: "任意",
     newganYes: "是",
     newganNo: "否",
+    /** 球员/职员视图切换（仅混合名单显示）：标签 + 三个选项 + 视图内无记录的空态文案。 */
+    rosterViewLabel: "视图",
+    rosterViewAll: "全部",
+    rosterViewPlayer: "球员",
+    rosterViewStaff: "职员",
+    rosterViewEmpty: "当前视图没有匹配的记录。",
+    /** 混合名单下第 15 列「全部」视图的表头：两种语义并列（三字典同值，不逐词翻译）。 */
+    rosterViewMixedHeader: "所在地 / 偏好工作",
     emptyHint:
       "执行「替换头像」或「扫描RTF」后可在此预览名单（最近一次解析结果）。",
     /** 缓存里没有匹配当前筛选条件的记录（与快照预览的 noMatchHint 同款语义）。 */
@@ -1068,6 +1089,8 @@ const zhTW: Dict = {
     queueScopeAppend: "\n\nAI 頭像佇列正在執行，繼續將取消未完成的生成任務。",
     rtfSet: "RTF ✓",
     rtfUnset: "未設定 RTF",
+    fmSet: "FM ✓",
+    fmUnset: "未設定 FM",
     emptyGroups: "暫無頭像包。點上方 ＋ 關聯頭像包目錄。",
     linkHome: "首頁",
     linkTutorial: "教程",
@@ -1095,6 +1118,16 @@ const zhTW: Dict = {
     selectRtfBrowseHint: "請先點選「啟用」後再設定 RTF（當前為瀏覽預覽）",
     scanRtfBtn: "掃描RTF",
     scanRtfHint: "解析 RTF 並填充名單預覽（結果寫入日誌）",
+    fmLabel: "FM 存檔：",
+    fmUnsetValue: "未設定",
+    selectFmBtn: "選擇.fm",
+    selectFmDialogTitle: "選擇 FM 存檔",
+    selectFmHint: "選擇 FM 存檔（.fm）作為名單來源",
+    scanFmBtn: "掃描.fm",
+    scanFmHint: "解析 .fm 存檔並填充名單預覽（結果寫入日誌）",
+    fmScannedTag: "已掃描 .fm 名單",
+    fmUnscannedTag: "已選 .fm（未掃描）",
+    fmRosterHelp: "掃描後名單預覽與替換取數均來自該存檔；混合名單可在預覽中切換球員/職員檢視。",
     viewConfigBtn: "讀取快照",
     viewConfigHint: "解析存檔 XML 快照，在結果區「快照預覽」中檢視對映列表",
     viewSnapshotBtn: "檢視位置",
@@ -1570,6 +1603,7 @@ const zhTW: Dict = {
     needProfile: "選擇 Profile",
     needGroup: "選擇頭像包",
     needRtf: "設定 RTF 名單",
+    needRoster: "設定名單檔案",
     todoPrefix: "還需完成：",
     missingDirsTitle: "缺失目錄",
     missingDirsConfirm: (standard: number, count: number) =>
@@ -1637,6 +1671,14 @@ const zhTW: Dict = {
     newganAny: "任意",
     newganYes: "是",
     newganNo: "否",
+    /** 球员/职员视图切换（仅混合名单显示）：标签 + 三个选项 + 视图内无记录的空态文案。 */
+    rosterViewLabel: "檢視",
+    rosterViewAll: "全部",
+    rosterViewPlayer: "球員",
+    rosterViewStaff: "職員",
+    rosterViewEmpty: "目前檢視沒有匹配的記錄。",
+    /** 混合名单下第 15 列「全部」视图的表头：两种语义并列（三字典同值，不逐词翻译）。 */
+    rosterViewMixedHeader: "所在地 / 偏好工作",
     emptyHint:
       "執行「替換頭像」或「掃描RTF」後可在此預覽名單（最近一次解析結果）。",
     /** 缓存里没有匹配当前筛选条件的记录（与快照预览的 noMatchHint 同款语义）。 */
@@ -2016,6 +2058,8 @@ const en: Dict = {
       "\n\nThe AI avatar queue is running; continuing cancels unfinished generation tasks.",
     rtfSet: "RTF ✓",
     rtfUnset: "No RTF",
+    fmSet: "FM ✓",
+    fmUnset: "No FM",
     emptyGroups: "No facepacks yet. Click ＋ above to link a facepack directory.",
     linkHome: "Home",
     linkTutorial: "Tutorial",
@@ -2047,6 +2091,18 @@ const en: Dict = {
     scanRtfBtn: "Scan RTF",
     scanRtfHint:
       "Parse the RTF and fill the roster preview (result written to the log)",
+    fmLabel: "FM save:",
+    fmUnsetValue: "Not set",
+    selectFmBtn: "Select .fm",
+    selectFmDialogTitle: "Select FM save",
+    selectFmHint: "Select an FM save (.fm) as the roster source",
+    scanFmBtn: "Scan .fm",
+    scanFmHint:
+      "Parse the .fm save and fill the roster preview (result written to the log)",
+    fmScannedTag: ".fm roster scanned",
+    fmUnscannedTag: ".fm selected (not scanned)",
+    fmRosterHelp:
+      "Once scanned, the roster preview and replacement read from this save; mixed rosters offer a player/staff view switch in the preview.",
     viewConfigBtn: "Read snapshot",
     viewConfigHint:
       "Parse the savegame XML snapshot and view the mapping list under Snapshot preview",
@@ -2546,6 +2602,7 @@ const en: Dict = {
     needProfile: "Select a profile",
     needGroup: "Select a facepack",
     needRtf: "Set the RTF roster",
+    needRoster: "Set a roster file",
     todoPrefix: "Still needed:",
     missingDirsTitle: "Missing directories",
     missingDirsConfirm: (standard: number, count: number) =>
@@ -2613,6 +2670,14 @@ const en: Dict = {
     newganAny: "Any",
     newganYes: "Yes",
     newganNo: "No",
+    /** 球员/职员视图切换（仅混合名单显示）：标签 + 三个选项 + 视图内无记录的空态文案。 */
+    rosterViewLabel: "View",
+    rosterViewAll: "All",
+    rosterViewPlayer: "Players",
+    rosterViewStaff: "Staff",
+    rosterViewEmpty: "No records in the current view.",
+    /** 混合名单下第 15 列「全部」视图的表头：两种语义并列（三字典同值，不逐词翻译）。 */
+    rosterViewMixedHeader: "所在地 / 偏好工作",
     emptyHint:
       'Run "Replace faces" or "Scan RTF" to preview the roster here (most recent parse).',
     /** 缓存里没有匹配当前筛选条件的记录（与快照预览的 noMatchHint 同款语义）。 */

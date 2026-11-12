@@ -8,7 +8,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSnapshot, GalleryItem, GenImage, GenRequest, SaveReplaceResult, SaveTargetPreview, GenResult, GeneratedImage, ImageConfig, ImageScanResult, IntegrityResult, LogLine,
-  NationalityDoc, PageResult, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
+  NationalityDoc, PageResult, PlayerChunk, PlayerPreview, PlayerRecord, PreflightResult, PromptTemplate, ProviderConfig,
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
@@ -26,6 +26,8 @@ export const api = {
   selectImageDirectory: (path: string) => invoke<AppSnapshot>('select_image_directory', { path }),
   // 设定当前 RTF 名单文件（名单预览与替换的取数来源），返回状态快照。
   setCurrentRtf: (path: string) => invoke<AppSnapshot>('set_current_rtf', { path }),
+  // 设定当前 .fm 存档（与 RTF 并立的名单来源），返回状态快照。
+  setCurrentFm: (path: string) => invoke<AppSnapshot>('set_current_fm', { path }),
   // 参数写 imgDir（驼峰），对应 Rust 端 img_dir（蛇形），Tauri 自动映射。
   setCurrentGroup: (imgDir: string) => invoke<AppSnapshot>('set_current_group', { imgDir }),
   // 移除指定头像包组记录，返回删除后的状态快照。
@@ -38,6 +40,8 @@ export const api = {
   scanImages: () => invoke<ImageScanResult>('scan_images'),
   // 扫描RTF：解析当前 RTF 并填充名单预览缓存，结果写入后端日志。
   scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
+  // 扫描.fm：解析当前 .fm 存档并填充名单预览缓存（与 scanRtf 同一缓存与摘要口径）。
+  scanFm: () => invoke<RtfScanResult>('scan_fm'),
   // 打开标准规则目录（data/rules/）：编辑 standard2/standard3.json 后下次替换即生效。
   openRulesDir: () => invoke<void>('open_rules_dir'),
   // 预览指定存档（下拉浏览展示，不切换后端当前档/激活状态）。
@@ -65,8 +69,35 @@ export const api = {
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
   // 请求取消正在进行的替换流水线。
   cancelReplace: () => invoke<void>('cancel_replace'),
-  // 取当前名单的全部球员记录（名单表格数据源）。
-  queryPlayers: () => invoke<PlayerRecord[]>('query_players'),
+  // 取当前名单的全部球员记录（名单表格数据源）。按块拉取再聚合成全量，避免单次超大 JSON
+  // 解析长任务；total 是缓存全量条数，块间必须一致——不一致说明读取期间缓存被清/重填，
+  // 从头重取一次；二次仍不一致抛错，由上层 onError 弹窗，绝不返回残缺数组。
+  queryPlayers: async (): Promise<PlayerRecord[]> => {
+    const limit = 32768; // 传输块大小（与 UI 每页行数无关；后端夹 1..=65536）
+    let offset = 0;
+    const out: PlayerRecord[] = [];
+    let expectedTotal: number | null = null;
+    let retried = false;
+    for (;;) {
+      const chunk = await invoke<PlayerChunk>('query_players_chunk', { offset, limit });
+      if (expectedTotal === null) {
+        expectedTotal = chunk.total;
+      } else if (chunk.total !== expectedTotal) {
+        if (!retried) {
+          retried = true;
+          offset = 0;
+          out.length = 0;
+          expectedTotal = null;
+          continue;
+        }
+        throw new Error('名单在分块读取期间发生变化');
+      }
+      out.push(...chunk.items);
+      offset += chunk.items.length;
+      if (chunk.items.length === 0 || offset >= expectedTotal) break;
+    }
+    return out;
+  },
   // queryPlayersByUids：按 uid 批量取球员记录（队列坞条目行身份信息：年龄/所在地帮认人）；
   // 只读后端 rtf_cache（与 query_players 同源），未命中的 uid 不在返回之列。
   queryPlayersByUids: (uids: string[]) => invoke<PlayerRecord[]>('query_players_by_uids', { uids }),

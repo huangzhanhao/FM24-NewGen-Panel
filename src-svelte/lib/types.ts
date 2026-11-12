@@ -27,11 +27,14 @@ export interface PlayerRecord {
   detailed?: DetailedInfo;
 }
 
+/** 名单分块取数的一块（对应 Rust 的 PlayerChunk）：total 是缓存全量条数，各块应一致。 */
+export interface PlayerChunk { items: PlayerRecord[]; total: number; }
+
 /** 一条头像映射（对应 Rust 的 MappingEntry）。 */
 export interface MappingEntry { uid: string; ethnicity: string; image: string; }
 
 /** 一个头像包（组）的摘要（对应 Rust 的 GroupInfo）。 */
-export interface GroupInfo { imgDir: string; rtf: string; }
+export interface GroupInfo { imgDir: string; rtf: string; fm: string; }
 
 /** 「检查完整性」结果（对应 Rust 的 IntegrityResult）。
  * standard：命中的标准号（2=14 种族 / 3=细分…），1=图片直铺，0=无法识别。 */
@@ -64,7 +67,7 @@ export interface ConfigXmlInfo { path: string; exists: boolean; }
 /** 应用全局快照（对应 Rust 的 AppSnapshot）；前端大部分界面基于它渲染。 */
 export interface AppSnapshot {
   profiles: string[]; currentProfile: string; groups: GroupInfo[];
-  currentGroup: string | null; currentRtf: string;
+  currentGroup: string | null; currentRtf: string; currentFm: string;
   replacing: boolean; configXml: ConfigXmlInfo | null; logPath: string;
 }
 

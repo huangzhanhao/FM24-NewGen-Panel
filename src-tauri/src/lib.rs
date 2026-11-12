@@ -13,7 +13,7 @@ mod assets; // 编译期内嵌的只读映射表（国籍翻译、config.xml 模
 mod commands; // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper; // 核心算法：球员 → 头像图片的映射
 mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（FolderList 来自 templates，不硬编码）
-mod fm_parser; // .fm 存档解析器（FM24：zstd 容器 + 名单还原；解析主体后续任务填充）
+mod fm_parser; // .fm 存档解析器（FM24：zstd 容器 + 名池/人员块/槽位绑定 + 名单字段还原）
 mod image_ai; // AI 文生图：契约/配置/模板渲染/生成编排/画廊记录/批量队列（协议见 image_ai_providers，命令在 commands.rs）
 mod image_ai_providers; // AI 文生图适配器族（openai/volcano/dashscope/siliconflow/modelscope/comfyui 协议适配）
 mod json_store; // JSON 配置的原子读写

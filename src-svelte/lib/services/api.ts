@@ -12,6 +12,10 @@ import type {
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
+// 名单分块传输的块大小（与 UI 每页行数无关；后端夹 1..=65536；T04G 实测三档择优，测完回填终值）。
+// 导出给测试引用，避免换档时测试断言跟着硬编码值漂移。
+export const PLAYERS_CHUNK_LIMIT = 8192;
+
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
 export const api = {
   // 取应用全量状态快照（当前档/头像包组/RTF 等），前端各视图的首屏数据源。
@@ -67,13 +71,13 @@ export const api = {
   // 确认过的这一轮把 allowBlank 带上，流水线的写前拦截才会放行。
   preflightReplace: (mode: ReplaceArgs['mode']) => invoke<PreflightResult>('preflight_replace', { mode }),
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
-  // 请求取消正在进行的替换流水线。
+// 请求取消正在进行的替换流水线。
   cancelReplace: () => invoke<void>('cancel_replace'),
   // 取当前名单的全部球员记录（名单表格数据源）。按块拉取再聚合成全量，避免单次超大 JSON
   // 解析长任务；total 是缓存全量条数，块间必须一致——不一致说明读取期间缓存被清/重填，
   // 从头重取一次；二次仍不一致抛错，由上层 onError 弹窗，绝不返回残缺数组。
   queryPlayers: async (): Promise<PlayerRecord[]> => {
-    const limit = 32768; // 传输块大小（与 UI 每页行数无关；后端夹 1..=65536）
+    const limit = PLAYERS_CHUNK_LIMIT;
     let offset = 0;
     const out: PlayerRecord[] = [];
     let expectedTotal: number | null = null;

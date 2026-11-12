@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 
-import { api } from './api';
+import { PLAYERS_CHUNK_LIMIT, api } from './api';
 
 describe('api 封装', () => {
   it('startReplace 传参与命令名正确', async () => {
@@ -29,8 +29,8 @@ describe('api 封装', () => {
       .mockResolvedValueOnce({ items: [{ uid: 'r-3' }], total: 3 });
     await expect(api.queryPlayers()).resolves.toEqual([{ uid: 'r-1' }, { uid: 'r-2' }, { uid: 'r-3' }]);
     expect(invoke).toHaveBeenCalledTimes(2);
-    expect(invoke).toHaveBeenNthCalledWith(1, 'query_players_chunk', { offset: 0, limit: 32768 });
-    expect(invoke).toHaveBeenNthCalledWith(2, 'query_players_chunk', { offset: 2, limit: 32768 });
+    expect(invoke).toHaveBeenNthCalledWith(1, 'query_players_chunk', { offset: 0, limit: PLAYERS_CHUNK_LIMIT });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'query_players_chunk', { offset: 2, limit: PLAYERS_CHUNK_LIMIT });
   });
 
   it('queryPlayers 块间 total 变化从头重取一次', async () => {
@@ -42,7 +42,7 @@ describe('api 封装', () => {
       .mockResolvedValueOnce({ items: [{ uid: 'r-2' }, { uid: 'r-3' }], total: 3 });
     await expect(api.queryPlayers()).resolves.toEqual([{ uid: 'r-1' }, { uid: 'r-2' }, { uid: 'r-3' }]);
     expect(invoke).toHaveBeenCalledTimes(4);
-    expect(invoke).toHaveBeenNthCalledWith(3, 'query_players_chunk', { offset: 0, limit: 32768 });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'query_players_chunk', { offset: 0, limit: PLAYERS_CHUNK_LIMIT });
   });
 
   it('queryPlayers 二次 total 不一致抛错（不返回残缺数组）', async () => {

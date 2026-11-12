@@ -18,6 +18,16 @@ pub const STANDARD3_RAW: &str = include_str!("../assets/standard3.json");
 pub const IMAGE_AI_RAW: &str = include_str!("../assets/image_ai.json");
 /// AI 文生图出厂提示词模板（含码值映射 codes 与随机词库 pools，导出 data/prompts/templates.json）。
 pub const IMAGE_AI_TEMPLATES_RAW: &str = include_str!("../assets/image_ai_templates.json");
+/// FM24 .fm 存档的肤色档位 → nationId 映射（238 对，含 rank 238 → 0 的哨兵行）。
+/// 文件名 _24 是版本孔位：换 FM 版本须换表，禁止跨版本复用。
+// 消费方是 T02 的 fm_parser（尚未接线），先豁免未使用告警；接线后删除本行。
+#[allow(dead_code)]
+pub const FM_NATION_RANKS_24: &str = include_str!("../assets/fm_nation_ranks_24.json");
+/// FM24 nationId → [id, 三字码, 英文名, 中文名, 中文简称]（250 行）。FM 存档国籍码与 RTF
+/// 显示名不同源，必须经此表换算；`_24` 同上。
+// 同上：T02 接线前豁免未使用告警，接线后删除本行。
+#[allow(dead_code)]
+pub const FM_NATION_IDS_24: &str = include_str!("../assets/fm_nation_ids_24.json");
 
 // ---------------- 国籍对照表（基础数据，非标准规则） ----------------
 /// 语言 → {国籍显示文本: 三字码}，本文件只作**出厂默认**：启动时转成 `data/nationalities.json`
@@ -63,6 +73,51 @@ mod tests {
                 assert!(
                     codes.contains(code),
                     "{lang} 节点的码 {code} 不在 nat_codes.json"
+                );
+            }
+        }
+    }
+
+    /// FM24 两份字典的形状契约：资产按字节原样嵌入，形状走样（误编辑 / 错版本拷入 _24 孔位）
+    /// 在此拦下。① rank 表：238 对、rank 严格递增无重复、nationId=0 只允许 rank 238 哨兵一行；
+    /// ② id 表：250 行 × 5 列、id 为数字串、code 为 2–3 位大写字母；
+    /// ③ 衔接：rank 表除哨兵外的 nationId 必须都在 id 表里（防两份资产脱节）。
+    #[test]
+    fn fm_dictionary_shapes() {
+        let ranks: Vec<[u64; 2]> =
+            serde_json::from_str(FM_NATION_RANKS_24).expect("fm_nation_ranks_24.json 格式错误");
+        assert_eq!(ranks.len(), 238);
+        assert!(ranks.contains(&[238, 0]), "缺 rank 238 → 0 的哨兵行");
+        assert!(
+            ranks.windows(2).all(|w| w[0] < w[1]),
+            "rank 必须严格递增（无重复）"
+        );
+        assert_eq!(
+            ranks.iter().filter(|p| p[1] == 0).count(),
+            1,
+            "nationId=0 只允许哨兵一行"
+        );
+
+        let ids: Vec<Vec<String>> =
+            serde_json::from_str(FM_NATION_IDS_24).expect("fm_nation_ids_24.json 格式错误");
+        assert_eq!(ids.len(), 250);
+        assert!(ids.iter().all(|r| r.len() == 5), "每行必须 5 列");
+        assert!(
+            ids.iter().all(|r| r[0].bytes().all(|b| b.is_ascii_digit())),
+            "id 必须是数字串"
+        );
+        assert!(
+            ids.iter().all(|r| (2..=3).contains(&r[1].len()) && r[1].bytes().all(|b| b.is_ascii_uppercase())),
+            "code 必须是 2–3 位大写字母"
+        );
+
+        let known: std::collections::HashSet<u64> =
+            ids.iter().map(|r| r[0].parse::<u64>().unwrap()).collect();
+        for &[_, nation_id] in &ranks {
+            if nation_id != 0 {
+                assert!(
+                    known.contains(&nation_id),
+                    "rank 表的 nationId {nation_id} 不在 id 表里"
                 );
             }
         }

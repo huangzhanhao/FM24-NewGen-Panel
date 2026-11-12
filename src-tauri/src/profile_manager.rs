@@ -16,11 +16,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// 单个组的配置。目前只存 RTF 路径（#[serde(default)] 表示旧文件缺这个字段时用默认值）。
+/// 单个组的配置。RTF 与 .fm 存档路径并列，各自独立选择（#[serde(default)] 表示旧文件缺字段时补默认值，
+/// 老副本不手工改、由反序列化兜底为空串）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GroupCfg {
     #[serde(default)]
     pub rtf: String,
+    #[serde(default)]
+    pub fm: String,
 }
 
 /// 组集合：键 = 归一化后的头像包目录，值 = 该组配置。用类型别名简化书写。
@@ -227,7 +230,7 @@ impl ProfileManager {
             let rtf = raw["rtf"].as_str().unwrap_or("").to_string();
             let mut groups = GroupsMap::new();
             if !img_dir.is_empty() {
-                groups.insert(img_dir.clone(), GroupCfg { rtf });
+                groups.insert(img_dir.clone(), GroupCfg { rtf, ..Default::default() });
             }
             let cfg = PrfCfg {
                 cur_group: (!img_dir.is_empty()).then_some(img_dir),
@@ -650,6 +653,49 @@ impl ProfileManager {
         Ok(true)
     }
 
+    /// 取当前组的 .fm 存档路径（链式安全取值，任何一环为 None 都回退空串）。
+    // 命令层登记在 T03（届时 set_current_fm 命令接线），先豁免未使用告警；接线后删除本行。
+    #[allow(dead_code)]
+    pub fn get_cur_fm(&self) -> String {
+        let fm = self
+            .cur_group
+            .as_ref()
+            .and_then(|g| self.prf_cfg.groups.get(g))
+            .map(|g| g.fm.clone())
+            .unwrap_or_default();
+        // 查询：记录当前组与取到的 .fm 路径（Trace 级别，仅用于追踪调用链）。
+        self.log(
+            log::Level::Trace,
+            format!(
+                "查询当前组 FM 存档：{} → {fm}",
+                self.cur_group.as_deref().unwrap_or("无")
+            ),
+        );
+        fm
+    }
+
+    /// 设置当前组的 .fm 存档路径，并落盘。无当前组时返回 false。
+    // 同上：T03 接线前豁免未使用告警，接线后删除本行。
+    #[allow(dead_code)]
+    pub fn set_cur_fm(&mut self, fm: &str) -> Result<bool, String> {
+        let Some(g) = self.cur_group.clone() else {
+            self.log(
+                log::Level::Debug,
+                "设置 FM 存档跳过：当前没有选中的组".into(),
+            );
+            return Ok(false);
+        };
+        if let Some(cfg) = self.prf_cfg.groups.get_mut(&g) {
+            cfg.fm = fm.to_string();
+        }
+        self.persist_prf()?;
+        self.log(
+            log::Level::Debug,
+            format!("当前组 FM 存档已更新：{g} → {fm}"),
+        );
+        Ok(true)
+    }
+
     /// 返回 .user 目录（commands 层拼 profiles.json 路径时用）。
     pub fn user_cfg_path(&self) -> PathBuf {
         self.user_dir.clone()
@@ -976,6 +1022,60 @@ mod tests {
         assert!(warns[0].contains("目录不可用"), "{}", warns[0]);
         // 快照必须保留（目录恢复后还要用它）
         assert!(group_xml_path(&dir.path().join(".user"), "档A", &norm_dir(img.to_str().unwrap())).is_file());
+    }
+
+    #[test]
+    fn load_legacy_profile_json_without_fm_key() {
+        // 老副本的组配置只有 rtf 键：缺 fm 必须由 #[serde(default)] 兜底为空串，
+        // 既不报错也不丢既有的 rtf（老文件不手工补键）。
+        let dir = data_dir();
+        let user = dir.path().join(".user");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(user.join("profiles.json"), r#"{"Profile": {"档A": true}}"#).unwrap();
+        fs::write(
+            user.join("档A.json"),
+            r#"{"cur_group": "C:\\pack", "groups": {"C:\\pack": {"rtf": "C:\\l.rtf"}}}"#,
+        )
+        .unwrap();
+        let pm = ProfileManager::new(Some("档A"), dir.path()).unwrap();
+        assert_eq!(pm.get_cur_rtf(), r"C:\l.rtf");
+        assert_eq!(pm.get_cur_fm(), "");
+    }
+
+    #[test]
+    fn v1_single_profile_upgrade_defaults_fm() {
+        // v1 单档格式（{"img_dir","rtf"}）升级走 `..Default::default()` 分支：
+        // rtf 原样保留，fm 由默认值补空串。
+        let dir = data_dir();
+        let user = dir.path().join(".user");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(user.join("profiles.json"), r#"{"Profile": {"档旧": true}}"#).unwrap();
+        fs::write(
+            user.join("档旧.json"),
+            r#"{"img_dir": "C:\\pack", "rtf": "C:\\l.rtf"}"#,
+        )
+        .unwrap();
+        let pm = ProfileManager::new(Some("档旧"), dir.path()).unwrap();
+        let cfg = pm.prf_cfg.groups.get(&norm_dir(r"C:\pack")).unwrap();
+        assert_eq!(cfg.rtf, r"C:\l.rtf");
+        assert_eq!(cfg.fm, "");
+    }
+
+    #[test]
+    fn get_set_cur_fm_persists() {
+        let dir = data_dir();
+        let mut pm = ProfileManager::new(None, dir.path()).unwrap();
+        // 无当前组：与 set_cur_rtf 同款语义，返回 Ok(false)、不改任何东西。
+        assert!(!pm.set_cur_fm(r"C:\a.fm").unwrap());
+        pm.create_profile("档A").unwrap();
+        pm.ensure_group(r"C:\pack1").unwrap();
+        assert!(pm.set_cur_fm(r"C:\save.fm").unwrap());
+        assert_eq!(pm.get_cur_fm(), r"C:\save.fm");
+        // 落盘 JSON 必须含 fm 键；重启后回读一致（持久化而非仅内存态）。
+        let raw = fs::read_to_string(dir.path().join(".user").join("档A").join("档A.json")).unwrap();
+        assert!(raw.contains("\"fm\""), "落盘 JSON 应含 fm 键：{raw}");
+        let pm2 = ProfileManager::new(Some("档A"), dir.path()).unwrap();
+        assert_eq!(pm2.get_cur_fm(), r"C:\save.fm");
     }
 
     #[test]

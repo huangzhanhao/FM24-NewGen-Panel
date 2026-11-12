@@ -22,6 +22,9 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+# .fm 存档是 zstd 压缩容器（TOC 与 game_db 节都要整帧解压）；只用流式解码 + bulk 精确长度校验，
+# 关掉 zstdmt/legacy 压编译面。zstd-sys 走 vendored C，cc 已在 lock（ring 链）。
+zstd = { version = "0.13", default-features = false }
 rand = "0.9"
 chrono = "0.4"
 log = "0.4"

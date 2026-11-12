@@ -45,6 +45,7 @@ pub struct AppState {
     pub cancel: Arc<AtomicBool>,   // 请求取消标志
     pub running: Arc<AtomicBool>,  // 是否正在替换
     pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>, // 最近一次解析的球员缓存（作用域见 clear_caches_if_scope_changed）
+    pub roster_meta: Arc<Mutex<Option<RosterSummary>>>, // 最近一次扫描的名单摘要伴随态（与 rtf_cache 同生共死；None=本会话未扫描）
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存（同上；两者切档/切组/换名单一律清空）
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>, // 「扫描头像」的包索引缓存（替换可复用）
     pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
@@ -80,16 +81,17 @@ fn cache_scope(pm: &ProfileManager) -> (String, Option<String>, String) {
     (pm.cur_prf.clone(), pm.cur_group.clone(), pm.get_cur_rtf())
 }
 
-/// 存档/组/名单变更后调用：作用域变了就清掉那两个缓存（宁缺勿旧）。
+/// 存档/组/名单变更后调用：作用域变了就清掉名单缓存与名单摘要伴随态（宁缺勿旧）。
 /// 清空后前端据快照把 `rosterReady` 复位，各预览回到引导空态，等下一次「扫描RTF」或替换重新填充。
 fn clear_caches_if_scope_changed(state: &State<'_, AppState>, before: (String, Option<String>, String)) {
-    // 锁只在这一句里持有：先取出改后的作用域，随后的两把锁与 pm 无嵌套关系。
+    // 锁只在这一句里持有：先取出改后的作用域，随后的三把锁与 pm 无嵌套关系。
     let after = cache_scope(&state.pm.lock().unwrap());
     if after == before {
         return; // 作用域没变（例如删的是别的组）：手上这份缓存仍然对应当前档当前组
     }
     state.rtf_cache.lock().unwrap().clear();
     state.mapping_cache.lock().unwrap().clear();
+    *state.roster_meta.lock().unwrap() = None;
 }
 
 /// 轻量任务（检查完整性 / 扫描头像 / 扫描RTF / 读取快照）的进度载荷：

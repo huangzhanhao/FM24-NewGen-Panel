@@ -13,6 +13,7 @@ mod assets; // 编译期内嵌的只读映射表（国籍翻译、config.xml 模
 mod commands; // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper; // 核心算法：球员 → 头像图片的映射
 mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（FolderList 来自 templates，不硬编码）
+mod fm_parser; // .fm 存档解析器（FM24：zstd 容器 + 名单还原；解析主体后续任务填充）
 mod image_ai; // AI 文生图：契约/配置/模板渲染/生成编排/画廊记录/批量队列（协议见 image_ai_providers，命令在 commands.rs）
 mod image_ai_providers; // AI 文生图适配器族（openai/volcano/dashscope/siliconflow/modelscope/comfyui 协议适配）
 mod json_store; // JSON 配置的原子读写
@@ -307,6 +308,7 @@ pub fn run() {
                 cancel: Arc::new(AtomicBool::new(false)),        // 「请求取消」标志
                 running: Arc::clone(&running),                   // 「正在替换」标志
                 rtf_cache: Arc::new(Mutex::new(Vec::new())),     // 最近一次解析的 RTF 球员缓存
+                roster_meta: Arc::new(Mutex::new(None)),         // 名单摘要伴随态（与 rtf_cache 同生共死）
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)), // 「扫描头像」的包索引缓存（初始为空）
                 snapshot_cache: Arc::new(Mutex::new(None)), // 快照解析缓存（「读取快照」/替换收尾写入；初始为空）

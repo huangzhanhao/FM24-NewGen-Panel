@@ -20,13 +20,9 @@ pub const IMAGE_AI_RAW: &str = include_str!("../assets/image_ai.json");
 pub const IMAGE_AI_TEMPLATES_RAW: &str = include_str!("../assets/image_ai_templates.json");
 /// FM24 .fm 存档的肤色档位 → nationId 映射（238 对，含 rank 238 → 0 的哨兵行）。
 /// 文件名 _24 是版本孔位：换 FM 版本须换表，禁止跨版本复用。
-// 消费方是 T02 的 fm_parser（尚未接线），先豁免未使用告警；接线后删除本行。
-#[allow(dead_code)]
 pub const FM_NATION_RANKS_24: &str = include_str!("../assets/fm_nation_ranks_24.json");
 /// FM24 nationId → [id, 三字码, 英文名, 中文名, 中文简称]（250 行）。FM 存档国籍码与 RTF
 /// 显示名不同源，必须经此表换算；`_24` 同上。
-// 同上：T02 接线前豁免未使用告警，接线后删除本行。
-#[allow(dead_code)]
 pub const FM_NATION_IDS_24: &str = include_str!("../assets/fm_nation_ids_24.json");
 
 // ---------------- 国籍对照表（基础数据，非标准规则） ----------------

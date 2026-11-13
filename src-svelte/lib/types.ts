@@ -82,10 +82,12 @@ export interface TaskProgressPayload { status: string; value: number; current: n
 
 /** 发起替换的参数（对应 Rust 的 ReplaceArgs）；mode 用字面量联合限定三个合法值（协议值）。
  *  allowBlank：本轮已在预检里确认过「可能把本档既有映射清空」，由前端在确认框点「是」后置 true，
- *  界面上没有对应的勾选项——它是确认的凭据，不是给用户关的守卫。 */
+ *  界面上没有对应的勾选项——它是确认的凭据，不是给用户关的守卫。
+ *  rosterSource：本次从哪份名单读数据；缓存来源与它不符时后端会先自动扫描（换源即换名单）。 */
 export interface ReplaceArgs {
   mode: 'Preserve' | 'Overwrite' | 'Generate';
   filterNewgan: boolean; allowDuplicates: boolean; saveBackup: boolean; allowBlank: boolean;
+  rosterSource: 'rtf' | 'fm';
 }
 
 /** 「发起前预检」返回（对应 Rust 的 PreflightResult）：是否需要先弹确认，以及本档档景现有条数。 */

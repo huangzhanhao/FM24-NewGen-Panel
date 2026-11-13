@@ -79,13 +79,19 @@ export const api = {
   // total 是缓存全量条数，块间必须一致——不一致说明读取期间缓存被清/重填（切档/切组/重扫），
   // 此时先 onBatch(null) 声明已交付批次作废，再从头重取一次；二次仍不一致抛错，由上层 onError 弹窗，
   // 绝不把两代缓存的块拼在一起当完整名单。
-  queryPlayersStream: async (onBatch: (items: PlayerRecord[] | null) => void): Promise<void> => {
+  // isStale 供换代场景中断：为 true 时不再发起后续分块（也不必再校验 total / 重取）。
+  queryPlayersStream: async (
+    onBatch: (items: PlayerRecord[] | null) => void,
+    isStale: () => boolean = () => false,
+  ): Promise<void> => {
     const limit = PLAYERS_CHUNK_LIMIT;
     let offset = 0;
     let expectedTotal: number | null = null;
     let retried = false;
     for (;;) {
+      if (isStale()) return; // 换代后停止拉取，别空跑整条流
       const chunk = await invoke<PlayerChunk>('query_players_chunk', { offset, limit });
+      if (isStale()) return;
       if (expectedTotal === null) {
         expectedTotal = chunk.total;
       } else if (chunk.total !== expectedTotal) {

@@ -38,17 +38,29 @@
   const busy = $derived(appStore.busy);
 
   // 名单全量：扫描RTF / 替换收尾（rosterVersion）后重取；取不到就留空，搜索退回按 UID 直查。
-  // 取数走流式接口（与名单预览同一实现），在这里攒成整份——本卡搜索要一次性在本地过全量
+  // 取数走流式接口（与名单预览同一实现），在这里攒成整份——本卡搜索要一次性在本地过全量。
+  // 换代令牌：切档/切组可能连续两次 bump rosterVersion，两条流并发时后完成者不得覆盖新结果；
+  // 流是几十块的异步序列，没有令牌这个窗口会被拉长到整条流跑完。
+  let rosterToken = 0;
   $effect(() => {
     void appStore.rosterVersion;
+    const mine = ++rosterToken;
     const acc: PlayerRecord[] = [];
     api
-      .queryPlayersStream((batch) => {
-        if (batch === null) acc.length = 0; // 名单重新取数：上一代的批次作废
-        else for (const r of batch) acc.push(r);
+      .queryPlayersStream(
+        (batch) => {
+          if (mine !== rosterToken) return; // 换代后旧流的批次与收尾都不得写回
+          if (batch === null) acc.length = 0; // 名单重新取数：上一代的批次作废
+          else for (const r of batch) acc.push(r);
+        },
+        () => mine !== rosterToken, // 换代后让数据源停止后续分块
+      )
+      .then(() => {
+        if (mine === rosterToken) roster = acc;
       })
-      .then(() => (roster = acc))
-      .catch(() => (roster = []));
+      .catch(() => {
+        if (mine === rosterToken) roster = [];
+      });
   });
 
   // 【请求令牌】preview_player 是同步命令，缓存未命中时要整份重解析档景（15 万行量级、秒级），

@@ -97,6 +97,38 @@ fn at(base: usize, off: isize) -> Option<usize> {
     (base as isize).checked_add(off).and_then(|v| usize::try_from(v).ok())
 }
 
+/// 单次解析最多并行的扫描线程数：再高收益被内存带宽吃掉，反而挤占 UI 线程。
+const SCAN_THREADS: usize = 8;
+
+/// 把 `[start, end)` 按线程数切块并行扫描，各块独立执行 `f(lo, hi)`，结果按块顺序返回。
+/// 【为何安全】块之间不重叠、每块只处理自己的下标区间，调用方按返回顺序合并即可得到与
+/// 单线程逐字节扫描完全一致的结果。真档 game_db 有数亿字节、单线程要扫 5 遍，是扫描耗时主体。
+fn scan_parallel<T, F>(start: usize, end: usize, f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize, usize) -> T + Sync,
+{
+    if end <= start {
+        return Vec::new();
+    }
+    let n = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1)
+        .clamp(1, SCAN_THREADS);
+    let span = (end - start + n - 1) / n;
+    std::thread::scope(|sc| {
+        let f = &f;
+        let handles: Vec<_> = (0..n)
+            .map(|t| {
+                let lo = start + t * span;
+                let hi = (lo + span).min(end);
+                sc.spawn(move || (lo < hi).then(|| f(lo, hi)))
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().unwrap()).collect()
+    })
+}
+
 /// 把「期望 / 实际」写进诊断账目，并生成唯一的对外错误文案。
 fn fail(diag: &mut Diag, path: &Path, version: &str, stage: &str, detail: impl AsRef<str>) -> String {
     let detail = detail.as_ref();
@@ -989,75 +1021,81 @@ struct Block {
 /// 对应档内两种不同的记录头排布，只认一种会整族漏人。
 fn read_blocks(db: &[u8], pools: &[Pool; 3], game_year: u16) -> Vec<Block> {
     let size = db.len();
-    let mut blocks = Vec::new();
-    let mut r = 24usize;
-    while r + 40 < size {
-        if db[r + 5] < 11 && db[r + 6] < 21 && db[r + 7] < 11 {
-            let day = (db[r] as u16 | ((db[r + 1] as u16) << 8)) & 0x1FF;
-            let year = db[r + 2] as u16 | ((db[r + 3] as u16) << 8);
-            if (1..=366).contains(&day) && (1900..=game_year).contains(&year) {
-                let mut cur: Option<usize> = None;
-                if u32_le(db, r - 4) == 0 {
-                    cur = Some(r - 19);
-                } else {
-                    for k in 2..=80usize {
-                        let c = match (r - 19).checked_sub(k) {
-                            Some(v) => v,
-                            None => break,
-                        };
-                        if c < 4 {
-                            break;
-                        }
-                        if c + 19 <= size && u32_le(db, c + 15) == k as u32 {
-                            cur = Some(c);
-                            break;
+    let end = size.saturating_sub(40); // 原条件 r + 40 < size
+    scan_parallel(24, end, |lo, hi| {
+        let mut blocks = Vec::new();
+        for r in lo..hi {
+            if db[r + 5] < 11 && db[r + 6] < 21 && db[r + 7] < 11 {
+                let day = (db[r] as u16 | ((db[r + 1] as u16) << 8)) & 0x1FF;
+                let year = db[r + 2] as u16 | ((db[r + 3] as u16) << 8);
+                if (1..=366).contains(&day) && (1900..=game_year).contains(&year) {
+                    let mut cur: Option<usize> = None;
+                    if u32_le(db, r - 4) == 0 {
+                        cur = Some(r - 19);
+                    } else {
+                        for k in 2..=80usize {
+                            let c = match (r - 19).checked_sub(k) {
+                                Some(v) => v,
+                                None => break,
+                            };
+                            if c < 4 {
+                                break;
+                            }
+                            if c + 19 <= size && u32_le(db, c + 15) == k as u32 {
+                                cur = Some(c);
+                                break;
+                            }
                         }
                     }
-                }
-                if let Some(cur) = cur {
-                    if cur + 15 <= size
-                        && db[cur + 4] == 0
-                        && db[cur + 9] == 0
-                        && db[cur + 14] == 0
-                    {
-                        let a = u32_le(db, cur);
-                        let b = u32_le(db, cur + 5);
-                        let c = u32_le(db, cur + 10);
-                        let a_ok = a == SENT || ((a as u64) < pools[0].n as u64 && db[cur + 3] == 0);
-                        let b_ok = b == SENT || ((b as u64) < pools[1].n as u64 && db[cur + 8] == 0);
-                        // 第三字段有四种写法：哨兵、第三池 id、C==A、落在姓池范围。
-                        let c_ok = c == SENT
-                            || (c as u64) < pools[2].n as u64
-                            || c == a
-                            || (c as u64) < pools[1].n as u64;
-                        if a_ok && b_ok && c_ok {
-                            let mut g = true;
-                            for k in 17..25usize {
-                                let v = db[r + k];
-                                if !(1..=20).contains(&v) {
-                                    g = false;
-                                    break;
+                    if let Some(cur) = cur {
+                        if cur + 15 <= size
+                            && db[cur + 4] == 0
+                            && db[cur + 9] == 0
+                            && db[cur + 14] == 0
+                        {
+                            let a = u32_le(db, cur);
+                            let b = u32_le(db, cur + 5);
+                            let c = u32_le(db, cur + 10);
+                            let a_ok =
+                                a == SENT || ((a as u64) < pools[0].n as u64 && db[cur + 3] == 0);
+                            let b_ok =
+                                b == SENT || ((b as u64) < pools[1].n as u64 && db[cur + 8] == 0);
+                            // 第三字段有四种写法：哨兵、第三池 id、C==A、落在姓池范围。
+                            let c_ok = c == SENT
+                                || (c as u64) < pools[2].n as u64
+                                || c == a
+                                || (c as u64) < pools[1].n as u64;
+                            if a_ok && b_ok && c_ok {
+                                let mut g = true;
+                                for k in 17..25usize {
+                                    let v = db[r + k];
+                                    if !(1..=20).contains(&v) {
+                                        g = false;
+                                        break;
+                                    }
                                 }
-                            }
-                            if g {
-                                blocks.push(Block {
-                                    r,
-                                    a,
-                                    b,
-                                    c,
-                                    day,
-                                    year,
-                                    rank: db[r + 9],
-                                });
+                                if g {
+                                    blocks.push(Block {
+                                        r,
+                                        a,
+                                        b,
+                                        c,
+                                        day,
+                                        year,
+                                        rank: db[r + 9],
+                                    });
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        r += 1;
-    }
-    blocks
+        blocks
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 // ===================== 记录体 ==================================================================
@@ -1118,76 +1156,89 @@ fn read_records(
     StaffCounts,
 ) {
     let size = db.len();
-    let mut rec: HashMap<u32, PlayerRec> = HashMap::new();
-    let mut staff: HashMap<u32, Vec<StaffRec>> = HashMap::new();
     let mut counts = StaffCounts { player: 0, staff: 0, kind3: 0 };
 
-    let mut b = 20usize;
-    while b + 130 < size {
-        let kind = ob(db, b, ro.kind);
-        if kind == 2 || kind == 3 {
-            let self_u = ou32(db, b, ro.self_uid);
-            if self_u > 0 && self_u < UID_CEIL {
-                let pi = ou32(db, b, ro.pindex);
-                if pi != 0 {
-                    let mut ok = true;
-                    for k in ro.pos0..ro.pos1 {
-                        let v = ob(db, b, k);
-                        if !(1..=20).contains(&v) {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    if ok {
-                        for k in ro.pos1..ro.attr1 {
+    // 两遍扫描各自并行；合并按块顺序进行，保留「先出现的记录体优先」的原语义。
+    let player_parts = scan_parallel(20, size.saturating_sub(130), |lo, hi| {
+        let mut local: HashMap<u32, PlayerRec> = HashMap::new();
+        let mut count = 0usize;
+        for b in lo..hi {
+            let kind = ob(db, b, ro.kind);
+            if kind == 2 || kind == 3 {
+                let self_u = ou32(db, b, ro.self_uid);
+                if self_u > 0 && self_u < UID_CEIL {
+                    let pi = ou32(db, b, ro.pindex);
+                    if pi != 0 {
+                        let mut ok = true;
+                        for k in ro.pos0..ro.pos1 {
                             let v = ob(db, b, k);
-                            if !(1..=100).contains(&v) {
+                            if !(1..=20).contains(&v) {
                                 ok = false;
                                 break;
                             }
                         }
-                    }
-                    if ok {
-                        counts.player += 1;
-                        rec.entry(pi).or_insert(PlayerRec { b, self_uid: self_u });
+                        if ok {
+                            for k in ro.pos1..ro.attr1 {
+                                let v = ob(db, b, k);
+                                if !(1..=100).contains(&v) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            count += 1;
+                            local.entry(pi).or_insert(PlayerRec { b, self_uid: self_u });
+                        }
                     }
                 }
             }
         }
-        b += 1;
+        (local, count)
+    });
+    let mut rec: HashMap<u32, PlayerRec> = HashMap::new();
+    for (part, count) in player_parts {
+        counts.player += count;
+        for (pi, r) in part {
+            rec.entry(pi).or_insert(r);
+        }
     }
 
-    let mut p = 20usize;
-    while p + 200 < size {
-        let k = ob(db, p, ro.kind);
-        if k == 1 || k == 3 {
-            let pi = ou32(db, p, ro.pindex);
-            if pi != 0 {
-                let self_u = ou32(db, p, ro.self_uid);
-                if self_u > 0 && self_u < UID_CEIL {
-                    let j = ob(db, p, ro.j) as usize;
-                    if j <= 20 {
-                        let stride = (ro.j_stride as usize) * j;
-                        let ca = ou16(db, p, ro.ca + stride as isize);
-                        let pa = ou16(db, p, ro.pa + stride as isize);
-                        if (1..=200).contains(&ca) && (1..=200).contains(&pa) {
-                            let hraw = ob(db, p, ro.st_height + stride as isize);
-                            let h_ok = hraw == 0
-                                || (50..=115).contains(&hraw)
-                                || (145..=220).contains(&hraw);
-                            if h_ok {
-                                // kind==3 是与球员记录体共用 seq 空间的未解族，只计数不入库。
-                                if k == 3 {
-                                    counts.kind3 += 1;
-                                } else {
-                                    counts.staff += 1;
-                                    staff.entry(pi).or_default().push(StaffRec {
-                                        p,
-                                        self_uid: self_u,
-                                        ca,
-                                        pa,
-                                        hraw,
-                                    });
+    let staff_parts = scan_parallel(20, size.saturating_sub(200), |lo, hi| {
+        let mut local: HashMap<u32, Vec<StaffRec>> = HashMap::new();
+        let mut staff_count = 0usize;
+        let mut kind3 = 0usize;
+        for p in lo..hi {
+            let k = ob(db, p, ro.kind);
+            if k == 1 || k == 3 {
+                let pi = ou32(db, p, ro.pindex);
+                if pi != 0 {
+                    let self_u = ou32(db, p, ro.self_uid);
+                    if self_u > 0 && self_u < UID_CEIL {
+                        let j = ob(db, p, ro.j) as usize;
+                        if j <= 20 {
+                            let stride = (ro.j_stride as usize) * j;
+                            let ca = ou16(db, p, ro.ca + stride as isize);
+                            let pa = ou16(db, p, ro.pa + stride as isize);
+                            if (1..=200).contains(&ca) && (1..=200).contains(&pa) {
+                                let hraw = ob(db, p, ro.st_height + stride as isize);
+                                let h_ok = hraw == 0
+                                    || (50..=115).contains(&hraw)
+                                    || (145..=220).contains(&hraw);
+                                if h_ok {
+                                    // kind==3 是与球员记录体共用 seq 空间的未解族，只计数不入库。
+                                    if k == 3 {
+                                        kind3 += 1;
+                                    } else {
+                                        staff_count += 1;
+                                        local.entry(pi).or_default().push(StaffRec {
+                                            p,
+                                            self_uid: self_u,
+                                            ca,
+                                            pa,
+                                            hraw,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1195,7 +1246,15 @@ fn read_records(
                 }
             }
         }
-        p += 1;
+        (local, staff_count, kind3)
+    });
+    let mut staff: HashMap<u32, Vec<StaffRec>> = HashMap::new();
+    for (part, staff_count, kind3) in staff_parts {
+        counts.staff += staff_count;
+        counts.kind3 += kind3;
+        for (pi, v) in part {
+            staff.entry(pi).or_default().extend(v);
+        }
     }
     // 职员与球员共用 pindex 时以球员为准。
     for pi in rec.keys() {
@@ -1267,54 +1326,62 @@ fn read_slots(
     staff: &HashMap<u32, Vec<StaffRec>>,
 ) -> Vec<Slot> {
     let size = db.len();
-    let mut slots = Vec::new();
-    let mut i = 8192usize;
-    while i + 13 < size {
-        if kind_ok(db[i + 8]) && db[i - 1] == 0 {
-            let uid = u32_le(db, i);
-            if uid > 0 && uid < UID_CEIL {
-                let seq = u32_le(db, i - 4);
-                if seq != 0 {
-                    let dual = u32_le(db, i + 4) == uid;
-                    let ok = dual || {
-                        let near = |v: Option<u32>| v.map(|x| near_uid(x, uid)).unwrap_or(false);
-                        let r = rec.get(&seq.wrapping_sub(1)).map(|r| r.self_uid);
-                        let st = pick_staff(staff, seq.wrapping_sub(1), i).map(|r| r.self_uid);
-                        near(r) || near(st)
-                    };
-                    if ok {
-                        slots.push(Slot {
-                            i,
-                            uid,
-                            seq,
-                            kind: db[i + 8],
-                            dual,
-                            gender_bit: (db[i - 11] & 0x10) != 0,
-                            newgen: db[i - 12] >= 8,
-                        });
+    let parts = scan_parallel(8192, size.saturating_sub(13), |lo, hi| {
+        let mut slots = Vec::new();
+        for i in lo..hi {
+            if kind_ok(db[i + 8]) && db[i - 1] == 0 {
+                let uid = u32_le(db, i);
+                if uid > 0 && uid < UID_CEIL {
+                    let seq = u32_le(db, i - 4);
+                    if seq != 0 {
+                        let dual = u32_le(db, i + 4) == uid;
+                        let ok = dual || {
+                            let near = |v: Option<u32>| v.map(|x| near_uid(x, uid)).unwrap_or(false);
+                            let r = rec.get(&seq.wrapping_sub(1)).map(|r| r.self_uid);
+                            let st = pick_staff(staff, seq.wrapping_sub(1), i).map(|r| r.self_uid);
+                            near(r) || near(st)
+                        };
+                        if ok {
+                            slots.push(Slot {
+                                i,
+                                uid,
+                                seq,
+                                kind: db[i + 8],
+                                dual,
+                                gender_bit: (db[i - 11] & 0x10) != 0,
+                                newgen: db[i - 12] >= 8,
+                            });
+                        }
                     }
                 }
             }
         }
-        i += 1;
-    }
-    slots
+        slots
+    });
+    parts.into_iter().flatten().collect()
 }
 
 /// uid 在全缓冲宽口径下的出现次数（让位判据用）。与 `uid_seq` 的去重口径不同，
 /// 不能拿去重后的槽位统计来替代。
 fn uid_occurrences(db: &[u8]) -> HashMap<u32, usize> {
-    let mut occ: HashMap<u32, usize> = HashMap::new();
     let size = db.len();
-    let mut i = 8192usize;
-    while i + 13 < size {
-        if kind_ok(db[i + 8]) && db[i - 1] == 0 {
-            let u = u32_le(db, i);
-            if u > 0 && u < UID_CEIL && u32_le(db, i - 4) != 0 {
-                *occ.entry(u).or_insert(0) += 1;
+    let parts = scan_parallel(8192, size.saturating_sub(13), |lo, hi| {
+        let mut occ: HashMap<u32, usize> = HashMap::new();
+        for i in lo..hi {
+            if kind_ok(db[i + 8]) && db[i - 1] == 0 {
+                let u = u32_le(db, i);
+                if u > 0 && u < UID_CEIL && u32_le(db, i - 4) != 0 {
+                    *occ.entry(u).or_insert(0) += 1;
+                }
             }
         }
-        i += 1;
+        occ
+    });
+    let mut occ: HashMap<u32, usize> = HashMap::new();
+    for part in parts {
+        for (u, n) in part {
+            *occ.entry(u).or_insert(0) += n;
+        }
     }
     occ
 }
@@ -1597,61 +1664,79 @@ fn read_club_names(
     let name_re = regex::Regex::new(NAME_CHARS_RE).expect("俱乐部名字符类为字面量常量");
     let letter_re = regex::Regex::new(r"\p{L}").expect("Unicode 字母类为字面量常量");
     let cap = CLUB_SCAN_CAP.min(db.len());
-    let mut club_name: HashMap<usize, String> = HashMap::new();
-    let mut idx_of: HashMap<usize, u32> = HashMap::new();
-
-    // 证据一：严格记录头 {idx}{uid}{uid}{u8}{nat}{SENT}{nat}{based}{city}{flag}{u16 0}{len}{long}{len}{short}。
-    let mut p = 64usize;
-    while p + 64 < cap && p + 64 < db.len() {
-        if u32_le(db, p + 17) == SENT {
-            let uid = u32_le(db, p + 4);
-            if uid != 0 && u32_le(db, p + 8) == uid {
-                let nat = u32_le(db, p + 21);
-                let based = u32_le(db, p + 25);
-                let city = u32_le(db, p + 29);
-                if nat > 0
-                    && nat < 400
-                    && based > 0
-                    && based < 400
-                    && city > 0
-                    && city < 400_000
-                    && u32_le(db, p + 33) < 1024
-                {
-                    let l1 = u32_le(db, p + 39);
-                    if name_at(db, p + 43, l1, &name_re, &letter_re).is_some() {
-                        let q2 = p + 43 + l1 as usize;
-                        if q2 + 4 <= db.len() {
-                            let l2 = u32_le(db, q2);
-                            if let Some(short) = name_at(db, q2 + 4, l2, &name_re, &letter_re) {
-                                club_name.insert(p + 43, short.to_string());
-                                idx_of.insert(p + 43, u32_le(db, p));
-                                p = q2 + 4 + l2 as usize;
-                                continue;
+    // 两套证据互不依赖：并行扫完后按「证据一优先、证据二补洞」合并，结果与串行完全一致。
+    let (mut club_name, idx_of, extra): (
+        HashMap<usize, String>,
+        HashMap<usize, u32>,
+        HashMap<usize, String>,
+    ) = std::thread::scope(|sc| {
+        // 证据一：严格记录头 {idx}{uid}{uid}{u8}{nat}{SENT}{nat}{based}{city}{flag}{u16 0}{len}{long}{len}{short}。
+        let head = sc.spawn(|| {
+            let mut club_name: HashMap<usize, String> = HashMap::new();
+            let mut idx_of: HashMap<usize, u32> = HashMap::new();
+            let mut p = 64usize;
+            while p + 64 < cap && p + 64 < db.len() {
+                if u32_le(db, p + 17) == SENT {
+                    let uid = u32_le(db, p + 4);
+                    if uid != 0 && u32_le(db, p + 8) == uid {
+                        let nat = u32_le(db, p + 21);
+                        let based = u32_le(db, p + 25);
+                        let city = u32_le(db, p + 29);
+                        if nat > 0
+                            && nat < 400
+                            && based > 0
+                            && based < 400
+                            && city > 0
+                            && city < 400_000
+                            && u32_le(db, p + 33) < 1024
+                        {
+                            let l1 = u32_le(db, p + 39);
+                            if name_at(db, p + 43, l1, &name_re, &letter_re).is_some() {
+                                let q2 = p + 43 + l1 as usize;
+                                if q2 + 4 <= db.len() {
+                                    let l2 = u32_le(db, q2);
+                                    if let Some(short) = name_at(db, q2 + 4, l2, &name_re, &letter_re)
+                                    {
+                                        club_name.insert(p + 43, short.to_string());
+                                        idx_of.insert(p + 43, u32_le(db, p));
+                                        p = q2 + 4 + l2 as usize;
+                                        continue;
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                p += 1;
             }
-        }
-        p += 1;
-    }
-
-    // 证据二：任意相邻的 {u32 len}{utf8}{u32 len}{utf8} 配对，补回记录头漏掉的锚点。
-    let mut q = 8usize;
-    while q < cap && q + 4 <= db.len() {
-        let l1 = u32_le(db, q - 4);
-        let mut jump: Option<usize> = None;
-        if name_at(db, q, l1, &name_re, &letter_re).is_some() {
-            let l2_at = q + l1 as usize;
-            if l2_at + 4 <= db.len() {
-                let l2 = u32_le(db, l2_at);
-                if let Some(short) = name_at(db, l2_at + 4, l2, &name_re, &letter_re) {
-                    club_name.entry(q).or_insert_with(|| short.to_string());
-                    jump = Some(l2_at + 4 + l2 as usize);
+            (club_name, idx_of)
+        });
+        // 证据二：任意相邻的 {u32 len}{utf8}{u32 len}{utf8} 配对，补回记录头漏掉的锚点。
+        let pairs = sc.spawn(|| {
+            let mut extra: HashMap<usize, String> = HashMap::new();
+            let mut q = 8usize;
+            while q < cap && q + 4 <= db.len() {
+                let l1 = u32_le(db, q - 4);
+                let mut jump: Option<usize> = None;
+                if name_at(db, q, l1, &name_re, &letter_re).is_some() {
+                    let l2_at = q + l1 as usize;
+                    if l2_at + 4 <= db.len() {
+                        let l2 = u32_le(db, l2_at);
+                        if let Some(short) = name_at(db, l2_at + 4, l2, &name_re, &letter_re) {
+                            extra.entry(q).or_insert_with(|| short.to_string());
+                            jump = Some(l2_at + 4 + l2 as usize);
+                        }
+                    }
                 }
+                q = jump.unwrap_or(q + 1);
             }
-        }
-        q = jump.unwrap_or(q + 1);
+            extra
+        });
+        let (club_name, idx_of) = head.join().unwrap();
+        (club_name, idx_of, pairs.join().unwrap())
+    });
+    for (q, short) in extra {
+        club_name.entry(q).or_insert(short);
     }
 
     let mut club_list: Vec<(usize, String, i64)> = club_name
@@ -2066,7 +2151,8 @@ fn assemble(
             ctx.clubs.cid_club.get(&cid).cloned().unwrap_or_default()
         };
         (
-            format!("{height} cm"),
+            // 0 表示记录体里没有身高：留空，别显示成「0 cm」。
+            if height == 0 { String::new() } else { format!("{height} cm") },
             club,
             ou16(db, b, ctx.ro.pl_ca).to_string(),
             ou16(db, b, ctx.ro.pl_pa).to_string(),
@@ -2083,7 +2169,12 @@ fn assemble(
     };
 
     let detailed = DetailedInfo {
-        skin_code: valid_code(skin_display(db[r + 8], eth), 0, 19),
+        // eth 超出 0..10 时肤色与种族码口径一致：同时留空，不拿回落值冒充已知。
+        skin_code: if eth > 10 {
+            String::new()
+        } else {
+            valid_code(skin_display(db[r + 8], eth), 0, 19)
+        },
         avatar: String::new(),
         is_newgan: if s.newgen { "Yes" } else { "No" }.to_string(),
         gender: gender.to_string(),
@@ -2135,6 +2226,7 @@ fn emit_records(
     staff: &HashMap<u32, Vec<StaffRec>>,
     keep_only_newgen: bool,
     cancel: &AtomicBool,
+    progress_base: usize, // 枚举阶段在总进度上的起点（0..100），见 parse_fm_save 的阶段权重
     progress: &mut dyn FnMut(usize, usize),
 ) -> EmitReport {
     let total = blocks.len();
@@ -2175,7 +2267,7 @@ fn emit_records(
             data.extend(chunk.drain(..));
         }
         if (bi + 1) % BATCH == 0 {
-            progress(bi + 1, total);
+            progress(progress_base + (100 - progress_base) * (bi + 1) / total, 100);
             if cancel.load(Ordering::Relaxed) {
                 cancelled_at = Some(bi + 1);
                 break;
@@ -2183,7 +2275,10 @@ fn emit_records(
         }
     }
     data.extend(chunk.drain(..));
-    progress(total, total);
+    // 取消时不再补报 100%：否则用户点了取消，进度条却跳到满格。
+    if cancelled_at.is_none() {
+        progress(100, 100);
+    }
     EmitReport { data, bound, dropped, filtered, empty_nat, skin_ff, cancelled_at }
 }
 
@@ -2342,6 +2437,16 @@ pub(crate) fn parse_fm_save(
         }
     };
     let db = step!(decompress_section(&path_buf, &db_entry, &version, &mut diag));
+    progress(20, 100);
+    logger.info(
+        "fm",
+        format!(
+            "game_db 解压完成：{} MB，耗时 {:.2?}",
+            db.len() / (1024 * 1024),
+            started.elapsed()
+        ),
+    );
+    let mut t_stage = Instant::now();
     let (gy, gd) = step!(game_date(&db, &path_buf, &version, &mut diag));
     let rank2code = match build_nation_index(nat, &db, &layout, logger) {
         Ok(m) => m,
@@ -2351,15 +2456,55 @@ pub(crate) fn parse_fm_save(
         }
     };
     let pools = step!(read_pools(&db, &layout, &path_buf, &version, &mut diag, logger));
+    progress(30, 100);
+    logger.info("fm", format!("国籍索引与三段名池就绪，耗时 {:.2?}", t_stage.elapsed()));
+    t_stage = Instant::now();
 
     let blocks = read_blocks(&db, &pools, gy);
     let r_arr: Vec<usize> = blocks.iter().map(|b| b.r).collect();
     let (rec, staff, counts) = read_records(&db, &layout.record_offsets);
     let slots = read_slots(&db, &rec, &staff);
     let uid_occ = uid_occurrences(&db);
+    progress(55, 100);
+    logger.info(
+        "fm",
+        format!(
+            "人员块 {}｜记录体 球员 {} / 职员 {}（kind3 {}）｜槽位 {}，耗时 {:.2?}",
+            blocks.len(),
+            counts.player,
+            counts.staff,
+            counts.kind3,
+            slots.len(),
+            t_stage.elapsed()
+        ),
+    );
+    t_stage = Instant::now();
     let uid_seq = uid_sequence_map(&slots);
     let (binding, patch) = bind_all(&slots, &r_arr, &rec, &staff, &uid_seq, &uid_occ);
+    logger.info(
+        "fm",
+        format!(
+            "人员绑定完成（绑定 {} / 补位 {} / 置换 {}），耗时 {:.2?}",
+            slots.len(),
+            patch.patched,
+            patch.displaced,
+            t_stage.elapsed()
+        ),
+    );
+    t_stage = Instant::now();
     let clubs = read_club_names(&db, &slots, &rec, &staff, logger);
+    progress(80, 100);
+    logger.info(
+        "fm",
+        format!(
+            "俱乐部索引完成（cid {} / seq {}，共扫描 {} MB），耗时 {:.2?}",
+            clubs.cid_club.len(),
+            clubs.seq_club.len(),
+            db.len().min(CLUB_SCAN_CAP) / (1024 * 1024),
+            t_stage.elapsed()
+        ),
+    );
+    t_stage = Instant::now();
 
     let mut kind_hist = [0usize; 19];
     for s in &slots {
@@ -2386,6 +2531,7 @@ pub(crate) fn parse_fm_save(
         &staff,
         keep_only_newgen,
         cancel,
+        80,
         progress,
     );
     if let Some(at) = report.cancelled_at {
@@ -2400,10 +2546,29 @@ pub(crate) fn parse_fm_save(
         return Err(log_failure(logger, &path_buf, &diag, started, err));
     }
     let EmitReport { data, bound, dropped, filtered, empty_nat, skin_ff, .. } = report;
+    // 零命中守卫：枚举不到任何人员块、或一个都没绑上，说明存档结构/版本与流水线假设不符。
+    // 这类失败原先会「成功」返回空名单并写空缓存，前端只看到一张空表，无从判断是解析失败。
+    if blocks.is_empty() || bound == 0 {
+        let detail = format!(
+            "人员枚举为空（{} 个人员块，绑定 {} 条）：存档可能损坏或版本布局不匹配，未产出任何记录",
+            total, bound
+        );
+        let err = fail(&mut diag, &path_buf, &version, STAGE_ENUM, detail);
+        return Err(log_failure(logger, &path_buf, &diag, started, err));
+    }
     drop(db);
 
     diag.person_skipped = dropped;
     emit_warnings(logger, dropped, bound, empty_nat);
+    logger.info(
+        "fm",
+        format!(
+            "扫描完成：产出 {} 条（绑定 {bound}，person 跳过 {dropped}），枚举与字段还原耗时 {:.2?}，总耗时 {:.2?}",
+            data.len(),
+            t_stage.elapsed(),
+            started.elapsed()
+        ),
+    );
 
     logger.debug(
         "fm",
@@ -2667,6 +2832,7 @@ pub(crate) mod tests {
                 &self.staff,
                 keep_only_newgen,
                 cancel,
+                80,
                 &mut progress,
             )
         }
@@ -2676,6 +2842,7 @@ pub(crate) mod tests {
     /// 关系区首字节非 0xFF 使得归化/第二国籍走空路径，字段只由 db[r+4..+9] 与 rank 决定。
     fn harness(n: usize) -> Harness {
         let mut db = vec![0u8; n * 8 + 2048];
+        let rec_body = n * 8 + 1024; // 记录体与人员块分离，避免身高/CA 等偏移写串相邻块
         let mut blocks = Vec::with_capacity(n);
         let mut binding = Vec::with_capacity(n);
         let mut rec = HashMap::new();
@@ -2707,8 +2874,10 @@ pub(crate) mod tests {
                 gender_bit: i % 4 == 0,
                 newgen: i % 3 == 0,
             }));
-            rec.insert(i as u32, PlayerRec { b: r, self_uid: uid });
+            rec.insert(i as u32, PlayerRec { b: rec_body, self_uid: uid });
         }
+        // 记录体统一放在块区之外的一块安全区域：身高写 180，保证「有效列不被恒空列抹掉」可断言。
+        db[rec_body + 122..rec_body + 124].copy_from_slice(&180u16.to_le_bytes());
         Harness {
             db,
             pools: empty_pools(),

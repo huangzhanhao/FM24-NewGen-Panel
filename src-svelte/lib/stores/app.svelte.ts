@@ -324,23 +324,25 @@ export async function initListeners(onFinished: (r: ReplaceResult) => Promise<vo
     appStore.task = e.payload;
   });
   // 替换完成：记结果、刷新快照（replacing 变 false）、按需打缓存标记、排进度清空、回调弹窗。
-  await listen<{ result: Exclude<ReplaceResult, ''>; roster: RtfScanResult | null }>(
-    'replace:finished',
-    async (e) => {
-      appStore.lastResult = e.payload.result;
-      // 「缓存已填充」标记只在成功时打：失败/取消保留替换前的摘要与预览，用户不必重扫（详见 markRosterFilled）。
-      if (e.payload.result === 'finished') {
-        markRosterFilled(e.payload.roster);
-      }
-      await refreshSnapshot();
-      if (e.payload.result === 'finished') {
-        const xmlPath = appStore.snapshot?.configXml?.path;
-        if (xmlPath) markSnapshotRead(xmlPath);
-      }
-      scheduleBarClear(); // 跑完（成功/失败/取消都一样）把进度条留 20 秒再清回「就绪」
-      await onFinished(e.payload.result);
-    },
-  );
+  await listen<{
+    result: Exclude<ReplaceResult, ''>;
+    roster: RtfScanResult | null;
+    source?: { kind: 'rtf' | 'fm'; path: string } | null;
+  }>('replace:finished', async (e) => {
+    appStore.lastResult = e.payload.result;
+    // 「缓存已填充」标记只在成功时打：失败/取消保留替换前的摘要与预览，用户不必重扫（详见 markRosterFilled）。
+    // source 仅在本次线程内自动扫描时非空：补上来源标记；命中缓存时为 null，沿用扫描时记下的那份。
+    if (e.payload.result === 'finished') {
+      markRosterFilled(e.payload.roster, e.payload.source ?? undefined);
+    }
+    await refreshSnapshot();
+    if (e.payload.result === 'finished') {
+      const xmlPath = appStore.snapshot?.configXml?.path;
+      if (xmlPath) markSnapshotRead(xmlPath);
+    }
+    scheduleBarClear(); // 跑完（成功/失败/取消都一样）把进度条留 20 秒再清回「就绪」
+    await onFinished(e.payload.result);
+  });
   // 日志批量事件：新日志追写到前端列表。
   await listen<import('../types').LogLine[]>('log:batch', (e) => {
     appendLogBatch(e.payload);

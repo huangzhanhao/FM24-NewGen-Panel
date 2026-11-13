@@ -47,15 +47,15 @@ impl PackLayout {
 /// 输入是「一级子目录名」与「多级相对路径」（递归池的键，或浅层遍历得到的路径）。
 /// 输出扣掉两类条目：
 ///   ① 包根 `""` —— 它不是目录名，放进白名单比对只会制造假 Unknown；
-///   ② **纯容器目录**（`WF` / `Staff` / `Staff/African`：自身只是给子树提供路径前缀）
+///   ② **纯容器目录**（`WF` / `Staff`：自身只是给子树提供路径前缀，且**不在任何 FolderList 里**）
 ///      —— 不扣的话，带 `WF/<ethnic>` 子树的包会因多出一个 `WF` 名字而在子集轮里落空。
-///      判定「是容器」只用一条规则：存在别的键以它为前缀（`k + "/"`）。
-///
-/// 【为什么不看有没有图】`classify` 的输入本来就只有名字；把「有没有图」也纳入判定口径，
-/// 会让「目录建了但还空着」的包在两种口径间来回跳。
+///      只扣「非白名单名」：标准二的 `African` 本身是白名单条目，当它下面再分
+///      `African/African1` 子目录（GUNZO 编号包）时若一并扣掉，14 项目录全部消失 → 整包误判 Unknown。
+///      判定「是容器」因此需要两条：存在别的键以它 + "/" 为前缀，且它不在任何标准的 FolderList 中。
 fn effective_dirs<'a>(
     subdirs: &'a BTreeSet<String>,
     pool_keys: &'a BTreeSet<String>,
+    configured: &BTreeSet<&str>,
 ) -> BTreeSet<&'a str> {
     let containers: BTreeSet<&str> = pool_keys
         .iter()
@@ -65,7 +65,16 @@ fn effective_dirs<'a>(
         .iter()
         .map(String::as_str)
         .chain(subdirs.iter().map(String::as_str))
-        .filter(|n| !n.is_empty() && !containers.contains(*n))
+        .filter(|n| !n.is_empty() && (!containers.contains(*n) || configured.contains(*n)))
+        .collect()
+}
+
+/// 所有标准 FolderList 的目录名并集：判定「纯容器」时用来排除本身是白名单条目的目录
+/// （如 `African` 虽是 `African/African1` 的前缀，但它本身必须留在判定集里）。
+fn configured_names<'b>(folder_lists: &'b [(u8, &Vec<String>)]) -> BTreeSet<&'b str> {
+    folder_lists
+        .iter()
+        .flat_map(|(_, folders)| folders.iter().map(String::as_str))
         .collect()
 }
 
@@ -89,7 +98,7 @@ pub fn classify(
     if subdirs.is_empty() {
         return if has_root_images { PackLayout::Flat } else { PackLayout::Empty };
     }
-    let names = effective_dirs(subdirs, pool_keys);
+    let names = effective_dirs(subdirs, pool_keys, &configured_names(folder_lists));
     // 第一轮：超集判定（包含某标准全部目录 → 归属且视为完整；超集之间互斥——两份清单交集为 0）。
     // complete = 标准配置的全部目录都在包内（S 可以多出 extra 目录，由调用方按 FolderList 排除）。
     for (n, folders) in folder_lists {
@@ -676,6 +685,12 @@ mod tests {
         assert_eq!(classify_with(&["African", "China"], false), PackLayout::Unknown);
         assert_eq!(classify_with(&["Scandinavian"], false),
                    PackLayout::Standard { standard: 2, complete: false });
+        // ⑥ 标准二的种族目录下再分子目录（GUNZO 编号包，如 African/African1）：
+        //    种族名本身是白名单条目，不能因为「有子目录」就被当纯容器剥掉，否则整包误判 Unknown。
+        assert_eq!(
+            classify_with_pools(&all, &["African/African1", "Asian/Asian1"], false),
+            PackLayout::Standard { standard: 2, complete: true }
+        );
     }
 
     #[test]

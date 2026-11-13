@@ -44,8 +44,9 @@ pub struct AppState {
     pub logger: Arc<Logger>,       // 日志门面（Arc 跨线程共享；写入走 log 门面，回查走内存缓冲）
     pub cancel: Arc<AtomicBool>,   // 请求取消标志
     pub running: Arc<AtomicBool>,  // 是否正在替换
-    pub rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>, // 最近一次解析的球员缓存（作用域见 clear_caches_if_scope_changed）
+    pub rtf_cache: Arc<Mutex<Arc<Vec<PlayerRecord>>>>, // 最近一次解析的球员缓存（Arc 句柄：流水线只克隆指针，不整表复制；作用域见 clear_caches_if_scope_changed）
     pub roster_meta: Arc<Mutex<Option<RosterSummary>>>, // 最近一次扫描的名单摘要伴随态（与 rtf_cache 同生共死；None=本会话未扫描）
+    pub roster_origin: Arc<Mutex<Option<RosterOrigin>>>, // 名单缓存的来源（kind + 扫描当时的路径；与 rtf_cache 同生共死，替换前据此判断能否复用）
     pub mapping_cache: Arc<Mutex<Vec<MappingEntry>>>, // 最近一次生成的映射缓存（同上；两者切档/切组/换名单一律清空）
     pub faces_cache: Arc<Mutex<Option<FaceIndex>>>, // 「扫描头像」的包索引缓存（替换可复用）
     pub snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>, // 快照解析缓存（快照预览分页复用；「读取快照」与替换收尾都会写）
@@ -89,9 +90,10 @@ fn clear_caches_if_scope_changed(state: &State<'_, AppState>, before: (String, O
     if after == before {
         return; // 作用域没变（例如删的是别的组）：手上这份缓存仍然对应当前档当前组
     }
-    state.rtf_cache.lock().unwrap().clear();
+    *state.rtf_cache.lock().unwrap() = Arc::new(Vec::new());
     state.mapping_cache.lock().unwrap().clear();
     *state.roster_meta.lock().unwrap() = None;
+    *state.roster_origin.lock().unwrap() = None;
 }
 
 /// 轻量任务（检查完整性 / 扫描头像 / 扫描RTF / 读取快照）的进度载荷：
@@ -142,6 +144,11 @@ impl TaskProgress {
             ((current * 100) / total).min(100) as u8
         };
         self.emit(value);
+    }
+
+    /// 开始上报 0%：点击后立刻在状态栏显示任务名，避免长解析期间看起来毫无响应。
+    fn begin(&mut self) {
+        self.emit(0);
     }
 
     /// 收尾上报 100%：命令成功返回前必须调一次，否则总数为 0 或任务过快时进度条会停在半路。
@@ -554,8 +561,10 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
     let mut progress = TaskProgress::new(&app, "扫描RTF");
     let t = Instant::now(); // 解析耗时（识别 + 全量解析），与替换流水线同一段同口径
     let (summary, data, counts) = scan_rtf_core(&rtf, nat, &*state.logger, &mut |done, total| progress.report(done, total))?;
-    *state.rtf_cache.lock().unwrap() = data; // 名单预览（query_players）直接读这份缓存（全字段）
+    *state.rtf_cache.lock().unwrap() = Arc::new(data); // 名单预览（query_players）直接读这份缓存（全字段）
     *state.roster_meta.lock().unwrap() = Some(summary.clone()); // 摘要伴随态：与缓存同生共死（读取侧格式三件套的来源）
+    // 来源记录同样随缓存在此落位：替换前按它判断能否复用（缓存没有路径键，只能靠这份记录判归属）。
+    *state.roster_origin.lock().unwrap() = Some(RosterOrigin { kind: "rtf", path: rtf.clone() });
     state.logger.info(
         "scan",
         format!(
@@ -573,7 +582,8 @@ pub async fn scan_rtf(app: AppHandle, state: State<'_, AppState>) -> Result<Rost
 }
 
 /// 「扫描FM存档」：解析当前组 .fm 存档（全量混合名单）并填充名单缓存，结果写日志。
-/// CPU 密集（真档实测 60 s 级）但沿用 scan_rtf 的 async 外壳；实测若阻塞界面再改 spawn_blocking（§4.2 口径）。
+/// CPU 密集且耗时在几十秒级：解析放 spawn_blocking 后台线程，避免占住 async 运行时；
+/// 解析器按阶段上报 20/30/55/80/100，并逐阶段写 INFO 日志（前端日志抽屉可实时看到进展）。
 /// 失败在写缓存之前返回：三要素 Err 由 parse_fm_save 产出（完整上下文 Error 日志也在其内部），不返回部分结果。
 #[tauri::command]
 pub async fn scan_fm(app: AppHandle, state: State<'_, AppState>) -> Result<RosterSummary, String> {
@@ -586,18 +596,33 @@ pub async fn scan_fm(app: AppHandle, state: State<'_, AppState>) -> Result<Roste
     }
     // 与 scan_rtf 同款：扫描前重读国籍对照表，改坏直接报错，不拿旧表静默解析出缺行的名单。
     let nat = nationality::refresh(&state.data_dir)?;
+    let logger = state.logger.clone();
     let mut progress = TaskProgress::new(&app, "扫描FM存档");
+    // 先落 0% 与一条开始日志：解压 game_db 的几十秒里至少看得到任务名与阶段日志。
+    progress.begin();
+    logger.info("scan", format!("开始扫描 FM 存档：{fm}"));
     let t = Instant::now();
-    let (data, summary, counts) = crate::fm_parser::parse_fm_save(
-        Path::new(&fm),
-        &nat,
-        false,
-        &*state.logger,
-        &AtomicBool::new(false),
-        &mut |done, total| progress.report(done, total),
-    )?;
-    *state.rtf_cache.lock().unwrap() = data;
+    let fm_path = Path::new(&fm).to_path_buf();
+    let parsed = tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::fm_parser::parse_fm_save(
+            &fm_path,
+            &nat,
+            false,
+            &*logger,
+            &AtomicBool::new(false),
+            &mut |done, total| progress.report(done, total),
+        );
+        if result.is_ok() {
+            progress.finish();
+        }
+        result
+    })
+    .await
+    .map_err(|e| format!("扫描 FM 存档的后台线程异常退出：{e}"))?;
+    let (data, summary, counts) = parsed?;
+    *state.rtf_cache.lock().unwrap() = Arc::new(data);
     *state.roster_meta.lock().unwrap() = Some(summary.clone()); // 与 scan_rtf 同款：摘要随缓存一并落位
+    *state.roster_origin.lock().unwrap() = Some(RosterOrigin { kind: "fm", path: fm.clone() });
     state.logger.info(
         "scan",
         format!(
@@ -610,7 +635,6 @@ pub async fn scan_fm(app: AppHandle, state: State<'_, AppState>) -> Result<Roste
             t.elapsed()
         ),
     );
-    progress.finish();
     Ok(summary)
 }
 
@@ -637,6 +661,25 @@ pub struct ReplaceArgs {
     /// 用户已在发起前的预检（`preflight_replace`）里确认过「本次可能把本档既有映射清空」。
     /// 前端只在预检要求确认、且用户点了确认时才置 true——它不能由界面勾选，否则等于没有守卫。
     pub allow_blank: bool,
+    /// 名单读取来源（"rtf" | "fm"）：决定本次替换从哪份名单读数据。
+    /// 缺省按 "rtf"，与界面默认选中一致；其余值由 parse_roster_source 拒绝。
+    #[serde(default = "default_roster_source")]
+    pub roster_source: String,
+}
+
+/// ReplaceArgs.roster_source 的缺省值（旧前端未传时按 RTF，与界面默认选中一致）。
+fn default_roster_source() -> String {
+    "rtf".into()
+}
+
+/// 名单来源的协议值归一：空串/"rtf" → "rtf"，"fm" → "fm"（大小写不敏感），其余一律报错。
+/// 返回 &'static str 便于直接作为 RosterOrigin.kind 与日志/事件里的来源标记。
+fn parse_roster_source(raw: &str) -> Result<&'static str, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "rtf" => Ok("rtf"),
+        "fm" => Ok("fm"),
+        other => Err(format!("未知的名单来源：{other}")),
+    }
 }
 
 /// 「发起前预检」的返回体（对应前端 preflight_replace）。
@@ -698,16 +741,20 @@ struct ReplaceCtx {
     cancel: Arc<AtomicBool>,
     /// 唯一的 running 复位出口：线程函数返回（正常或 unwind）时 Drop。
     _running: RunningGuard,
-    rtf_cache: Arc<Mutex<Vec<PlayerRecord>>>,
+    rtf_cache: Arc<Mutex<Arc<Vec<PlayerRecord>>>>,
     mapping_cache: Arc<Mutex<Vec<MappingEntry>>>,
     faces_cache: Arc<Mutex<Option<FaceIndex>>>,
     snapshot_cache: Arc<Mutex<Option<SnapshotCache>>>,
     snapshot_path: Option<PathBuf>,
-    /// 线程内缓存保障（自动扫描）所需的三个来源量：数据目录（国籍表/规则在其下）、
-    /// RTF 与 FM 存档路径。缓存为空时按「RTF 优先于 FM」补扫一次。
+    /// 线程内缓存保障（自动扫描）所需的来源量：数据目录（国籍表/规则在其下）、
+    /// 本次所选名单来源（"rtf" | "fm"）、RTF 与 FM 存档路径。
+    /// 缓存为空或缓存来源与所选来源不符时，按所选来源补扫一次。
     data_dir: PathBuf,
     rtf_path: String,
     fm_path: String,
+    want_roster_kind: &'static str,
+    /// 名单缓存的来源（kind + 扫描当时的路径）：与 rtf_cache 同生共死，判断能否复用。
+    roster_origin: Arc<Mutex<Option<RosterOrigin>>>,
     /// 名单摘要伴随态：与 rtf_cache 同生共死；缓存非空而摘要缺失时走兜底（见 fallback_roster_meta）。
     roster_meta: Arc<Mutex<Option<RosterSummary>>>,
     /// 占位名单：命令主体不解析（会阻塞界面数十秒），线程内缓存保障完成后覆写 roster/roster_meta。
@@ -727,77 +774,122 @@ fn fallback_roster_meta(roster: &[PlayerRecord]) -> RosterSummary {
     }
 }
 
-/// 唯一的命令级替换 Err：缓存空且 RTF 与 FM 存档路径都未设置（线程内自动扫描无来源可扫）。
+/// 唯一的命令级替换 Err：用户所选来源没有路径可读（线程内自动扫描无来源可扫）。
+/// 【为何不能拿另一份顶替】选了「从 .fm 存档读」却没设 .fm 时，若复用 RTF 缓存，
+/// 界面显示读的是 .fm、实际用的却是 RTF——静默错源比报错更危险。
 /// 独立成函数是为了把触发条件与文案锁进单测（State/AppHandle 在测试里无法构造）。
-fn missing_roster_err(cache_empty: bool, rtf_path: &str, fm_path: &str) -> Option<String> {
-    (cache_empty && rtf_path.is_empty() && fm_path.is_empty()).then(|| "请先设置名单文件".to_string())
+fn missing_roster_err(want_kind: &str, rtf_path: &str, fm_path: &str) -> Option<String> {
+    let source = if want_kind == "fm" { fm_path } else { rtf_path };
+    source.is_empty().then(|| {
+        if want_kind == "fm" {
+            "请先选择 FM 存档".to_string()
+        } else {
+            "请先选择 RTF 名单".to_string()
+        }
+    })
 }
 
-/// 线程内缓存保障核心：`rtf_cache` 为空时按已设名单路径自动扫描一次（RTF 优先于 FM），
-/// 成功后写两份缓存并返回快照；缓存已非空时直接取快照（摘要缺失走兜底 + WARN）。
+/// 名单数据的来源（线程内自动扫描带出）：替换成功事件据此补报来源，
+/// 前端把「名单已填充」的来源标记一并补上，避免自动扫描后来源未知。
+/// 命中缓存时为 None——沿用扫描时记下的那份，不覆盖。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterOrigin {
+    pub kind: &'static str, // "rtf" | "fm"
+    pub path: String,
+}
+
+/// 线程内缓存保障核心：缓存为空**或缓存来源与所选来源不符**时，按所选来源扫描一次，
+/// 成功后写两份缓存与来源记录并返回快照；命中缓存时直接取快照（摘要缺失走兜底 + WARN）。
+/// 返回值第三项是本次自动扫描的来源（命中缓存为 None，见 RosterOrigin）。
+/// 【为何要比对来源】缓存只按「档 + 组 + RTF 路径」归属（见 cache_scope），不随 .fm 路径变化；
+/// 用户在面板上切换「RTF 读 / .fm 读」后，缓存里可能还是另一份名单。不比来源就会
+/// 「选了 .fm 却拿 RTF 数据去换」，结果看似成功、实际错源。
 /// 失败返回 Err（文案含来源与「自动扫描」标注），调用方只能经 replace:finished(failed) 转达。
-/// cancel 必须一路透传：.fm 自动扫描是 45–90 s 的阻塞段，不透传则用户点取消要等扫描跑完才生效。
+/// cancel 必须一路透传：.fm 自动扫描是数十秒的阻塞段，不透传则用户点取消要等扫描跑完才生效。
 /// progress_once 由调用方在扫描开始前上报一次（值收口在 STAGE_RTF 之前，见 body）。
 fn ensure_roster_cache(
-    rtf_cache: &Arc<Mutex<Vec<PlayerRecord>>>,
+    rtf_cache: &Arc<Mutex<Arc<Vec<PlayerRecord>>>>,
     roster_meta: &Arc<Mutex<Option<RosterSummary>>>,
+    roster_origin: &Arc<Mutex<Option<RosterOrigin>>>,
+    want_kind: &'static str,
     rtf_path: &str,
     fm_path: &str,
     data_dir: &Path,
     logger: &impl LogSink,
     cancel: &AtomicBool,
     progress_once: &mut dyn FnMut(),
-) -> Result<(Arc<Vec<PlayerRecord>>, RosterSummary), String> {
-    let cached: Option<Vec<PlayerRecord>> = {
+) -> Result<(Arc<Vec<PlayerRecord>>, RosterSummary, Option<RosterOrigin>), String> {
+    // 所选来源必须有路径，否则直接报错（缺路径时不拿另一份名单顶替，见 missing_roster_err）。
+    if let Some(msg) = missing_roster_err(want_kind, rtf_path, fm_path) {
+        return Err(msg);
+    }
+    let source = if want_kind == "fm" { fm_path } else { rtf_path };
+    // 只克隆 Arc 句柄：整份名单（可达数万行）不再逐次深拷贝。
+    let cached: Option<Arc<Vec<PlayerRecord>>> = {
         let cache = rtf_cache.lock().unwrap();
-        (!cache.is_empty()).then(|| cache.clone())
+        (!cache.is_empty()).then(|| Arc::clone(&*cache))
     };
-    let (roster, meta) = match cached {
+    // 缓存来源必须与本次所选来源一致（kind 与路径都对）才复用。
+    let origin_matches = roster_origin
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|o| o.kind == want_kind && o.path == source);
+    if cached.is_some() && !origin_matches {
+        logger.info(
+            "replace",
+            format!("名单缓存来源不符（本次要求：{want_kind} / {source}），将按所选来源重新扫描"),
+        );
+    }
+    let cached = if origin_matches { cached } else { None };
+    let (roster, meta, origin) = match cached {
         Some(roster) => {
             let meta = roster_meta.lock().unwrap().clone();
             match meta {
-                Some(m) => (roster, m),
+                Some(m) => (roster, m, None),
                 None => {
                     // 缓存非空而摘要缺失：兜底摘要保证流水线有格式口径可带，不中断流程。
                     logger.warn("replace", "名单摘要缺失，使用兜底摘要");
                     let meta = fallback_roster_meta(&roster);
-                    (roster, meta)
+                    (roster, meta, None)
                 }
             }
         }
         None => {
-            // 命令级 Err 已拦「两条路径都空」，到这里必有其一；RTF 先于 FM 是既有用户习惯的延续。
             progress_once();
-            let source = if rtf_path.is_empty() { fm_path } else { rtf_path };
             let nat = nationality::refresh(data_dir)
                 .map_err(|e| format!("国籍对照表读取失败（替换前自动扫描，来源：{source}）：{e}"))?;
-            let (data, summary) = if !rtf_path.is_empty() {
+            let (data, summary) = if want_kind == "rtf" {
                 // RTF 自动扫描沿用既有「RTF 格式不合法」文案（不套 .fm 三要素），标注自动扫描与来源。
-                let (summary, data, _) = scan_rtf_core(rtf_path, nat, logger, &mut |_, _| {})
-                    .map_err(|e| format!("{e}（替换前自动扫描，来源：{rtf_path}）"))?;
+                let (summary, data, _) = scan_rtf_core(source, nat, logger, &mut |_, _| {})
+                    .map_err(|e| format!("{e}（替换前自动扫描，来源：{source}）"))?;
                 (data, summary)
             } else {
                 let (data, summary, _) = crate::fm_parser::parse_fm_save(
-                    Path::new(fm_path),
+                    Path::new(source),
                     &nat,
                     false,
                     logger,
                     cancel,
                     &mut |_, _| {},
                 )
-                .map_err(|e| format!("{e}（替换前自动扫描，来源：{fm_path}）"))?;
+                .map_err(|e| format!("{e}（替换前自动扫描，来源：{source}）"))?;
                 (data, summary)
             };
-            *rtf_cache.lock().unwrap() = data.clone();
+            let data = Arc::new(data);
+            *rtf_cache.lock().unwrap() = Arc::clone(&data);
             *roster_meta.lock().unwrap() = Some(summary.clone());
+            let origin = RosterOrigin { kind: want_kind, path: source.to_string() };
+            *roster_origin.lock().unwrap() = Some(origin.clone());
             logger.info(
                 "replace",
                 format!("自动扫描完成（来源：{source}）：{} 条已入名单缓存", summary.total),
             );
-            (data, summary)
+            (data, summary, Some(origin))
         }
     };
-    Ok((Arc::new(roster), meta))
+    Ok((roster, meta, origin))
 }
 
 /// 缓存被 panic 毒化时才作废（未中毒的保留原样）。
@@ -815,7 +907,7 @@ fn wipe_if_poisoned<T: Default>(cell: &Mutex<T>) -> bool {
 impl ReplaceCtx {
     /// 线程正常路径：先做缓存保障 → 比对目录签名决定复用还是现扫 → 跑流水线 → 收尾写缓存/同步快照 → 发完成事件。
     fn body(&mut self) {
-        // 【线程内缓存保障】缓存为空时按已设名单路径自动扫描一次（RTF 优先于 FM），再跑流水线。
+        // 【线程内缓存保障】缓存为空或来源不符时，按用户所选来源自动扫描一次，再跑流水线。
         // 失败的错误此时不可能再作为命令 Err 回传（命令主体早已同步返回 Ok），
         // 只能经 replace:finished(failed) + Error 日志转达；不调 run()、不写 config.xml。
         // 扫描期间点了取消则不算失败：终态报 cancelled，用户主动中止不该被描述成出错。
@@ -824,6 +916,8 @@ impl ReplaceCtx {
         let filled = ensure_roster_cache(
             &self.rtf_cache,
             &self.roster_meta,
+            &self.roster_origin,
+            self.want_roster_kind,
             &self.rtf_path,
             &self.fm_path,
             &self.data_dir,
@@ -847,7 +941,7 @@ impl ReplaceCtx {
                 );
             },
         );
-        let (roster, meta) = match filled {
+        let (roster, meta, origin) = match filled {
             Ok(v) => v,
             Err(msg) => {
                 // 取消时 parse_fm_save 内部的 log_failure 已留了带「已取消」的终止行，这里不再重复记 ERROR，
@@ -979,7 +1073,11 @@ impl ReplaceCtx {
         self.logger.info("replace", format!("收尾完成：耗时 {:.1?}（写缓存 + 快照同步）", t_tail.elapsed()));
         // 先复位再 emit：因为 emit 可能被主线程按住，而界面解锁只认这次 finished 事件。
         self._running.release();
-        let _ = self.app.emit("replace:finished", serde_json::json!({ "result": result_str, "roster": roster }));
+        // source 仅在本次线程内自动扫描时非空：前端据此补上名单来源标记；命中缓存时为 null，沿用旧来源。
+        let _ = self.app.emit(
+            "replace:finished",
+            serde_json::json!({ "result": result_str, "roster": roster, "source": origin }),
+        );
     }
 
     /// 线程 panic 后的补救：留 ERROR、作废被毒化的缓存、补发 finished{failed} 让前端解锁。
@@ -1094,9 +1192,10 @@ pub fn start_replace(app: AppHandle, state: State<'_, AppState>, args: ReplaceAr
     let Some(img_dir) = img_dir else {
         return Err("请先选择头像包目录".into());
     };
-    // 唯一的命令级 Err 分支（可弹窗）：缓存空且两条名单路径都空。不启动线程、不写 config.xml；
-    // 任一非空时由线程内缓存保障自动补齐（见 ReplaceCtx::body），其失败走 replace:finished(failed)。
-    if let Some(msg) = missing_roster_err(state.rtf_cache.lock().unwrap().is_empty(), &rtf_path, &fm_path) {
+    // 名单读取来源：'rtf' | 'fm'（非法值直接报错）。命令级校验只拦「所选来源没有路径」，
+    // 缓存为空或来源不符时由线程内缓存保障按所选来源自动补齐（见 ReplaceCtx::body）。
+    let want_roster_kind = parse_roster_source(&args.roster_source)?;
+    if let Some(msg) = missing_roster_err(want_roster_kind, &rtf_path, &fm_path) {
         return Err(msg);
     }
     let mode = Mode::parse(&args.mode)?;
@@ -1135,6 +1234,8 @@ pub fn start_replace(app: AppHandle, state: State<'_, AppState>, args: ReplaceAr
         data_dir: state.data_dir.clone(),
         rtf_path,
         fm_path,
+        want_roster_kind,
+        roster_origin: state.roster_origin.clone(),
         roster_meta: state.roster_meta.clone(),
         params,
     };
@@ -1520,7 +1621,7 @@ pub async fn query_avatars(
 /// 验证分块完整性的基准与单测入口，不再由前端调用。
 #[tauri::command]
 pub fn query_players(state: State<'_, AppState>) -> Vec<PlayerRecord> {
-    state.rtf_cache.lock().unwrap().clone()
+    state.rtf_cache.lock().unwrap().as_ref().clone()
 }
 
 /// 分块查询返回体：一批名单记录 + 缓存总条数。前端逐块校验 total 一致，聚合完才上屏。
@@ -1540,7 +1641,7 @@ pub fn query_players_chunk(state: State<'_, AppState>, offset: usize, limit: usi
 }
 
 /// query_players_chunk 的切片主体（State 不可在单测构造，抽出可测部分锁死边界行为）。
-fn query_players_chunk_of(cache: &Mutex<Vec<PlayerRecord>>, offset: usize, limit: usize) -> PlayerChunk {
+fn query_players_chunk_of(cache: &Mutex<Arc<Vec<PlayerRecord>>>, offset: usize, limit: usize) -> PlayerChunk {
     let lim = limit.clamp(1, 65536);
     let cache = cache.lock().unwrap();
     let total = cache.len();
@@ -2987,14 +3088,32 @@ mod tests {
     }
 
     #[test]
-    fn start_replace_both_paths_empty_returns_err_no_thread() {
-        // 唯一命令级 Err（可弹窗）：缓存空且两条名单路径都空。该判定在 start_replace 里位于
+    fn start_replace_missing_source_path_returns_err_no_thread() {
+        // 命令级 Err（可弹窗）：用户所选来源没有路径可读。该判定在 start_replace 里位于
         // 线程 spawn 与 config.xml 写盘之前（img_dir 校验之后），返回 Err 即不启动线程、不落任何产物；
         // State/AppHandle 不可在单测构造，这里锁死判定本身（触发条件 + 文案）。
-        assert_eq!(missing_roster_err(true, "", ""), Some("请先设置名单文件".to_string()));
-        assert_eq!(missing_roster_err(false, "", ""), None, "缓存非空：无需来源，直接放行");
-        assert_eq!(missing_roster_err(true, "D:/x/list.rtf", ""), None, "RTF 路径在：线程内可自动扫描");
-        assert_eq!(missing_roster_err(true, "", "D:/x/save.fm"), None, "FM 存档路径在：线程内可自动扫描");
+        assert_eq!(missing_roster_err("rtf", "", ""), Some("请先选择 RTF 名单".to_string()));
+        assert_eq!(missing_roster_err("fm", "", ""), Some("请先选择 FM 存档".to_string()));
+        assert_eq!(missing_roster_err("rtf", "D:/x/list.rtf", ""), None, "RTF 路径在：线程内可自动扫描");
+        assert_eq!(missing_roster_err("fm", "", "D:/x/save.fm"), None, "FM 存档路径在：线程内可自动扫描");
+        assert_eq!(
+            missing_roster_err("rtf", "", "D:/x/save.fm"),
+            Some("请先选择 RTF 名单".to_string()),
+            "选了 RTF 但 RTF 路径为空：不能拿 FM 顶替"
+        );
+        assert_eq!(
+            missing_roster_err("fm", "D:/x/list.rtf", ""),
+            Some("请先选择 FM 存档".to_string()),
+            "选了 .fm 但 .fm 路径为空：不能拿 RTF 顶替"
+        );
+    }
+
+    #[test]
+    fn parse_roster_source_normalizes_and_rejects_unknown() {
+        assert_eq!(parse_roster_source("").unwrap(), "rtf", "缺省按 RTF");
+        assert_eq!(parse_roster_source("rtf").unwrap(), "rtf");
+        assert_eq!(parse_roster_source(" FM ").unwrap(), "fm", "大小写与空白不敏感");
+        assert!(parse_roster_source("xml").unwrap_err().contains("未知的名单来源"));
     }
 
     #[test]
@@ -3003,13 +3122,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rtf = basic_rtf(dir.path());
         let img = std2_pack(dir.path());
-        let rtf_cache = Arc::new(Mutex::new(Vec::new()));
+        let rtf_cache = Arc::new(Mutex::new(Arc::new(Vec::new())));
         let roster_meta = Arc::new(Mutex::new(None));
+        let roster_origin = Arc::new(Mutex::new(None));
         let (logger, log_rx) = ChannelLogger::channel();
         let mut progress_reports = 0usize;
-        let (roster, meta) = ensure_roster_cache(
+        let (roster, meta, origin) = ensure_roster_cache(
             &rtf_cache,
             &roster_meta,
+            &roster_origin,
+            "rtf",
             rtf.to_str().unwrap(),
             "",
             dir.path(),
@@ -3021,7 +3143,13 @@ mod tests {
         assert_eq!(rtf_cache.lock().unwrap().len(), 2, "自动扫描应把两行名单写入缓存");
         assert_eq!(roster.len(), 2);
         assert_eq!(meta.total, 2);
+        assert_eq!(origin, Some(RosterOrigin { kind: "rtf", path: rtf.to_string_lossy().to_string() }));
         assert_eq!(roster_meta.lock().unwrap().as_ref().unwrap().total, 2, "摘要伴随态随缓存落位");
+        assert_eq!(
+            roster_origin.lock().unwrap().as_ref().map(|o| o.kind),
+            Some("rtf"),
+            "来源记录随缓存落位（替换前据此判断能否复用）"
+        );
         assert!(progress_reports <= 1, "自动扫描进度只允许上报一次（收口在 STAGE_RTF 之前，R10）");
         // 补好的快照驱动替换照常完成。
         let params = ReplaceParams {
@@ -3058,12 +3186,15 @@ mod tests {
         let fm = dir.path().join("minimal.fm");
         crate::fm_parser::tests::write_minimal_fm(&fm);
         let img = std2_pack(dir.path());
-        let rtf_cache = Arc::new(Mutex::new(Vec::new()));
+        let rtf_cache = Arc::new(Mutex::new(Arc::new(Vec::new())));
         let roster_meta = Arc::new(Mutex::new(None));
+        let roster_origin = Arc::new(Mutex::new(None));
         let (logger, _log_rx) = ChannelLogger::channel();
-        let (roster, meta) = ensure_roster_cache(
+        let (roster, meta, origin) = ensure_roster_cache(
             &rtf_cache,
             &roster_meta,
+            &roster_origin,
+            "fm",
             "",
             fm.to_str().unwrap(),
             dir.path(),
@@ -3072,6 +3203,7 @@ mod tests {
             &mut || {},
         )
         .unwrap();
+        assert_eq!(origin, Some(RosterOrigin { kind: "fm", path: fm.to_string_lossy().to_string() }));
         assert_eq!(rtf_cache.lock().unwrap().len(), 1, "最小 .fm 应解析出 1 人");
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].uid, "r-42");
@@ -3106,12 +3238,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad_rtf = dir.path().join("bad.rtf");
         std::fs::write(&bad_rtf, "乱七八糟没有数据行").unwrap();
-        let rtf_cache = Arc::new(Mutex::new(Vec::new()));
+        let rtf_cache = Arc::new(Mutex::new(Arc::new(Vec::new())));
         let roster_meta = Arc::new(Mutex::new(None));
+        let roster_origin = Arc::new(Mutex::new(None));
         let (logger, _log_rx) = ChannelLogger::channel();
         let err = ensure_roster_cache(
             &rtf_cache,
             &roster_meta,
+            &roster_origin,
+            "rtf",
             bad_rtf.to_str().unwrap(),
             "",
             dir.path(),
@@ -3130,6 +3265,8 @@ mod tests {
         let err2 = ensure_roster_cache(
             &rtf_cache,
             &roster_meta,
+            &roster_origin,
+            "fm",
             "",
             bad_fm.to_str().unwrap(),
             dir.path(),
@@ -3150,18 +3287,92 @@ mod tests {
     }
 
     #[test]
+    fn ensure_roster_cache_rescans_when_source_switches() {
+        // 缓存先由 RTF 填充，随后用户切到「从 .fm 读」：来源不符必须按 .fm 重扫，
+        // 不能把 RTF 的名单当成 .fm 的用（错源不会有任何报错，是最难发现的一类问题）。
+        let dir = tempfile::tempdir().unwrap();
+        let rtf = basic_rtf(dir.path());
+        let fm = dir.path().join("minimal.fm");
+        crate::fm_parser::tests::write_minimal_fm(&fm);
+        let rtf_cache = Arc::new(Mutex::new(Arc::new(Vec::new())));
+        let roster_meta = Arc::new(Mutex::new(None));
+        let roster_origin = Arc::new(Mutex::new(None));
+        let (logger, log_rx) = ChannelLogger::channel();
+
+        let (roster, _, _) = ensure_roster_cache(
+            &rtf_cache,
+            &roster_meta,
+            &roster_origin,
+            "rtf",
+            rtf.to_str().unwrap(),
+            "",
+            dir.path(),
+            &logger,
+            &AtomicBool::new(false),
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(roster.len(), 2, "先由 RTF 填缓存");
+
+        // 切到 .fm：缓存非空但来源不符 → 重扫 .fm，缓存与来源记录一起换代。
+        let (roster, meta, origin) = ensure_roster_cache(
+            &rtf_cache,
+            &roster_meta,
+            &roster_origin,
+            "fm",
+            rtf.to_str().unwrap(),
+            fm.to_str().unwrap(),
+            dir.path(),
+            &logger,
+            &AtomicBool::new(false),
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(roster.len(), 1, "应使用 .fm 的名单（1 人），而不是复用 RTF 缓存（2 人）");
+        assert_eq!(roster[0].uid, "r-42");
+        assert_eq!(meta.total, 1);
+        assert_eq!(origin.as_ref().map(|o| o.kind), Some("fm"), "返回本次扫描来源，供前端更新标记");
+        assert_eq!(roster_origin.lock().unwrap().as_ref().map(|o| o.kind), Some("fm"));
+        let logs: Vec<_> = log_rx.try_iter().collect();
+        assert!(
+            logs.iter().any(|l| l.message.contains("名单缓存来源不符")),
+            "来源不符应留 INFO：{logs:?}"
+        );
+
+        // 再点一次（仍选 .fm）：来源一致，命中缓存，不再扫描。
+        let (roster, _, origin) = ensure_roster_cache(
+            &rtf_cache,
+            &roster_meta,
+            &roster_origin,
+            "fm",
+            rtf.to_str().unwrap(),
+            fm.to_str().unwrap(),
+            dir.path(),
+            &logger,
+            &AtomicBool::new(false),
+            &mut || {},
+        )
+        .unwrap();
+        assert!(origin.is_none(), "来源一致：命中缓存，不重复扫描");
+        assert_eq!(roster.len(), 1);
+    }
+
+    #[test]
     fn fallback_roster_meta_when_none() {
         // 缓存非空而摘要缺失（异常态）：兜底摘要六字段按名单实际构造 + WARN，run() 仍完成。
         let dir = tempfile::tempdir().unwrap();
         let rtf = basic_rtf(dir.path());
         let img = std2_pack(dir.path());
-        let rtf_cache = Arc::new(Mutex::new(Vec::new()));
+        let rtf_cache = Arc::new(Mutex::new(Arc::new(Vec::new())));
         let roster_meta = Arc::new(Mutex::new(None));
+        let roster_origin = Arc::new(Mutex::new(None));
         let (logger, log_rx) = ChannelLogger::channel();
         // 先正常补缓存（模拟扫描命令），再清掉摘要模拟「缓存非空但摘要缺失」。
         ensure_roster_cache(
             &rtf_cache,
             &roster_meta,
+            &roster_origin,
+            "rtf",
             rtf.to_str().unwrap(),
             "",
             dir.path(),
@@ -3171,10 +3382,12 @@ mod tests {
         )
         .unwrap();
         *roster_meta.lock().unwrap() = None;
-        let (roster, meta) = ensure_roster_cache(
+        let (roster, meta, origin) = ensure_roster_cache(
             &rtf_cache,
             &roster_meta,
-            "",
+            &roster_origin,
+            "rtf",
+            rtf.to_str().unwrap(),
             "",
             dir.path(),
             &logger,
@@ -3182,6 +3395,7 @@ mod tests {
             &mut || {},
         )
         .unwrap();
+        assert_eq!(origin, None, "命中缓存：不覆盖前端已有的来源标记");
         assert_eq!(meta.total, roster.len());
         assert_eq!(
             meta.newgan,
@@ -3311,7 +3525,7 @@ mod tests {
             ..PlayerRecord::default()
         };
         let full: Vec<PlayerRecord> = (0..5).map(mk).collect();
-        let cache = Mutex::new(full.clone());
+        let cache = Mutex::new(Arc::new(full.clone()));
         // limit=0（防呆）与 999999（超上限）都夹进 1..=65536。
         let c0 = query_players_chunk_of(&cache, 0, 0);
         assert_eq!((c0.items.len(), c0.total), (1, 5), "limit=0 夹到 1");

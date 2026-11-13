@@ -116,6 +116,19 @@ describe('createPagedResource（本地分页骨架）', () => {
     expect(res.view.total).toBe(0);
   });
 
+  it('流式模式的 isStale 在换代后返回 true（数据源据此停止拉取）', async () => {
+    let first!: () => boolean;
+    const fetchStream = vi.fn(async (onBatch: (b: Row[] | null) => void, isStale: () => boolean) => {
+      first ??= isStale;
+      onBatch(rowsOf('u1'));
+    });
+    const res = new PagedResource<Row>({ resetKey: () => 0, fetchStream }, { manual: true });
+    await res.reset();
+    expect(first()).toBe(false); // 当前代：可继续拉
+    await res.reset();
+    expect(first()).toBe(true); // 上一代令牌已过期：旧流应中断
+  });
+
   it('流式模式：逐批追加、null 批次清空、换代后旧流批次被令牌丢弃', async () => {
     // ① 每批到达即追加：result 随批次递增，末态等于全量
     const seen: number[] = [];

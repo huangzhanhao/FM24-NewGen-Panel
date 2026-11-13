@@ -38,7 +38,9 @@
   let sortKey = $state<string | null>(null);
   let sortDesc = $state(false);
 
-  // 随机人筛选（仅拓展名单显示）：'any' 任意（默认）/ 'yes' 仅随机人 / 'no' 仅真实球员
+  // 随机人筛选（仅拓展名单显示）：'yes' 仅随机人 / 'no' 仅真实球员 / 'any' 任意（默认）
+  // 默认「任意」保持名单自然顺序；.fm 全量名单前段是职员/真实球员（无 NewGAN 头像），
+  // 需要只看有头像的随机人时手动切「仅随机人」即可。
   let newganFilter = $state<"any" | "yes" | "no">("any");
 
   // 是否为拓展名单：跟随最近一次「扫描RTF」的识别结果（detailed=true 即拓展球员/职员名单）
@@ -56,13 +58,13 @@
   let paneEl = $state<HTMLElement | undefined>(undefined);
   const paged: PagedResource<PlayerRecord> = createPagedResource<PlayerRecord>({
     // 流式：每块到达即追加进 result，首屏不必等 20 万行全部聚合（长任务随之切碎）
-    fetchStream: (onBatch) => api.queryPlayersStream(onBatch),
+    fetchStream: (onBatch, isStale) => api.queryPlayersStream(onBatch, isStale),
     resetKey: () => appStore.rosterVersion,
     pane: () => paneEl, // 每页行数随面板高度自适应（无行数常量）
     onReset: () => {
       sortKey = null; // 新名单也从自然顺序看起
       sortDesc = false;
-      newganFilter = "any";
+      newganFilter = "any"; // 随机人筛选也复位到「任意」，新名单保持自然顺序看起
       resetRosterView(); // 视图过滤同样复位：新名单从「全部」看起
       extCols = false;
       avatars.clear(); // 旧名单的头像路径与缩略图一并作废回收（新名单的图在装载 effect 里重取）
@@ -155,27 +157,27 @@
 
   // ---- 勾选列与「加入队列」 -----------------------------------------------------------------------------------------
   // 勾选状态存 imageaiStore.selectedInTable（key=uid，翻页/切组/换名单都不清空——勾选跟随球员）
-  // 【按钮口径】「加入队列（N）」的 N 与可用性只按当前页勾选数：提交只针对用户眼前这一页，
-  // 语义最直白（store.selectedCount 是含跨页的全局口径，用它会出现显示 5、实际提交别页 12 条）
-  const pageSelectedCount = $derived(
-    paged.view.items.filter((r) => imageaiStore.selectedInTable[r.uid]).length,
+  // 【全选口径】表头全选作用于**全部筛选结果**（跨页）：勾选跟随球员，翻页不丢，因此全选必须覆盖
+  // 所有筛选行而非仅当前页——否则用户点全选后翻到第 2 页发现没勾，体验割裂。
+  // 「加入队列（N）」的 N 同样按全部筛选结果中已勾选数计，提交也只提交这些勾选行（跨页）。
+  const filteredUids = $derived(paged.filtered.map((r) => r.uid));
+  const selectedCount = $derived(
+    filteredUids.filter((uid) => imageaiStore.selectedInTable[uid]).length,
   );
-  const allPageSelected = $derived(
-    paged.view.items.length > 0 && paged.view.items.every((r) => imageaiStore.selectedInTable[r.uid]),
+  const allSelected = $derived(
+    filteredUids.length > 0 && filteredUids.every((uid) => imageaiStore.selectedInTable[uid]),
   );
-  const somePageSelected = $derived(paged.view.items.some((r) => imageaiStore.selectedInTable[r.uid]));
+  const someSelected = $derived(filteredUids.some((uid) => imageaiStore.selectedInTable[uid]));
 
-  /** 表头全选/取消：只作用于当前页数据行（翻页后另一页不受影响） */
+  /** 表头全选/取消：作用于全部筛选结果（跨页），而非仅当前页 */
   function onPageAll(v: boolean) {
-    toggleSelectPage(
-      paged.view.items.map((r) => r.uid),
-      v,
-    );
+    toggleSelectPage(filteredUids, v);
   }
-  /** 把当前页勾选的球员按工作台当前参数加入批量队列；成功后弹提示（条数） */
+  /** 把全部筛选结果中勾选的球员按工作台当前参数加入批量队列；成功后弹提示（条数） */
   async function onEnqueue() {
-    const rows = paged.view.items
-      .filter((r) => imageaiStore.selectedInTable[r.uid])
+    const uidSet = new Set(filteredUids);
+    const rows = paged.filtered
+      .filter((r) => imageaiStore.selectedInTable[r.uid] && uidSet.has(r.uid))
       .map((r) => ({ uid: r.uid, name: r.name }));
     if (rows.length === 0) return;
     try {
@@ -268,9 +270,9 @@
           </select>
         </label>
       {/if}
-      <!-- 加入队列：按当前页勾选数计数（口径见脚本内注释），无勾选时禁用；排在随机人筛选右侧 -->
-      <button class="btn sm" disabled={pageSelectedCount === 0} onclick={onEnqueue}>
-        {t.gen.queue.addBtn(pageSelectedCount)}
+      <!-- 加入队列：按全部筛选结果中勾选数计数（口径见脚本内注释），无勾选时禁用；排在随机人筛选右侧 -->
+      <button class="btn sm" disabled={selectedCount === 0} onclick={onEnqueue}>
+        {t.gen.queue.addBtn(selectedCount)}
       </button>
       <!-- 拓展列开关（仅替换台窄栏 + 拓展名单显示）：打开补齐拓展字段列（共 18 列），
            收起只留基础字段列；基础字段列与勾选/头像/送生图不受开关影响 -->
@@ -329,14 +331,14 @@
                  role=button + tabindex=0 + onkeydown 让键盘用户也能排序
                  排序键（'uid'/'primaryNat'/'name'/'ethnicityCode'）是发往后端的协议值，勿改
                  static 类=不可排序列，默认光标；c 类=紧凑列居中 -->
-            <!-- 首列勾选框：表头复选 = 全选/取消当前页数据行（indeterminate 表达部分勾选）；
+            <!-- 首列勾选框：表头复选 = 全选/取消全部筛选结果（跨页，indeterminate 表达部分勾选）；
                  aria-label 提供读屏文案（不造 label/for，避免为每行生成唯一 id） -->
             <th class="static c sel-col">
               <input
                 type="checkbox"
                 aria-label={t.gen.queue.selectAllPlayersAria}
-                checked={allPageSelected}
-                indeterminate={somePageSelected && !allPageSelected}
+                checked={allSelected}
+                indeterminate={someSelected && !allSelected}
                 onchange={(e) => onPageAll(e.currentTarget.checked)}
               />
             </th>

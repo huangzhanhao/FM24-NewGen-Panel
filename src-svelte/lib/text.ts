@@ -596,7 +596,7 @@ const zhCN = {
       selectRowAria: (name: string) => `选择 ${name}`,
       selectAllAria: "全选或取消本页条目",
       selectPlayerAria: (name: string) => `选择球员 ${name}`,
-      selectAllPlayersAria: "全选或取消本页球员",
+      selectAllPlayersAria: "全选或取消全部筛选结果（跨页）",
     },
   },
 
@@ -604,6 +604,9 @@ const zhCN = {
   replace: {
     cardTitle: "替换执行",
     modeLabel: "模式：",
+    /** 读取来源开关（排在选项开关里）：轨道左＝RTF（默认），轨道右＝.fm 存档；文案随当前来源切换 */
+    sourceRtf: "从 RTF 读",
+    sourceFm: "从 .fm 存档读",
     optionsLabel: "选项设置：",
     optAllowDuplicates: "允许复用图片",
     optFilterNewgan: "仅随机人",
@@ -1564,7 +1567,7 @@ const zhTW: Dict = {
       selectRowAria: (name: string) => `選擇 ${name}`,
       selectAllAria: "全選或取消本頁條目",
       selectPlayerAria: (name: string) => `選擇球員 ${name}`,
-      selectAllPlayersAria: "全選或取消本頁球員",
+      selectAllPlayersAria: "全選或取消全部篩選結果（跨頁）",
     },
   },
 
@@ -1572,6 +1575,9 @@ const zhTW: Dict = {
   replace: {
     cardTitle: "替換執行",
     modeLabel: "模式：",
+    /** 读取来源开关（排在选项开关里）：轨道左＝RTF（默认），轨道右＝.fm 存档；文案随当前来源切换 */
+    sourceRtf: "從 RTF 讀",
+    sourceFm: "從 .fm 存檔讀",
     optionsLabel: "選項設定：",
     optAllowDuplicates: "允許複用圖片",
     optFilterNewgan: "僅隨機人",
@@ -2562,7 +2568,7 @@ const en: Dict = {
       selectRowAria: (name: string) => `Select ${name}`,
       selectAllAria: "Select or deselect all entries on this page",
       selectPlayerAria: (name: string) => `Select player ${name}`,
-      selectAllPlayersAria: "Select or deselect all players on this page",
+      selectAllPlayersAria: "Select or deselect all filtered rows (across pages)",
     },
   },
 
@@ -2570,6 +2576,9 @@ const en: Dict = {
   replace: {
     cardTitle: "Replacement",
     modeLabel: "Mode:",
+    /** 读取来源开关（排在选项开关里）：轨道左＝RTF（默认），轨道右＝.fm 存档；文案随当前来源切换 */
+    sourceRtf: "Read from RTF",
+    sourceFm: "Read from .fm save",
     optionsLabel: "Options:",
     optAllowDuplicates: "Allow image reuse",
     optFilterNewgan: "NewGAN only",

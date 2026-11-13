@@ -307,8 +307,9 @@ pub fn run() {
                 logger: logger.clone(),                          // 日志器（Arc 共享）
                 cancel: Arc::new(AtomicBool::new(false)),        // 「请求取消」标志
                 running: Arc::clone(&running),                   // 「正在替换」标志
-                rtf_cache: Arc::new(Mutex::new(Vec::new())),     // 最近一次解析的 RTF 球员缓存
+                rtf_cache: Arc::new(Mutex::new(Arc::new(Vec::new()))), // 最近一次解析的 RTF 球员缓存
                 roster_meta: Arc::new(Mutex::new(None)),         // 名单摘要伴随态（与 rtf_cache 同生共死）
+                roster_origin: Arc::new(Mutex::new(None)),       // 名单缓存来源（kind + 路径；替换前判断能否复用）
                 mapping_cache: Arc::new(Mutex::new(Vec::new())), // 最近一次生成的映射缓存
                 faces_cache: Arc::new(Mutex::new(None)), // 「扫描头像」的包索引缓存（初始为空）
                 snapshot_cache: Arc::new(Mutex::new(None)), // 快照解析缓存（「读取快照」/替换收尾写入；初始为空）

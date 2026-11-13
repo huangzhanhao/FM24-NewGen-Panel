@@ -11,9 +11,9 @@ import type { PlayerRecord } from '../types';
 describe('api 封装', () => {
   it('startReplace 传参与命令名正确', async () => {
     invoke.mockResolvedValue(undefined);
-    await api.startReplace({ mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false });
+    await api.startReplace({ mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false, rosterSource: 'fm' });
     expect(invoke).toHaveBeenCalledWith('start_replace', {
-      args: { mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false },
+      args: { mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false, rosterSource: 'fm' },
     });
   });
 
@@ -65,6 +65,22 @@ describe('api 封装', () => {
     const batches: (PlayerRecord[] | null)[] = [];
     await expect(api.queryPlayersStream((b) => batches.push(b))).rejects.toThrow('名单在分块读取期间发生变化');
     expect(batches).toEqual([[{ uid: 'r-1' }], null, [{ uid: 'r-1' }]]);
+  });
+
+  it('queryPlayersStream 换代（isStale=true）后不再拉后续分块', async () => {
+    invoke.mockReset();
+    invoke.mockResolvedValue({ items: [{ uid: 'r-1' }], total: 5 });
+    const batches: (PlayerRecord[] | null)[] = [];
+    let stale = false;
+    await api.queryPlayersStream(
+      (b) => {
+        batches.push(b);
+        stale = true; // 模拟首批交付后即换代
+      },
+      () => stale,
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(batches).toEqual([[{ uid: 'r-1' }]]);
   });
 
   it('setCurrentFm 传参与命令名正确', async () => {

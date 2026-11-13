@@ -108,7 +108,8 @@ pub enum Outcome {
 /// run() 的返回体：除了结果状态，还把解析出的球员与映射带回（供前端预览）。
 pub struct RunResult {
     pub outcome: Outcome,
-    pub rtf_data: Vec<PlayerRecord>,
+    /// 本轮参与替换的名单（Arc 句柄：未开启「仅随机人」时与缓存是同一份，不整表复制）。
+    pub rtf_data: Arc<Vec<PlayerRecord>>,
     pub mapping: Vec<MappingEntry>,
     /// 名单摘要（格式/语言/条数）：解析成功后带回，随 replace:finished 一并回传前端，
     /// 让名单预览不必再点一次「扫描RTF」就知道名单格式；失败/取消为 None。
@@ -313,7 +314,7 @@ fn parse_stage(
     // 阶段管线签名统一保留日志出口；本阶段不再发日志（读取耗时与账目由 run_body 统一记），
     // 故带下划线前缀。
     _logger: &impl LogSink,
-) -> Result<(Vec<PlayerRecord>, RosterSummary, RosterCounts), RunResult> {
+) -> Result<(Arc<Vec<PlayerRecord>>, RosterSummary, RosterCounts), RunResult> {
     progress("读取名单缓存…", STAGE_RTF.0, 0, 0);
     let full = params.roster.as_ref();
     if full.is_empty() {
@@ -322,10 +323,11 @@ fn parse_stage(
     if is_cancelled(cancel) {
         return Err(cancelled());
     }
-    let filtered: Vec<PlayerRecord> = if params.filter_newgen {
-        full.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).cloned().collect()
+    // 不过滤时直接复用缓存句柄：只涨引用计数，避免大名单再深拷贝一次。
+    let filtered: Arc<Vec<PlayerRecord>> = if params.filter_newgen {
+        Arc::new(full.iter().filter(|p| p.uid.starts_with(NEWGAN_UID_PREFIX)).cloned().collect())
     } else {
-        full.to_vec()
+        params.roster.clone()
     };
     // 每 4096 条上报一次进度并检查取消（对齐扫描器的批量粒度；大名单在此期间可取消）。
     for (i, _) in full.iter().enumerate() {
@@ -563,7 +565,7 @@ fn yes_no(v: bool) -> &'static str {
 fn failed(msg: &str) -> RunResult {
     RunResult {
         outcome: Outcome::Failed(msg.into()),
-        rtf_data: Vec::new(),
+        rtf_data: Arc::new(Vec::new()),
         mapping: Vec::new(),
         roster: None,
         scan: None,
@@ -573,7 +575,7 @@ fn failed(msg: &str) -> RunResult {
 fn cancelled() -> RunResult {
     RunResult {
         outcome: Outcome::Cancelled,
-        rtf_data: Vec::new(),
+        rtf_data: Arc::new(Vec::new()),
         mapping: Vec::new(),
         roster: None,
         scan: None,

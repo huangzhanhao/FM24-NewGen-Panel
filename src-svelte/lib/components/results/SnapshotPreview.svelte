@@ -14,6 +14,8 @@
   import TablePager from "./TablePager.svelte"; // 分页器（与名单预览共用）
   import AvatarThumb from "../shared/AvatarThumb.svelte"; // 头像缩略图 + 放大气泡（与名单预览共用）
   import type { SnapshotEntry } from "../../types";
+  import { enqueuePlayers, imageaiStore, toggleSelect, toggleSelectPage } from "../../stores/imageai.svelte";
+  import { message } from "@tauri-apps/plugin-dialog";
 
   const blobs = createAvatarBlobs(); // 本页头像图的 blob 账（翻页换代、卸载回收都在其内部）
 
@@ -57,6 +59,41 @@
       return [];
     },
   });
+
+  // ---- 勾选列与「加入队列」（与名单预览同口径：全选跨页、提交按全部筛选结果中勾选行） -------------------------------
+  // 快照条目只有 uid（无姓名），入队前需按 uid 回填姓名；查不到的条目以 uid 代替姓名展示。
+  const filteredUids = $derived(paged.filtered.map((e) => e.uid));
+  const selectedCount = $derived(
+    filteredUids.filter((uid) => imageaiStore.selectedInTable[uid]).length,
+  );
+  const allSelected = $derived(
+    filteredUids.length > 0 && filteredUids.every((uid) => imageaiStore.selectedInTable[uid]),
+  );
+  const someSelected = $derived(filteredUids.some((uid) => imageaiStore.selectedInTable[uid]));
+
+  function onPageAll(v: boolean) {
+    toggleSelectPage(filteredUids, v);
+  }
+
+  /** 把勾选的快照条目加入批量生成队列：先按 uid 回填姓名，再组装入队。 */
+  async function onEnqueue() {
+    const uids = filteredUids.filter((uid) => imageaiStore.selectedInTable[uid]);
+    if (uids.length === 0) return;
+    let nameByUid: Record<string, string> = {};
+    try {
+      const recs = await api.queryPlayersByUids(uids);
+      for (const r of recs) nameByUid[r.uid] = r.name;
+    } catch {
+      // 名单缓存未就绪时查不到姓名：用 uid 代替，不阻断入队
+    }
+    const rows = uids.map((uid) => ({ uid, name: nameByUid[uid] || uid }));
+    try {
+      const n = await enqueuePlayers(rows);
+      await message(t.gen.queue.enqueued(n), { title: t.dialog.info });
+    } catch (e) {
+      await showError(e);
+    }
+  }
 
   // 当前页条目的实际图片路径（按页向后端批量解析；找到图 → 绝对路径，找不到 → 无键）
   let imgPaths = $state<Record<string, string>>({});
@@ -110,6 +147,10 @@
           </select>
         </label>
       {/if}
+      <!-- 加入队列：按全部筛选结果中勾选数计数（与名单预览同口径），无勾选时禁用 -->
+      <button class="btn sm" disabled={selectedCount === 0} onclick={onEnqueue}>
+        {t.gen.queue.addBtn(selectedCount)}
+      </button>
       <!-- 分页器（含快速跳页）与名单预览共用同一组件，样式/行为单点维护 -->
       <TablePager bind:page={paged.page} totalPages={paged.totalPages} />
     </div>
@@ -126,12 +167,23 @@
            UID/头像列定宽，相对路径列吃满剩余宽度 -->
       <table class="grid fixed">
         <colgroup>
+          <col class="w-sel" />
           <col class="w-uid" />
           <col />
           <col class="w-thumb" />
         </colgroup>
         <thead>
           <tr>
+            <!-- 首列勾选框：表头复选 = 全选/取消全部筛选结果（跨页） -->
+            <th class="static c sel-col">
+              <input
+                type="checkbox"
+                aria-label={t.gen.queue.selectAllPlayersAria}
+                checked={allSelected}
+                indeterminate={someSelected && !allSelected}
+                onchange={(e) => onPageAll(e.currentTarget.checked)}
+              />
+            </th>
             <th
               >{t.snapshot.colUid}<span class="muted">（{t.snapshot.recordCount(paged.view.total)}）</span></th
             >
@@ -143,6 +195,14 @@
           <!-- 以行索引为键：快照里可能出现重复 UID，UID 作键会撞键 -->
           {#each paged.view.items as { uid, relPath }, i (i)}
             <tr>
+              <td class="c sel-col">
+                <input
+                  type="checkbox"
+                  aria-label={t.gen.queue.selectPlayerAria(uid)}
+                  checked={!!imageaiStore.selectedInTable[uid]}
+                  onchange={(e) => toggleSelect(uid, e.currentTarget.checked)}
+                />
+              </td>
               <td class="mono">{uid}</td>
               <td class="mono path" use:tip={relPath}>{relPath}</td>
               <td>
@@ -179,6 +239,9 @@
   }
   /* 列宽（fixed 下即实际宽度）：UID 列要连表头的「（N 条）」一起装下（≈127px）；
      头像列容 60px 缩略图 + 单元格内边距 */
+  .w-sel {
+    width: 30px; /* 勾选框列：14px 复选框 + 单元格内边距（与名单预览同宽） */
+  }
   .w-uid {
     width: 152px;
   }

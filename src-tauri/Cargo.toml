@@ -49,3 +49,11 @@ indexmap = { version = "1.9.3", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# 开发构建（tauri dev / cargo test 默认 profile）只优化依赖、本 crate 保持未优化：
+# .fm 解析里最热的两个外部件是 zstd 整帧解压与 regex 名字校验，它们在 opt-level=0 下
+# 慢数倍到十几倍（debug 实测解析 37 s，其中解压 1.8 s、俱乐部名 19 s）。本 crate 的逐字节
+# 扫描仍按 debug 编译，增量编译速度几乎不受影响——这条权衡正好落在「依赖稳定、业务代码常改」上。
+# 正式分发走 release（默认 opt-level=3），不受本段影响。
+[profile.dev.package."*"]
+opt-level = 2

@@ -295,7 +295,7 @@ pnpm install
 pnpm tauri dev
 
 # 3) 测试与检查
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 301 项，含 2 项 #[ignore]：真包冒烟 / 真存档判卷）
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 303 项 = 301 通过 + 2 项 #[ignore]：真包冒烟 / 真存档判卷）
 pnpm test                                          # vitest 前端单测
 pnpm check                                         # svelte-check 类型检查
 

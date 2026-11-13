@@ -16,8 +16,9 @@ export interface PagedResourceOptions<T> {
   /** 取全量（换代且门控放行时调用一次）。与 fetchStream 至少给一个；快照预览走这条全量通道。 */
   fetch?: () => Promise<T[]>;
   /** 流式取数：提供时优先于 fetch。每批到达即经 onBatch 交付，调用方不必等整份读完；
-   *  null = 已交付的批次作废（重新取数前的重置信号）。promise resolve 即流结束。 */
-  fetchStream?: (onBatch: (batch: T[] | null) => void) => Promise<void>;
+   *  null = 已交付的批次作废（重新取数前的重置信号）。promise resolve 即流结束。
+   *  isStale 在换代后返回 true：数据源据此中断后续分块拉取，不再空跑整条流。 */
+  fetchStream?: (onBatch: (batch: T[] | null) => void, isStale: () => boolean) => Promise<void>;
   /** 换代键：变化即换代（复位 + 重新取全量）。 */
   resetKey: () => string | number;
   /** 载入门控：false 时不取数（快照侧 readable=false 的引导空态）。 */
@@ -112,10 +113,15 @@ export class PagedResource<T> {
     this.pageSize = Math.max(1, Math.floor(scroller.clientHeight / row) - 1);
   }
 
+  /** 筛选/排序后的**全量**结果（未分页）；供「跨页全选」这类需要拿到全部筛选行的操作使用。 */
+  filtered = $derived.by(() =>
+    this.#opts.select ? this.#opts.select(this.result ?? []) : (this.result ?? []),
+  );
+
   /** 筛选/排序后的当前页视图（模板与派生状态只读这里）。 */
   view = $derived.by(() => {
     const size = Math.max(1, this.pageSize); // 未测量（0）时退化为单行/页，测量后立即正确
-    const all = this.#opts.select ? this.#opts.select(this.result ?? []) : (this.result ?? []);
+    const all = this.filtered;
     const total = all.length;
     const last = Math.max(0, Math.ceil(total / size) - 1);
     const page = Math.min(this.page, last); // 筛选后总页数变少时夹住，避免空页
@@ -148,17 +154,20 @@ export class PagedResource<T> {
       // 流式：先置空全量，此后每批到达即追加——首屏随首批就绪，不必等整份读完
       this.result = [];
       try {
-        await stream((batch) => {
-          if (mine !== this.#token) return; // 期间换代：旧流后续批次不得写回
-          if (batch === null) {
-            this.result = [];
-            return;
-          }
-          if (this.result === null) this.result = [];
-          const cur = this.result;
-          // 逐项追加：spread 大数组会撞引擎实参上限，逐项 push 也把写代理的长任务切得更碎
-          for (const x of batch) cur.push(x);
-        });
+        await stream(
+          (batch) => {
+            if (mine !== this.#token) return; // 期间换代：旧流后续批次不得写回
+            if (batch === null) {
+              this.result = [];
+              return;
+            }
+            if (this.result === null) this.result = [];
+            const cur = this.result;
+            // 逐项追加：spread 大数组会撞引擎实参上限，逐项 push 也把写代理的长任务切得更碎
+            for (const x of batch) cur.push(x);
+          },
+          () => mine !== this.#token, // 换代即告知数据源停止后续拉取
+        );
       } catch (e) {
         if (mine !== this.#token) return; // 过期失败不落状态
         this.result = this.#opts.onError ? this.#opts.onError(e) : null;

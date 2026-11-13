@@ -248,6 +248,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       ├── facepack_scanner.rs  # 头像包扫描器：包扫描 + 标准判定（直铺 / 标准N / 无法识别）+ 目录签名 PackSig
 │       ├── templates/           # 每个标准配套的抽图模型：standard1.rs / standard2.rs / standard3.rs / unknown.rs
 │       ├── rtf_scanner.rs       # ← core/RtfParser.py 演进：RTF 扫描器（六格式识别 / 全字段解析 / 中文翻译）
+│       ├── fm_parser.rs         # 无 v1 对应：.fm 存档解析器（TOC 解压 / 版本闸门 / 人员枚举 → 球员+职员混合名单）
 │       ├── xml_parser.rs        # ← core/XmlParser.py（读/写/单条替换/备份轮换）
 │       ├── profile_manager.rs   # ← core/ProfileManager.py（档/组 CRUD、浏览预览、激活快照交换）
 │       ├── face_mapper.rs       # ← core/FaceMapper.py（标准路由 + 三模式映射）
@@ -265,7 +266,7 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 │       │   └── gen_queue.rs     # L3 应用：生成队列（会话内存态，不落盘）
 │       ├── image_ai_providers/  # 各服务商适配器：openai / volcano / dashscope / siliconflow / modelscope / localcomfyui（唯一网络接触面）
 │       ├── logger.rs            # ← core/NewGanLogManager.py（官方 log 插件管道 + 内存环形缓冲/批量事件）
-│       └── commands.rs          # ← services/* + 对话框原语（55 个 Tauri 命令）
+│       └── commands.rs          # ← services/* + 对话框原语（59 个 Tauri 命令）
 ├── tests/testing_data/          # RTF 测试样本（不入库）
 ├── .cargo/config.toml           # Cargo 构建配置（target-dir 指向根目录 target/）
 ├── package.json / vite.config.ts / svelte.config.js / tsconfig.json
@@ -290,11 +291,11 @@ NewGAN（随机人）默认没有头像。手动给成百上千名随机人一�
 pnpm install
 
 # 2) 开发模式（前端热重载 + Rust 增量编译；运行数据写入 <项目根>/data/）
-#    若 5173 上已有本项目的 vite（先用 IDE 任务 / Chrome 调试起过前端），会自动复用，不会因端口占用而失败
+#    若 1420 上已有本项目的 vite（先用 IDE 任务 / Chrome 调试起过前端），会自动复用，不会因端口占用而失败
 pnpm tauri dev
 
 # 3) 测试与检查
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 271 项，含 1 项 #[ignore] 真包冒烟）
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试（当前 301 项，含 2 项 #[ignore]：真包冒烟 / 真存档判卷）
 pnpm test                                          # vitest 前端单测
 pnpm check                                         # svelte-check 类型检查
 
@@ -307,7 +308,7 @@ pnpm tauri icon app-icon.png
 
 > Rust 构建产物统一在项目根 `target/`（由 `.cargo/config.toml` 指定）；前端构建产物在 `dist/`。
 >
-> `tauri dev` 的 `beforeDevCommand` 不是直接 `pnpm dev`，而是 `node scripts/dev-server.mjs`：先探测 5173 上是否已是本项目的 dev server（拉取页面并校验其中是否引用了 `/src-svelte/main.ts`，避免误复用别的站点），是则直接退出复用，否则才拉起 `pnpm dev`。因为 vite 配了 `strictPort: true`（`devUrl` 写死 5173，改端口反而更糟），重复启动会报错并带崩 `tauri dev`。
+> `tauri dev` 的 `beforeDevCommand` 不是直接 `pnpm dev`，而是 `node scripts/dev-server.mjs`：先探测 1420 上是否已是本项目的 dev server（拉取页面并校验其中是否引用了 `/src-svelte/main.ts`，避免误复用别的站点），是则直接退出复用，否则才拉起 `pnpm dev`。因为 vite 配了 `strictPort: true`（`devUrl` 写死 1420，改端口反而更糟），重复启动会报错并带崩 `tauri dev`。
 >
 > 真实头像包冒烟测试（`real_pack_smoke`）标注 `#[ignore]`，CI 不跑、未设 `NEWGAN_REAL_PACK_DIR` 时自动跳过。要全链路验证「扫描 → 标准判定 → 标准三抽图」（每人抽到图且图中的图在包里真实存在）：
 > ```bash

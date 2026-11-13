@@ -1,4 +1,4 @@
-/** createPagedResource 骨架断言：全量落地/本地切片/筛选排序/令牌防乱序/门控/换代复位/错误态。
+/** createPagedResource 骨架断言：全量落地/本地切片/筛选排序/令牌防乱序/门控/换代复位/错误态/流式分批。
  *  manual 构造跳过 effect 接线（node 测试环境无 effect 根），直接驱动 reset() 测纯逻辑；
  *  换代的 effect 接线本身很薄（几行），随应用运行验证。改骨架前先看这里。 */
 import { describe, expect, it, vi } from 'vitest';
@@ -20,7 +20,7 @@ const rowsOf = (...uids: string[]): Row[] => uids.map((uid) => ({ uid }));
 /** manual 构造（无 effect 接线）；fetch 默认空全量。 */
 function setup(
   over: Partial<PagedResourceOptions<Row>> = {},
-  fetch: PagedResourceOptions<Row>['fetch'] = vi.fn(async () => rowsOf()),
+  fetch: NonNullable<PagedResourceOptions<Row>['fetch']> = vi.fn(async () => rowsOf()),
 ): { res: PagedResource<Row>; fetch: PagedResourceOptions<Row>['fetch'] } {
   const res = new PagedResource<Row>(
     { fetch, resetKey: () => 0, ...over },
@@ -114,5 +114,62 @@ describe('createPagedResource（本地分页骨架）', () => {
     await res.reset();
     expect(res.result).toEqual([]);
     expect(res.view.total).toBe(0);
+  });
+
+  it('流式模式：逐批追加、null 批次清空、换代后旧流批次被令牌丢弃', async () => {
+    // ① 每批到达即追加：result 随批次递增，末态等于全量
+    const seen: number[] = [];
+    let res!: PagedResource<Row>;
+    const fetchStream = vi.fn(async (onBatch: (b: Row[] | null) => void) => {
+      onBatch(rowsOf('u1'));
+      seen.push(res.result!.length);
+      onBatch(rowsOf('u2'));
+      seen.push(res.result!.length);
+      onBatch(rowsOf('u3', 'u4'));
+      seen.push(res.result!.length);
+    });
+    res = new PagedResource<Row>({ resetKey: () => 0, fetchStream }, { manual: true });
+    res.pageSize = 4;
+    await res.reset();
+    expect(seen).toEqual([1, 2, 4]); // 每批落进 result 后才继续拉下一批
+    expect(res.result).toEqual(rowsOf('u1', 'u2', 'u3', 'u4'));
+    expect(res.view.total).toBe(4);
+
+    // ② null 批次 = 作废已交付内容（重新取数前），之后继续追加
+    const resetStream = vi.fn(async (onBatch: (b: Row[] | null) => void) => {
+      onBatch(rowsOf('old1', 'old2'));
+      onBatch(null);
+      expect(res2.result).toEqual([]);
+      onBatch(rowsOf('new1'));
+    });
+    const res2 = new PagedResource<Row>({ resetKey: () => 0, fetchStream: resetStream }, { manual: true });
+    await res2.reset();
+    expect(res2.result).toEqual(rowsOf('new1'));
+
+    // ③ 换代：旧流在途批次的后续交付被令牌丢弃，新流结果不被污染
+    let emitOld!: (b: Row[] | null) => void;
+    let releaseOld!: () => void;
+    const oldPending = new Promise<void>((r) => (releaseOld = r));
+    const twoStreams = vi
+      .fn()
+      .mockImplementationOnce(async (onBatch: (b: Row[] | null) => void) => {
+        emitOld = onBatch;
+        onBatch(rowsOf('S1'));
+        await oldPending;
+      })
+      .mockImplementationOnce(async (onBatch: (b: Row[] | null) => void) => {
+        onBatch(rowsOf('N1'));
+        onBatch(rowsOf('N2'));
+      });
+    const res3 = new PagedResource<Row>({ resetKey: () => 0, fetchStream: twoStreams }, { manual: true });
+    void res3.reset(); // 换代#1 在途
+    await res3.reset(); // 换代#2 完成 → 采纳 N1、N2
+    expect(res3.result).toEqual(rowsOf('N1', 'N2'));
+
+    emitOld(rowsOf('S2')); // 换代#1 的迟到批次
+    expect(res3.result).toEqual(rowsOf('N1', 'N2'));
+    releaseOld();
+    await Promise.resolve();
+    expect(res3.result).toEqual(rowsOf('N1', 'N2'));
   });
 });

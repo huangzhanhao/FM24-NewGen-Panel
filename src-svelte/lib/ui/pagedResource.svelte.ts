@@ -1,5 +1,5 @@
 /**
- * 本地分页骨架（名单预览 / 快照预览共用）：后端一次性给全量（换代时取一次），
+ * 本地分页骨架（名单预览 / 快照预览共用）：后端给出全量（换代时取一次，全量或流式分批皆可），
  * 分页/筛选/排序全在前端内存完成——翻页/搜索/排序/行数变化都不产生任何后端往返。
  *
  * 【分工】组件持有搜索词（paged.search，输入框直接绑定）与筛选/排序状态，
@@ -13,8 +13,11 @@
  * 【换代】resetKey 变化 → 复位 + 重取全量；令牌防乱序：晚到的旧响应不得覆盖新结果。
  */
 export interface PagedResourceOptions<T> {
-  /** 取全量（换代且门控放行时调用一次）。 */
-  fetch: () => Promise<T[]>;
+  /** 取全量（换代且门控放行时调用一次）。与 fetchStream 至少给一个；快照预览走这条全量通道。 */
+  fetch?: () => Promise<T[]>;
+  /** 流式取数：提供时优先于 fetch。每批到达即经 onBatch 交付，调用方不必等整份读完；
+   *  null = 已交付的批次作废（重新取数前的重置信号）。promise resolve 即流结束。 */
+  fetchStream?: (onBatch: (batch: T[] | null) => void) => Promise<void>;
   /** 换代键：变化即换代（复位 + 重新取全量）。 */
   resetKey: () => string | number;
   /** 载入门控：false 时不取数（快照侧 readable=false 的引导空态）。 */
@@ -47,6 +50,10 @@ export class PagedResource<T> {
 
   constructor(opts: PagedResourceOptions<T>, wiring?: { manual?: boolean }) {
     this.#opts = opts;
+    // 数据源二选一：两个都缺时骨架只会永远空态，构造期就报出来（不是运行期静默无数据）
+    if (!opts.fetch && !opts.fetchStream) {
+      throw new Error('createPagedResource 需要 fetch 或 fetchStream 之一作为数据源');
+    }
     if (wiring?.manual) return;
     // 行数自适应：滚动盒 clientHeight 是浏览器布局后的实测值（工具条换行/横滚条占位都已扣除），
     // 同时观测 pane 与实际 .table-scroll 的高度；空态 ↔ 表格是条件渲染，childList 补挂/补测。
@@ -136,9 +143,33 @@ export class PagedResource<T> {
   async #load(): Promise<void> {
     if (this.#opts.shouldLoad?.() === false) return; // 门控：未就绪时不取数（快照侧引导空态）
     const mine = ++this.#token;
+    const stream = this.#opts.fetchStream;
+    if (stream) {
+      // 流式：先置空全量，此后每批到达即追加——首屏随首批就绪，不必等整份读完
+      this.result = [];
+      try {
+        await stream((batch) => {
+          if (mine !== this.#token) return; // 期间换代：旧流后续批次不得写回
+          if (batch === null) {
+            this.result = [];
+            return;
+          }
+          if (this.result === null) this.result = [];
+          const cur = this.result;
+          // 逐项追加：spread 大数组会撞引擎实参上限，逐项 push 也把写代理的长任务切得更碎
+          for (const x of batch) cur.push(x);
+        });
+      } catch (e) {
+        if (mine !== this.#token) return; // 过期失败不落状态
+        this.result = this.#opts.onError ? this.#opts.onError(e) : null;
+      }
+      return;
+    }
+    const fetch = this.#opts.fetch;
+    if (!fetch) return; // 构造期已保证二者其一，这里只为类型收窄
     let got: T[];
     try {
-      got = await this.#opts.fetch();
+      got = await fetch();
     } catch (e) {
       if (mine !== this.#token) return; // 过期失败不落状态
       this.result = this.#opts.onError ? this.#opts.onError(e) : null;

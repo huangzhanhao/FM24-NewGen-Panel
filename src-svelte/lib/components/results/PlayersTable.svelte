@@ -1,4 +1,4 @@
-<!-- PlayersTable · 名单预览表格：分页、搜索、点表头排序；后端一次给全量，分页/筛选/排序都在前端
+<!-- PlayersTable · 名单预览表格：分页、搜索、点表头排序；后端分块流式给全量（每块到达即追加显示），分页/筛选/排序都在前端
      可读判据与快照预览同款：后端名单缓存未填上（既没「扫描RTF」也没跑过替换）时
      不渲染工具条（搜索框/筛选/分页器），只留引导空态 -->
 <script lang="ts">
@@ -50,12 +50,13 @@
   // 置真有两处（扫描RTF 成功 / 替换成功）；切档、切组、换名单导致作用域变化时由 store 作废
   const readable = $derived(appStore.rosterReady);
 
-  // ---- 本地分页骨架：后端一次给全量（换代时取一次），搜索/随机人筛选/排序/翻页都在前端内存完成 ----------------------
+  // ---- 本地分页骨架：后端分块流式给全量（换代时起一条流），搜索/随机人筛选/排序/翻页都在前端内存完成 ----------------
   //      select 读组件本地状态（搜索词/筛选/排序），变化只重算 view，不产生任何请求
   //      （显式标注 paged 类型：select 闭包引用 paged，否则 TS 判定循环推断）
   let paneEl = $state<HTMLElement | undefined>(undefined);
   const paged: PagedResource<PlayerRecord> = createPagedResource<PlayerRecord>({
-    fetch: () => api.queryPlayers(),
+    // 流式：每块到达即追加进 result，首屏不必等 20 万行全部聚合（长任务随之切碎）
+    fetchStream: (onBatch) => api.queryPlayersStream(onBatch),
     resetKey: () => appStore.rosterVersion,
     pane: () => paneEl, // 每页行数随面板高度自适应（无行数常量）
     onReset: () => {
@@ -205,10 +206,16 @@
 
   // 头像装载跟随当前页视图：页码/筛选/搜索变化都会重算 view，这里随之只装载本页的 uid；
   // 快照缓存收尾（snapshotVersion）后头像路径可能已变，一并重取。
-  // 头像列恒显示（基础名单也有），故不再按 detailed 门控——头像路径出自快照/映射缓存，与名单格式无关
+  // 头像列恒显示（基础名单也有），故不再按 detailed 门控——头像路径出自快照/映射缓存，与名单格式无关。
+  // 【为何要比对装载键】流式追加期间每次 result 变化都会重跑本 effect，而第一页内容通常没变；
+  // avatars.load 是覆盖式（先 clear 再并发查），不设守卫就会每批把同一页头像清掉重装一遍。
+  // 键 = 本页 uid 组合 + snapshotVersion；空页清场后同样记键，回到该页时会因键变化重新装载。
+  let avatarKey = "";
   $effect(() => {
-    void appStore.snapshotVersion;
     const uids = paged.view.items.map((r) => r.uid);
+    const key = `${uids.join("|")}@${appStore.snapshotVersion}`;
+    if (key === avatarKey) return;
+    avatarKey = key;
     if (uids.length) void avatars.load(uids);
     else avatars.clear();
   });

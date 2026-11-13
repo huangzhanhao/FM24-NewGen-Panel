@@ -37,12 +37,17 @@
   const snap = $derived(appStore.snapshot);
   const busy = $derived(appStore.busy);
 
-  // 名单全量：扫描RTF / 替换收尾（rosterVersion）后重取；取不到就留空，搜索退回按 UID 直查
+  // 名单全量：扫描RTF / 替换收尾（rosterVersion）后重取；取不到就留空，搜索退回按 UID 直查。
+  // 取数走流式接口（与名单预览同一实现），在这里攒成整份——本卡搜索要一次性在本地过全量
   $effect(() => {
     void appStore.rosterVersion;
+    const acc: PlayerRecord[] = [];
     api
-      .queryPlayers()
-      .then((rows) => (roster = rows))
+      .queryPlayersStream((batch) => {
+        if (batch === null) acc.length = 0; // 名单重新取数：上一代的批次作废
+        else for (const r of batch) acc.push(r);
+      })
+      .then(() => (roster = acc))
       .catch(() => (roster = []));
   });
 

@@ -74,13 +74,13 @@ export const api = {
   startReplace: (params: ReplaceArgs) => invoke<void>('start_replace', { args: params }),
 // 请求取消正在进行的替换流水线。
   cancelReplace: () => invoke<void>('cancel_replace'),
-  // 取当前名单的全部球员记录（名单表格数据源）。按块拉取再聚合成全量，避免单次超大 JSON
-  // 解析长任务；total 是缓存全量条数，块间必须一致——不一致说明读取期间缓存被清/重填，
-  // 从头重取一次；二次仍不一致抛错，由上层 onError 弹窗，绝不返回残缺数组。
-  queryPlayers: async (): Promise<PlayerRecord[]> => {
+  // 名单预览的流式取数：分块拉取，每块成功即经 onBatch 交付，调用方不必等整份读完即可先渲染。
+  // total 是缓存全量条数，块间必须一致——不一致说明读取期间缓存被清/重填（切档/切组/重扫），
+  // 此时先 onBatch(null) 声明已交付批次作废，再从头重取一次；二次仍不一致抛错，由上层 onError 弹窗，
+  // 绝不把两代缓存的块拼在一起当完整名单。
+  queryPlayersStream: async (onBatch: (items: PlayerRecord[] | null) => void): Promise<void> => {
     const limit = PLAYERS_CHUNK_LIMIT;
     let offset = 0;
-    const out: PlayerRecord[] = [];
     let expectedTotal: number | null = null;
     let retried = false;
     for (;;) {
@@ -91,17 +91,16 @@ export const api = {
         if (!retried) {
           retried = true;
           offset = 0;
-          out.length = 0;
           expectedTotal = null;
+          onBatch(null); // 已交付的批次属于旧缓存：先作废，再从第 0 块重取
           continue;
         }
         throw new Error('名单在分块读取期间发生变化');
       }
-      out.push(...chunk.items);
+      onBatch(chunk.items);
       offset += chunk.items.length;
       if (chunk.items.length === 0 || offset >= expectedTotal) break;
     }
-    return out;
   },
   // queryPlayersByUids：按 uid 批量取球员记录（队列坞条目行身份信息：年龄/所在地帮认人）；
   // 只读后端 rtf_cache（与 query_players 同源），未命中的 uid 不在返回之列。

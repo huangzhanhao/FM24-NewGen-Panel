@@ -12,10 +12,11 @@ import type {
   QueueEntry, RenderOutcome, ReplaceArgs, RtfScanResult, SnapshotEntry, SnapshotInfo,
 } from '../types'; // 仅导入类型，编译后完全抹去（不产生运行时代码）
 
-// 名单分块传输的块大小（与 UI 每页行数无关；后端夹 1..=65536）。默认 32768（§7.1）；
-// 后端分页启用与否以 docs/fm存档名单读取-T04G实测记录.md 的签字结论为准。
+// 名单分块传输的块大小（与 UI 每页行数无关；后端夹 1..=65536）。8192 是渐进渲染实测的
+// 最优档：单批 8k 行写代理的长任务 ~190ms（32768 档 ~317ms 超阈），首批更小也更快出首屏
+// （数据见 docs/fm存档名单读取-T04G实测记录.md）。
 // 导出给测试引用，避免换档时测试断言跟着硬编码值漂移。
-export const PLAYERS_CHUNK_LIMIT = 32768;
+export const PLAYERS_CHUNK_LIMIT = 8192;
 
 /** 全部后端命令的前端封装；每个方法的泛型参数是该命令 resolve 出的返回类型。 */
 export const api = {

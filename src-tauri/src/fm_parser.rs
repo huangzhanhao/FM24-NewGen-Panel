@@ -2389,11 +2389,12 @@ pub(crate) fn parse_fm_save(
         progress,
     );
     if let Some(at) = report.cancelled_at {
+        // 取消发生在人员枚举循环里（emit_records 每 BATCH 块查一次），阶段按枚举记，不当成写缓存。
         let err = fail(
             &mut diag,
             &path_buf,
             &version,
-            STAGE_CACHE,
+            STAGE_ENUM,
             format!("名单解析已取消（停在第 {at} / {total} 块），未写入缓存"),
         );
         return Err(log_failure(logger, &path_buf, &diag, started, err));
@@ -2445,34 +2446,11 @@ pub(crate) fn parse_fm_save(
     let counts_out = RosterCounts {
         rows: bound,
         kept: data.len(),
-        filtered: 0,
+        filtered,
         dropped,
         stray: 0,
     };
     Ok((data, summary, counts_out))
-}
-
-// ===================== 编译期活跃根 ============================================================
-
-/// 解析入口由命令层调用；本模块单独编译时没有上游调用者，函数指针常量把整条解析链
-/// 计入已使用，避免尚未接线的实现被判为 dead_code。
-const _: fn(
-    &Path,
-    &NationalityTable,
-    &crate::logger::Logger,
-    &AtomicBool,
-    &mut dyn FnMut(usize, usize),
-) = keep_parse_chain_live;
-
-fn keep_parse_chain_live(
-    path: &Path,
-    nat: &NationalityTable,
-    logger: &crate::logger::Logger,
-    cancel: &AtomicBool,
-    progress: &mut dyn FnMut(usize, usize),
-) {
-    let _ = parse_fm_save(path, nat, false, logger, cancel, progress);
-    let _ = FM_NATION_RANKS_24.len() + FM_NATION_IDS_24.len();
 }
 
 // ===================== 单元测试 =================================================================

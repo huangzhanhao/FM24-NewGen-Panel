@@ -123,6 +123,7 @@ describe('applySnapshot', () => {
     appStore.snapshot = null;
     appStore.rosterReady = false;
     appStore.lastRtfScan = null;
+    appStore.rosterSource = null;
     appStore.rosterVersion = 0;
   });
 
@@ -130,11 +131,13 @@ describe('applySnapshot', () => {
     appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/pack', currentRtf: 'C:/a.rtf' });
     appStore.rosterReady = true;
     appStore.lastRtfScan = roster();
+    appStore.rosterSource = { kind: 'fm', path: 'X.fm' };
 
     await applySnapshot(snapOf({ currentProfile: '档B' }));
 
     expect(appStore.rosterReady).toBe(false);
     expect(appStore.lastRtfScan).toBeNull();
+    expect(appStore.rosterSource).toBeNull();
     expect(appStore.rosterVersion).toBe(1);
   });
 
@@ -179,6 +182,7 @@ describe('名单双路径与视图切换', () => {
     appStore.snapshot = null;
     appStore.rosterReady = false;
     appStore.lastRtfScan = null;
+    appStore.rosterSource = null;
     appStore.rosterVersion = 0;
     appStore.rosterView = 'all';
   });
@@ -194,14 +198,18 @@ describe('名单双路径与视图切换', () => {
     expect(appStore.missingPrerequisites).toContain(t.replace.needRoster);
   });
 
-  it('markRosterFilled 置位三标记：rosterReady / lastRtfScan / rosterVersion', () => {
+  it('markRosterFilled 置位三标记：rosterReady / lastRtfScan / rosterVersion；来源只由扫描写入', () => {
     const scan: RtfScanResult = {
       total: 3, newgan: 0, detailed: true, format: '拓展名单', formatCode: 'extPlayer', language: 'en',
     };
-    markRosterFilled(scan);
+    markRosterFilled(scan, { kind: 'fm', path: 'X.fm' });
     expect(appStore.rosterReady).toBe(true);
     expect(appStore.lastRtfScan).toEqual(scan);
     expect(appStore.rosterVersion).toBe(1);
+    expect(appStore.rosterSource).toEqual({ kind: 'fm', path: 'X.fm' });
+    // 替换收尾不带来源：沿用扫描时记下的那份，别被冲成 null（否则状态点认不出缓存还是这份 .fm 的）
+    markRosterFilled(scan);
+    expect(appStore.rosterSource).toEqual({ kind: 'fm', path: 'X.fm' });
   });
 
   it('resetRosterView 复位为 all', () => {

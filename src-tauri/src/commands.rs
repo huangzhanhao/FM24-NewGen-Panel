@@ -736,6 +736,7 @@ fn missing_roster_err(cache_empty: bool, rtf_path: &str, fm_path: &str) -> Optio
 /// 线程内缓存保障核心：`rtf_cache` 为空时按已设名单路径自动扫描一次（RTF 优先于 FM），
 /// 成功后写两份缓存并返回快照；缓存已非空时直接取快照（摘要缺失走兜底 + WARN）。
 /// 失败返回 Err（文案含来源与「自动扫描」标注），调用方只能经 replace:finished(failed) 转达。
+/// cancel 必须一路透传：.fm 自动扫描是 45–90 s 的阻塞段，不透传则用户点取消要等扫描跑完才生效。
 /// progress_once 由调用方在扫描开始前上报一次（值收口在 STAGE_RTF 之前，见 body）。
 fn ensure_roster_cache(
     rtf_cache: &Arc<Mutex<Vec<PlayerRecord>>>,
@@ -744,6 +745,7 @@ fn ensure_roster_cache(
     fm_path: &str,
     data_dir: &Path,
     logger: &impl LogSink,
+    cancel: &AtomicBool,
     progress_once: &mut dyn FnMut(),
 ) -> Result<(Arc<Vec<PlayerRecord>>, RosterSummary), String> {
     let cached: Option<Vec<PlayerRecord>> = {
@@ -780,7 +782,7 @@ fn ensure_roster_cache(
                     &nat,
                     false,
                     logger,
-                    &AtomicBool::new(false),
+                    cancel,
                     &mut |_, _| {},
                 )
                 .map_err(|e| format!("{e}（替换前自动扫描，来源：{fm_path}）"))?;
@@ -816,6 +818,7 @@ impl ReplaceCtx {
         // 【线程内缓存保障】缓存为空时按已设名单路径自动扫描一次（RTF 优先于 FM），再跑流水线。
         // 失败的错误此时不可能再作为命令 Err 回传（命令主体早已同步返回 Ok），
         // 只能经 replace:finished(failed) + Error 日志转达；不调 run()、不写 config.xml。
+        // 扫描期间点了取消则不算失败：终态报 cancelled，用户主动中止不该被描述成出错。
         let app = self.app.clone();
         let mut progress_reported = false;
         let filled = ensure_roster_cache(
@@ -825,6 +828,7 @@ impl ReplaceCtx {
             &self.fm_path,
             &self.data_dir,
             &*self.logger,
+            &self.cancel,
             &mut || {
                 // 自动扫描进度只上报一次，且值收口在 STAGE_RTF(0..10) 之前：
                 // parse_stage 随后从 0 起算，两段不重叠，进度不回退（R10）。
@@ -846,12 +850,20 @@ impl ReplaceCtx {
         let (roster, meta) = match filled {
             Ok(v) => v,
             Err(msg) => {
-                self.logger.error("replace", msg);
+                // 取消时 parse_fm_save 内部的 log_failure 已留了带「已取消」的终止行，这里不再重复记 ERROR，
+                // 否则日志面板会同时出现「已取消」与一条红字错误。
+                let cancelled = self.cancel.load(Ordering::SeqCst);
+                if !cancelled {
+                    self.logger.error("replace", msg);
+                }
                 // 先复位再 emit：emit 可能被主线程序列按住，而界面解锁只认这次 finished 事件（与收尾同口径）。
                 self._running.release();
                 let _ = self.app.emit(
                     "replace:finished",
-                    serde_json::json!({ "result": "failed", "roster": null }),
+                    serde_json::json!({
+                        "result": if cancelled { "cancelled" } else { "failed" },
+                        "roster": null,
+                    }),
                 );
                 return;
             }
@@ -3002,6 +3014,7 @@ mod tests {
             "",
             dir.path(),
             &logger,
+            &AtomicBool::new(false),
             &mut || progress_reports += 1,
         )
         .unwrap();
@@ -3055,6 +3068,7 @@ mod tests {
             fm.to_str().unwrap(),
             dir.path(),
             &logger,
+            &AtomicBool::new(false),
             &mut || {},
         )
         .unwrap();
@@ -3102,6 +3116,7 @@ mod tests {
             "",
             dir.path(),
             &logger,
+            &AtomicBool::new(false),
             &mut || {},
         )
         .unwrap_err();
@@ -3119,6 +3134,7 @@ mod tests {
             bad_fm.to_str().unwrap(),
             dir.path(),
             &logger,
+            &AtomicBool::new(false),
             &mut || {},
         )
         .unwrap_err();
@@ -3150,6 +3166,7 @@ mod tests {
             "",
             dir.path(),
             &logger,
+            &AtomicBool::new(false),
             &mut || {},
         )
         .unwrap();
@@ -3161,6 +3178,7 @@ mod tests {
             "",
             dir.path(),
             &logger,
+            &AtomicBool::new(false),
             &mut || {},
         )
         .unwrap();

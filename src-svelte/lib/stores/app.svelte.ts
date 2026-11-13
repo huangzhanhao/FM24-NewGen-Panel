@@ -32,6 +32,10 @@ export const appStore = $state({
    *  名单预览/单人替换据此判断名单格式——拓展格式才有「随机人」筛选，extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
   rosterReady: false,                          // 后端名单缓存里有没有数据；名单预览据此决定是否渲染工具条
+  /** 名单缓存的解析来源：kind 区分 RTF/.fm，path 是扫描当时的名单路径。
+   *  路径要记——改 .fm 路径不清缓存（用户可换档不重扫），只有比对路径才能判断缓存是否还属于当前选中的 .fm。
+   *  替换收尾不改它：替换消费的是现有缓存，来源不变。 */
+  rosterSource: null as { kind: 'rtf' | 'fm'; path: string } | null,
   /** 名单预览的视图过滤：'all' 全部 / 'player' 仅球员 / 'staff' 仅职员。
    *  纯前端视图态：切换只重算过滤，不触发重取、不作废 rosterReady；换代复位见 resetRosterView。 */
   rosterView: 'all' as 'all' | 'player' | 'staff',
@@ -212,6 +216,7 @@ export async function applySnapshot(s: AppSnapshot) {
   if (scopeChanged && prev) {
     appStore.rosterReady = false; // 后端名单缓存已作废 → 名单预览回引导空态
     appStore.lastRtfScan = null;  // 摘要「是这份名单解析出来的」，名单换了就作废
+    appStore.rosterSource = null; // 来源随摘要一起作废，留着会让状态点认成「当前 .fm 已扫描」
     appStore.rosterVersion++;     // 触发名单预览按清空后的空态重画
     // 快照读态跟「档+组」走、不跟 RTF 走（快照文件是档+组的 config.xml 副本，换 RTF 不作废，
     // 清零会白白把芯片打回琥珀）；但换档/组后旧路径必不属于当前作用域，不清会跨组虚绿。
@@ -225,10 +230,15 @@ export async function applySnapshot(s: AppSnapshot) {
   appStore.snapshot = s;
 }
 
-/** 「后端名单缓存已填充」的单点标记（扫描RTF 成功、替换成功两处调用）。
+/** 「后端名单缓存已填充」的单点标记（扫描 RTF/.fm 成功、替换成功三处调用）。
+ *  source 只有扫描调用传：替换收尾沿用扫描时记下的来源，不覆盖。
  *  失败/取消**不调**：后端不把缓存写回空表（作用域没变），保留旧摘要与预览，省用户重扫一遍。 */
-export function markRosterFilled(scan: RtfScanResult | null) {
+export function markRosterFilled(
+  scan: RtfScanResult | null,
+  source?: { kind: 'rtf' | 'fm'; path: string },
+) {
   appStore.lastRtfScan = scan;
+  if (source) appStore.rosterSource = source;
   appStore.rosterReady = true;
   appStore.rosterVersion++; // 触发名单预览重载（旧查询结果已过期）
 }

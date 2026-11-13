@@ -28,6 +28,17 @@
         : "",
   );
 
+  // FM 状态点：缓存必须确实是「当前这个 .fm」解析出来的。改 .fm 路径不清缓存（用户可换档后重扫），
+  // 先扫 RTF 再选 .fm、或换选另一个 .fm 时缓存仍在——只看 rosterReady 会把 RTF/旧档的名单报成「已扫描 .fm」。
+  const fmScannedCount = $derived(
+    appStore.rosterReady &&
+      appStore.lastRtfScan &&
+      appStore.rosterSource?.kind === "fm" &&
+      appStore.rosterSource.path === snap?.currentFm
+      ? appStore.lastRtfScan.total
+      : null,
+  );
+
   // 当前组一变就清掉上一次检查结论：effect 只读 snap.currentGroup，
   // 切档后组名相同则结论保留（组名是这里能看到的唯一变更信号）
   let lastGroup = "";
@@ -136,9 +147,10 @@
   /** 扫描RTF：解析当前 RTF 填充名单预览缓存，摘要存入全局态供「随机人」筛选 */
   async function scanRtf() {
     if (!snap?.currentRtf) return;
+    const rtfPath = snap.currentRtf; // 取到局部变量：闭包里 TS 的判空收窄会失效
     try {
       const scan = await runTask(t.setup.scanRtfBtn, () => api.scanRtf());
-      markRosterFilled(scan); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与替换收尾共用）
+      markRosterFilled(scan, { kind: "rtf", path: rtfPath }); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与替换收尾共用）
       appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
     } catch (e) {
       await showError(e);
@@ -148,9 +160,10 @@
   /** 扫描.fm：解析当前 .fm 存档填充名单预览缓存，摘要存入全局态供名单预览与替换共用 */
   async function scanFm() {
     if (!snap?.currentFm) return;
+    const fmPath = snap.currentFm; // 取到局部变量：闭包里 TS 的判空收窄会失效
     try {
       const scan = await runTask(t.setup.scanFmBtn, () => api.scanFm());
-      markRosterFilled(scan); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与扫描RTF/替换收尾共用）
+      markRosterFilled(scan, { kind: "fm", path: fmPath }); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与扫描RTF/替换收尾共用）
       appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
     } catch (e) {
       await showError(e);
@@ -268,12 +281,12 @@
         >
       </div>
     </div>
-    <!-- FM 状态行：已选路径时可观测扫描状态（名单缓存是否已填充由 store 的 rosterReady 单点判定） -->
+    <!-- FM 状态行：已选路径时可观测扫描状态（缓存是否为这份 .fm 解析所得见 fmScannedCount 单点判定） -->
     {#if snap.currentFm}
       <div class="statusline">
-        {#if appStore.rosterReady && appStore.lastRtfScan}
+        {#if fmScannedCount !== null}
           <span class="pill ok"
-            ><span class="dot"></span>{t.setup.fmScannedTag}（{t.table.recordCount(appStore.lastRtfScan.total)}）</span
+            ><span class="dot"></span>{t.setup.fmScannedTag}（{t.table.recordCount(fmScannedCount)}）</span
           >
         {:else}
           <span class="pill warn"><span class="dot"></span>{t.setup.fmUnscannedTag}</span>

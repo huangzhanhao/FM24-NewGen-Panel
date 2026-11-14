@@ -69,6 +69,10 @@ export interface AppSnapshot {
   profiles: string[]; currentProfile: string; groups: GroupInfo[];
   currentGroup: string | null; currentRtf: string; currentFm: string;
   replacing: boolean; configXml: ConfigXmlInfo | null; logPath: string;
+  /** 球员/职员缓存条数：就绪胶囊判断「缓存非空」的唯一后端口径（0=未就绪）。 */
+  rosterCount: number;
+  /** 缓存来源：null=本会话未扫描；rtf/fm/memory。 */
+  rosterKind: 'rtf' | 'fm' | 'memory' | null;
 }
 
 /** 进度事件载荷（对应 Rust 的 ProgressPayload）：替换流水线的进度。
@@ -83,11 +87,10 @@ export interface TaskProgressPayload { status: string; value: number; current: n
 /** 发起替换的参数（对应 Rust 的 ReplaceArgs）；mode 用字面量联合限定三个合法值（协议值）。
  *  allowBlank：本轮已在预检里确认过「可能把本档既有映射清空」，由前端在确认框点「是」后置 true，
  *  界面上没有对应的勾选项——它是确认的凭据，不是给用户关的守卫。
- *  rosterSource：本次从哪份名单读数据；缓存来源与它不符时后端会先自动扫描（换源即换名单）。 */
+ *  名单来源不在参数里：替换只消费「运行游戏读取 / 扫描.fm存档 / 扫描RTF」填好的球员职员缓存。 */
 export interface ReplaceArgs {
   mode: 'Preserve' | 'Overwrite' | 'Generate';
   filterNewgan: boolean; allowDuplicates: boolean; saveBackup: boolean; allowBlank: boolean;
-  rosterSource: 'rtf' | 'fm';
 }
 
 /** 「发起前预检」返回（对应 Rust 的 PreflightResult）：是否需要先弹确认，以及本档档景现有条数。 */

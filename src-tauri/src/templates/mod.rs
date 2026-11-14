@@ -56,6 +56,8 @@ pub enum SkipReason {
     PoolExhausted,
     /// 池内一张图都没有（空包 / 该标准口径下无可用目录）。
     EmptyPack,
+    /// 该标准不适用于这类人员（标准二的 14 种族目录只作用于球员，职员一律不参与）。
+    StaffNotApplicable,
 }
 
 /// 抽图规则统一接口：每个标准一套实现。pick 不带 config 参数 ——

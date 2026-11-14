@@ -6,7 +6,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { api } from '../services/api';
 import { t } from '../text';
-import type { AppSnapshot, PlayerRecord, ProgressPayload, RtfScanResult, TaskProgressPayload } from '../types';
+import type { AppSnapshot, IntegrityResult, PlayerRecord, ProgressPayload, RtfScanResult, TaskProgressPayload } from '../types';
 import { appendLogBatch, clearDisplay, logStore } from './log.svelte';
 
 /** 替换流水线的最终结果（'' = 尚未发生过替换）。事件载荷不含 ''，lastResult 初始值用它。 */
@@ -32,10 +32,9 @@ export const appStore = $state({
    *  名单预览/单人替换据此判断名单格式——拓展格式才有「随机人」筛选，extStaff 时第 15 列是偏好工作。 */
   lastRtfScan: null as RtfScanResult | null,
   rosterReady: false,                          // 后端名单缓存里有没有数据；名单预览据此决定是否渲染工具条
-  /** 名单缓存的解析来源：kind 区分 RTF/.fm，path 是扫描当时的名单路径。
-   *  路径要记——改 .fm 路径不清缓存（用户可换档不重扫），只有比对路径才能判断缓存是否还属于当前选中的 .fm。
-   *  替换收尾不改它：替换消费的是现有缓存，来源不变。 */
-  rosterSource: null as { kind: 'rtf' | 'fm'; path: string } | null,
+  /** 名单缓存的解析来源：kind 区分 RTF/.fm/游戏内存，path 是扫描当时的名单路径（内存路线为空）。
+   *  来源只用于回显；替换消费现有缓存，不再按来源补扫。 */
+  rosterSource: null as { kind: 'rtf' | 'fm' | 'memory'; path: string } | null,
   /** 名单预览的视图过滤：'all' 全部 / 'player' 仅球员 / 'staff' 仅职员。
    *  纯前端视图态：切换只重算过滤，不触发重取、不作废 rosterReady；换代复位见 resetRosterView。 */
   rosterView: 'all' as 'all' | 'player' | 'staff',
@@ -46,6 +45,11 @@ export const appStore = $state({
    *  切档/切组后自动回引导空态（清零见 applySnapshot）。 */
   snapshotReadPath: null as string | null,
   snapshotVersion: 0,                          // 快照预览版本号：读取快照成功或替换成功后 +1，触发快照预览重载（同路径重读也生效）
+  /** 当前组的头像包探活结论（就绪胶囊用；null=探测中/未探测）。只认 group 与当前组一致的结论，
+   *  避免切组瞬间拿旧包结论把状态点刷绿。 */
+  packProbe: null as IntegrityResult | null,
+  packProbeGroup: '',                          // packProbe 对应的头像包目录（与 currentGroup 一致才算数）
+  packProbing: false,                          // 探测在途：期间胶囊保持橙色（未确认即未就绪）
 
   // ---- 展示态派生 getter（核心业务规则单点维护，各组件只消费） ------------------------------------------------------
   /** 展示用快照：浏览态优先，否则真实激活快照。侧栏/当前任务卡/快照预览等展示类组件统一用它。 */
@@ -61,19 +65,49 @@ export const appStore = $state({
     const active = this.snapshot;
     return !!active && this.selectedProfile !== active.currentProfile;
   },
-  /** 替换就绪：作用于激活档——「已选 Profile + 已选头像包 + 已设名单（RTF 或 .fm）」三者齐备才允许开始替换。 */
+  /** 球员/职员缓存是否可用：后端快照条数或本次会话扫描结果任一证明「非空」。
+   *  扫描成功时 markRosterFilled 只改本地标记、不重拉快照，所以两个口径缺一不可。 */
+  get rosterCacheReady(): boolean {
+    const s = this.snapshot;
+    if ((s?.rosterCount ?? 0) > 0) return true;
+    return this.rosterReady && (this.lastRtfScan?.total ?? 0) > 0;
+  },
+  /** 头像包是否合法：当前组已完成探活且结论为 complete。探活不覆盖「可修复/无法识别」——
+   *  那两种状态下头像包不能直接开工，胶囊保持橙色。 */
+  get packReady(): boolean {
+    const s = this.snapshot;
+    return (
+      !this.packProbing &&
+      !!s?.currentGroup &&
+      this.packProbeGroup === s.currentGroup &&
+      this.packProbe?.status === 'complete'
+    );
+  },
+  /** 存档资料台就绪：激活档 + 已选头像包 + 头像包合法（探活 complete）+ 名单缓存合法且非空。
+   *  单点定义在 store 里，既给顶栏胶囊判定，也能被单元测试直接覆盖。 */
+  get archiveReady(): boolean {
+    const s = this.snapshot;
+    return (
+      !!s &&
+      s.currentProfile !== 'No Profile' &&
+      !!s.currentGroup &&
+      this.packReady &&
+      this.rosterCacheReady
+    );
+  },
+  /** 替换就绪：激活档 + 已选头像包 + 球员/职员缓存非空（替换的唯一输入是缓存）。 */
   get replaceReady(): boolean {
     const s = this.snapshot;
-    return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && !!(s.currentRtf || s.currentFm);
+    return !!s && s.currentProfile !== 'No Profile' && !!s.currentGroup && this.rosterCacheReady;
   },
-  /** 替换台顶部的缺失项清单：未选 Profile / 未选组 / 未设名单（RTF 或 .fm），缺哪条列哪条文案。
+  /** 替换台顶部的缺失项清单：未选 Profile / 未选组 / 名单缓存为空，缺哪条列哪条文案。
    *  与 replaceReady 同一套条件（数组非空 ⇔ 未就绪），单点维护免得两处口径漂移。 */
   get missingPrerequisites(): string[] {
     const s = this.snapshot;
     return [
       !s || s.currentProfile === 'No Profile' ? t.replace.needProfile : '',
       s && !s.currentGroup ? t.replace.needGroup : '',
-      s && !(s.currentRtf || s.currentFm) ? t.replace.needRoster : '',
+      s && !this.rosterCacheReady ? t.replace.needRoster : '',
     ].filter(Boolean);
   },
   /** 第 15 列语义单点：extStaff（拓展职员）名单的「所在地」列实为「偏好工作」。
@@ -228,6 +262,40 @@ export async function applySnapshot(s: AppSnapshot) {
     }
   }
   appStore.snapshot = s;
+  // 头像包探活：组变了（或还没有当前组的结论）就静默重探一次，顶栏就绪胶囊只认当前组的结论。
+  if (
+    !appStore.packProbing &&
+    (!appStore.packProbe || appStore.packProbeGroup !== (s.currentGroup ?? ''))
+  ) {
+    void refreshPackProbe();
+  }
+}
+
+/** 静默探活当前头像包（就绪胶囊用）：不写日志、不发进度，失败按未就绪处理。
+ *  只采纳与发起时同组的结论，切组期间的旧结果直接丢弃。 */
+export async function refreshPackProbe() {
+  const group = appStore.snapshot?.currentGroup ?? '';
+  if (!group) {
+    appStore.packProbe = null;
+    appStore.packProbeGroup = '';
+    return;
+  }
+  appStore.packProbing = true;
+  try {
+    const result = await api.probePack(group);
+    if ((appStore.snapshot?.currentGroup ?? '') === group) {
+      appStore.packProbe = result;
+      appStore.packProbeGroup = group;
+    }
+  } catch {
+    // 探活失败不打扰用户：真正的错误留给「检查完整性」按钮给出；这里只保证胶囊不误绿。
+    if ((appStore.snapshot?.currentGroup ?? '') === group) {
+      appStore.packProbe = null;
+      appStore.packProbeGroup = group;
+    }
+  } finally {
+    appStore.packProbing = false;
+  }
 }
 
 /** 「后端名单缓存已填充」的单点标记（扫描 RTF/.fm 成功、替换成功三处调用）。
@@ -235,7 +303,7 @@ export async function applySnapshot(s: AppSnapshot) {
  *  失败/取消**不调**：后端不把缓存写回空表（作用域没变），保留旧摘要与预览，省用户重扫一遍。 */
 export function markRosterFilled(
   scan: RtfScanResult | null,
-  source?: { kind: 'rtf' | 'fm'; path: string },
+  source?: { kind: 'rtf' | 'fm' | 'memory'; path: string },
 ) {
   appStore.lastRtfScan = scan;
   if (source) appStore.rosterSource = source;
@@ -327,13 +395,12 @@ export async function initListeners(onFinished: (r: ReplaceResult) => Promise<vo
   await listen<{
     result: Exclude<ReplaceResult, ''>;
     roster: RtfScanResult | null;
-    source?: { kind: 'rtf' | 'fm'; path: string } | null;
   }>('replace:finished', async (e) => {
     appStore.lastResult = e.payload.result;
     // 「缓存已填充」标记只在成功时打：失败/取消保留替换前的摘要与预览，用户不必重扫（详见 markRosterFilled）。
-    // source 仅在本次线程内自动扫描时非空：补上来源标记；命中缓存时为 null，沿用扫描时记下的那份。
+    // 替换只消费缓存，来源沿用扫描命令记下的那份，不覆盖。
     if (e.payload.result === 'finished') {
-      markRosterFilled(e.payload.roster, e.payload.source ?? undefined);
+      markRosterFilled(e.payload.roster);
     }
     await refreshSnapshot();
     if (e.payload.result === 'finished') {

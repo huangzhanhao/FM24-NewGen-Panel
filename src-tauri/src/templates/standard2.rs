@@ -194,6 +194,12 @@ impl PickRule for Standard2Rule {
     }
 
     fn pick(&mut self, player: &PlayerRecord, duplicates: bool) -> Option<PickedImage> {
+        // 14 种族目录只描述球员的种族/国籍映射；职员没有这层语义，必须显式跳过，
+        // 不能拿职员的国籍去套球员目录（否则职员会被错误地分配种族脸）。
+        if player.kind.is_staff() {
+            self.last_skip = SkipReason::StaffNotApplicable;
+            return None;
+        }
         // 双国籍查表(json Ethnics) → 种族码修正(json CodeRules) → 目标目录选图 → 全池兜底。
         let e2 = if player.sec_nat.is_empty() {
             None
@@ -340,6 +346,13 @@ mod tests {
         assert!(rule.pick(&player("r-2", "ESP", "1"), false).is_some());
         assert!(rule.pick(&player("r-3", "ESP", "1"), false).is_none());
         assert_eq!(rule.last_skip_reason(), SkipReason::PoolExhausted);
+        // ⑧ 标准二只作用于球员：职员即便国籍/种族码齐全也必须跳过，且不能消耗图片池。
+        let mut staff = player("s-1", "ESP", "1");
+        staff.kind = crate::rtf_scanner::PersonKind::StaffMale;
+        let mut rule = Standard2Rule::new(&faces_map, &RuleConfig::builtin().standard2);
+        assert!(rule.pick(&staff, false).is_none());
+        assert_eq!(rule.last_skip_reason(), SkipReason::StaffNotApplicable);
+        assert!(rule.pick(&player("r-1", "ESP", "1"), false).is_some());
     }
 
     #[test]

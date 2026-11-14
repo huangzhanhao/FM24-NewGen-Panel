@@ -6,7 +6,7 @@
   import { t } from "../../text"; // 全局文案常量
   import { pinScrollEnd } from "../../ui/actions"; // 把长路径钉到最右的 action
   import Icon from "../../ui/Icon.svelte";
-  import { appStore, applySnapshot, markRosterFilled, markSnapshotRead, runTask, tip } from "../../stores/app.svelte";
+  import { appStore, applySnapshot, markRosterFilled, markSnapshotRead, refreshPackProbe, runTask, tip } from "../../stores/app.svelte";
   import type { IntegrityResult } from "../../types";
   import RuleEditor from "./RuleEditor.svelte";
   import NationalityEditor from "./NationalityEditor.svelte";
@@ -28,16 +28,7 @@
         : "",
   );
 
-  // FM 状态点：缓存必须确实是「当前这个 .fm」解析出来的。改 .fm 路径不清缓存（用户可换档后重扫），
-  // 先扫 RTF 再选 .fm、或换选另一个 .fm 时缓存仍在——只看 rosterReady 会把 RTF/旧档的名单报成「已扫描 .fm」。
-  const fmScannedCount = $derived(
-    appStore.rosterReady &&
-      appStore.lastRtfScan &&
-      appStore.rosterSource?.kind === "fm" &&
-      appStore.rosterSource.path === snap?.currentFm
-      ? appStore.lastRtfScan.total
-      : null,
-  );
+  // FM 状态点已随 .fm 控件简化为单按钮而移除：扫描结果统一由名单预览与就绪胶囊呈现。
 
   // 当前组一变就清掉上一次检查结论：effect 只读 snap.currentGroup，
   // 切档后组名相同则结论保留（组名是这里能看到的唯一变更信号）
@@ -66,19 +57,33 @@
     }
   }
 
-  /** 浏览并选择 .fm 存档：open 返回选中路径或 null（取消） */
-  async function browseFm() {
+  /** 「运行游戏读取」：读正在运行的 FM 进程内存，刷新球员/职员缓存（与 .fm 路线同一份缓存） */
+  async function scanMemory() {
+    try {
+      const scan = await runTask(t.setup.readMemoryBtn, () => api.scanFmMemory());
+      // 内存路线没有文件路径：来源标记的 path 留空（只用于回显来源，不参与任何判定）。
+      markRosterFilled(scan, { kind: "memory", path: "" });
+      appStore.rtfPreview = "table"; // 切到名单 Tab，让用户立刻看到读到的名单
+    } catch (e) {
+      await showError(e);
+    }
+  }
+
+  /** 「扫描.fm存档」：先弹文件选择器，选中后设入当前组并立即扫描，刷新同一份缓存 */
+  async function pickAndScanFm() {
     const file = await open({
       filters: [{ name: "FM", extensions: ["fm"] }],
       title: t.setup.selectFmDialogTitle,
     });
-    if (typeof file === "string") {
-      try {
-        await applySnapshot(await api.setCurrentFm(file));
-        integrity = null;
-      } catch (e) {
-        await showError(e);
-      }
+    if (typeof file !== "string") return; // 用户取消
+    const fmPath = file; // 取到局部变量：闭包里 TS 的判空收窄会失效
+    try {
+      await applySnapshot(await api.setCurrentFm(fmPath));
+      const scan = await runTask(t.setup.scanFmFileBtn, () => api.scanFm());
+      markRosterFilled(scan, { kind: "fm", path: fmPath }); // 名单缓存已填充：触发名单预览重载
+      appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
+    } catch (e) {
+      await showError(e);
     }
   }
 
@@ -96,6 +101,7 @@
       // 还会把新包报成「完整」
       if (snap?.currentGroup !== imgDir) return;
       integrity = got;
+      void refreshPackProbe(); // 检查结论同步给顶栏胶囊（否则要等下次切组才变色）
     } catch (e) {
       if (snap?.currentGroup !== imgDir) return; // 已经换包：这条错误不再打扰用户
       await showError(e);
@@ -157,19 +163,6 @@
     }
   }
 
-  /** 扫描.fm：解析当前 .fm 存档填充名单预览缓存，摘要存入全局态供名单预览与替换共用 */
-  async function scanFm() {
-    if (!snap?.currentFm) return;
-    const fmPath = snap.currentFm; // 取到局部变量：闭包里 TS 的判空收窄会失效
-    try {
-      const scan = await runTask(t.setup.scanFmBtn, () => api.scanFm());
-      markRosterFilled(scan, { kind: "fm", path: fmPath }); // 名单缓存已填充：rosterVersion 触发名单预览重载（标记单点见 store，与扫描RTF/替换收尾共用）
-      appStore.rtfPreview = "table"; // 切到名单 Tab（两工作台共享：替换台也直接看到这份名单）
-    } catch (e) {
-      await showError(e);
-    }
-  }
-
   /** 一键创建缺失目录（先弹确认），创建成功后重新检查拿最新结论 */
   async function fixMissing() {
     if (!snap?.currentGroup || !integrity || integrity.missing.length === 0) return;
@@ -185,6 +178,7 @@
       // 复检和「检查完整性」按钮是同一条命令，同样经 runTask 让状态栏接管进度：
       // 不包的话后端照样发 task:progress，进度条会动而状态文字停在「就绪」
       integrity = await runTask(t.setup.checkIntegrityBtn, () => api.checkIntegrity(imgDir));
+      void refreshPackProbe(); // 补齐目录后顶栏胶囊立即重新判定
     } catch (e) {
       await showError(e);
     }
@@ -255,45 +249,6 @@
         >
       </div>
     </div>
-    <!-- FM 存档路径行（与 RTF 行并立的名单来源）：只读输入框（前置文件图标）+ [选择.fm | 扫描.fm] 按钮组 -->
-    <div class="path-row">
-      <label for="sc-fm">{t.setup.fmLabel}</label>
-      <div class="input-wrap">
-        <Icon name="file" />
-        <input
-          id="sc-fm"
-          type="text"
-          readonly
-          value={snap.currentFm || t.setup.fmUnsetValue}
-          use:tip={snap.currentFm}
-          use:pinScrollEnd={snap.currentFm}
-        />
-      </div>
-      <div class="path-actions">
-        <button
-          class="btn"
-          onclick={browseFm}
-          disabled={busy || browseMode || !snap.currentGroup}
-          use:tip={snap.currentGroup ? t.setup.selectFmHint : t.setup.noGroupHint}>{t.setup.selectFmBtn}</button
-        >
-        <button class="btn" onclick={scanFm} disabled={busy || !snap.currentFm} use:tip={t.setup.scanFmHint}
-          >{t.setup.scanFmBtn}</button
-        >
-      </div>
-    </div>
-    <!-- FM 状态行：已选路径时可观测扫描状态（缓存是否为这份 .fm 解析所得见 fmScannedCount 单点判定） -->
-    {#if snap.currentFm}
-      <div class="statusline">
-        {#if fmScannedCount !== null}
-          <span class="pill ok"
-            ><span class="dot"></span>{t.setup.fmScannedTag}（{t.table.recordCount(fmScannedCount)}）</span
-          >
-        {:else}
-          <span class="pill warn"><span class="dot"></span>{t.setup.fmUnscannedTag}</span>
-        {/if}
-        <span class="note">{t.setup.fmRosterHelp}</span>
-      </div>
-    {/if}
     <!-- config.xml 行：当前展示档的存档 XML 快照路径（前置文件图标）+ [读取快照 | 查看位置]（左读取右位置）；
          两者都依赖快照文件已生成（执行替换后才有），未生成时一并禁用 -->
     <div class="path-row">
@@ -363,8 +318,8 @@
         </p>
       {/if}
     {/if}
-    <!-- 可编辑数据入口：标准规则（RuleEditor）与国籍对照表（NationalityEditor）同居一行，
-         两者都是 json 配置，只是打开不同的编辑对话框 -->
+    <!-- 可编辑数据入口 + 两条名单读取路线同居一行：规则/国籍都是 json 配置；
+         名单路线二选一——运行中的游戏内存，或磁盘上的 .fm 存档，扫描结果都刷新同一份球员/职员缓存 -->
     <div class="rule-row">
       <div class="rule-actions">
         <button class="btn" onclick={() => ruleEditor?.openEditor()} disabled={busy} use:tip={t.setup.ruleConfigHint}
@@ -375,6 +330,19 @@
           onclick={() => nationalityEditor?.openEditor()}
           disabled={busy}
           use:tip={t.setup.nationalityConfigHint}>{t.setup.nationalityConfigBtn}</button
+        >
+        <button class="btn" onclick={scanMemory} disabled={busy} use:tip={t.setup.readMemoryHint}
+          >{t.setup.readMemoryBtn}</button
+        >
+        <button
+          class="btn"
+          onclick={pickAndScanFm}
+          disabled={busy || browseMode || !snap.currentGroup}
+          use:tip={browseMode
+            ? t.setup.selectFmBrowseHint
+            : snap.currentGroup
+              ? t.setup.scanFmFileHint
+              : t.setup.noGroupHint}>{t.setup.scanFmFileBtn}</button
         >
       </div>
     </div>

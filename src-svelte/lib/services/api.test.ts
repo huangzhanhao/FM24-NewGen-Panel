@@ -11,9 +11,9 @@ import type { PlayerRecord } from '../types';
 describe('api 封装', () => {
   it('startReplace 传参与命令名正确', async () => {
     invoke.mockResolvedValue(undefined);
-    await api.startReplace({ mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false, rosterSource: 'fm' });
+    await api.startReplace({ mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false });
     expect(invoke).toHaveBeenCalledWith('start_replace', {
-      args: { mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false, rosterSource: 'fm' },
+      args: { mode: 'Preserve', filterNewgan: true, allowDuplicates: false, saveBackup: true, allowBlank: false },
     });
   });
 

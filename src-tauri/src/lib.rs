@@ -14,6 +14,7 @@ mod commands; // Tauri 命令层：前端可调用的所有函数都在这里
 mod face_mapper; // 核心算法：球员 → 头像图片的映射
 mod facepack_scanner; // 头像包扫描器：包布局扫描与标准判定（FolderList 来自 templates，不硬编码）
 mod fm_parser; // .fm 存档解析器（FM24：zstd 容器 + 名池/人员块/槽位绑定 + 名单字段还原）
+mod fm_memory; // 运行中的 FM 进程内存读取器（与 .fm 路线产出同一份名单结构）
 mod image_ai; // AI 文生图：契约/配置/模板渲染/生成编排/画廊记录/批量队列（协议见 image_ai_providers，命令在 commands.rs）
 mod image_ai_providers; // AI 文生图适配器族（openai/volcano/dashscope/siliconflow/modelscope/comfyui 协议适配）
 mod json_store; // JSON 配置的原子读写
@@ -341,6 +342,8 @@ pub fn run() {
             commands::scan_images,     // 扫描头像：建图片索引缓存（供替换复用），结果写日志
             commands::scan_rtf,        // 扫描RTF：解析名单并填充预览缓存，结果写日志
             commands::scan_fm,         // 扫描FM存档：解析 .fm 并填充预览缓存，结果写日志
+            commands::scan_fm_memory,  // 运行游戏读取：读 FM 进程内存并填充预览缓存
+            commands::probe_pack,      // 静默探活头像包（就绪胶囊用，不写日志/进度）
             commands::open_rules_dir,  // 打开标准规则目录（data/rules/，用户编辑 templateN.json）
             commands::open_snapshot_dir, // 打开存档 XML 快照所在目录（查看位置）
             commands::preview_profile, // 预览指定存档（下拉浏览展示，不切换当前档）

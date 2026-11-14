@@ -8,9 +8,9 @@ const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
 
-import { appStore, applySnapshot, BAR_LINGER_MS, markRosterFilled, personKindGroup, resetRosterView, rowFormatOf, runTask } from './app.svelte';
+import { appStore, applySnapshot, BAR_LINGER_MS, markRosterFilled, personKindGroup, refreshPackProbe, resetRosterView, rowFormatOf, runTask } from './app.svelte';
 import { t } from '../text';
-import type { AppSnapshot, PersonKind, PlayerRecord, RtfScanResult } from '../types';
+import type { AppSnapshot, IntegrityResult, PersonKind, PlayerRecord, RtfScanResult } from '../types';
 
 /** 两条进度通道的清空态（store 里这两个字段的形状一致）。 */
 const blank = { status: '', value: 0, current: 0, total: 0 };
@@ -18,6 +18,7 @@ const blank = { status: '', value: 0, current: 0, total: 0 };
 const snap = (replacing: boolean) => ({
   profiles: [], currentProfile: 'No Profile', groups: [], currentGroup: null,
   currentRtf: '', currentFm: '', replacing, configXml: null, logPath: '',
+  rosterCount: 0, rosterKind: null as AppSnapshot['rosterKind'],
 });
 /** 构造一个任意快照（applySnapshot 的入参）。 */
 const snapOf = (over: Partial<AppSnapshot> = {}): AppSnapshot => ({ ...snap(false), ...over });
@@ -187,17 +188,6 @@ describe('名单双路径与视图切换', () => {
     appStore.rosterView = 'all';
   });
 
-  it('replaceReady：RTF 与 .fm 任一已选即就绪，两空未就绪', () => {
-    const base = { currentProfile: '档A', currentGroup: 'C:/pack' };
-    appStore.snapshot = snapOf({ ...base, currentRtf: '', currentFm: 'X.fm' });
-    expect(appStore.replaceReady).toBe(true);
-    appStore.snapshot = snapOf({ ...base, currentRtf: 'C:/a.rtf', currentFm: '' });
-    expect(appStore.replaceReady).toBe(true);
-    appStore.snapshot = snapOf({ ...base, currentRtf: '', currentFm: '' });
-    expect(appStore.replaceReady).toBe(false);
-    expect(appStore.missingPrerequisites).toContain(t.replace.needRoster);
-  });
-
   it('markRosterFilled 置位三标记：rosterReady / lastRtfScan / rosterVersion；来源只由扫描写入', () => {
     const scan: RtfScanResult = {
       total: 3, newgan: 0, detailed: true, format: '拓展名单', formatCode: 'extPlayer', language: 'en',
@@ -241,5 +231,90 @@ describe('名单双路径与视图切换', () => {
     expect(rowFormatOf(rec('playerFemale'))).toBe('extPlayer');
     expect(rowFormatOf(rec('staffMale'))).toBe('extStaff');
     expect(rowFormatOf(rec('staffFemale'))).toBe('extStaff');
+  });
+});
+
+/** 就绪胶囊（绿/橙两态）与头像包静默探活。
+ *  四种判据都收敛到 store getter，顶栏只做展示——改判据先改这里和对应断言。 */
+describe('就绪判据与头像包探活', () => {
+  const probe = (over: Partial<IntegrityResult> = {}): IntegrityResult => ({
+    standard: 2, status: 'complete', missing: [], extra: [], found: 14, expectedTotal: 14, ...over,
+  });
+  const scan = (total: number): RtfScanResult => ({
+    total, newgan: 0, detailed: true, format: '拓展名单', formatCode: 'extPlayer', language: 'en',
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    appStore.snapshot = null;
+    appStore.rosterReady = false;
+    appStore.lastRtfScan = null;
+    appStore.packProbe = null;
+    appStore.packProbeGroup = '';
+    appStore.packProbing = false;
+  });
+
+  it('rosterCacheReady：快照条数或本会话扫描结果任一非空即就绪', () => {
+    appStore.snapshot = snapOf({ rosterCount: 5 });
+    expect(appStore.rosterCacheReady).toBe(true);
+
+    appStore.snapshot = snapOf({ rosterCount: 0 });
+    expect(appStore.rosterCacheReady).toBe(false);
+    // 扫描成功立刻置本地标记（不等快照重拉），也必须算就绪。
+    markRosterFilled(scan(3), { kind: 'memory', path: '' });
+    expect(appStore.rosterCacheReady).toBe(true);
+    expect(appStore.rosterSource).toEqual({ kind: 'memory', path: '' });
+  });
+
+  it('archiveReady：档 + 组 + 头像包 complete + 名单非空，缺一即橙', () => {
+    const ready = { currentProfile: '档A', currentGroup: 'C:/pack', rosterCount: 3 };
+    appStore.snapshot = snapOf(ready);
+    appStore.packProbe = probe();
+    appStore.packProbeGroup = 'C:/pack';
+    expect(appStore.archiveReady).toBe(true);
+
+    // 头像包未探活：即便其余条件齐备也不绿。
+    appStore.packProbe = null;
+    expect(appStore.archiveReady).toBe(false);
+
+    // 探活结论属于别的组：不能把当前组的胶囊染绿。
+    appStore.packProbe = probe();
+    appStore.packProbeGroup = 'C:/other';
+    expect(appStore.archiveReady).toBe(false);
+
+    // 目录不完整（fixable）同样不算合法。
+    appStore.packProbeGroup = 'C:/pack';
+    appStore.packProbe = probe({ status: 'fixable', missing: ['Asian'] });
+    expect(appStore.archiveReady).toBe(false);
+
+    // 包合法但名单缓存为空：未就绪。
+    appStore.packProbe = probe();
+    appStore.snapshot = snapOf({ ...ready, rosterCount: 0 });
+    expect(appStore.archiveReady).toBe(false);
+
+    // 未激活档：未就绪。
+    appStore.snapshot = snapOf({ ...ready, currentProfile: 'No Profile' });
+    expect(appStore.archiveReady).toBe(false);
+  });
+
+  it('refreshPackProbe：只采纳与发起时同组的结论', async () => {
+    appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/pack' });
+    invoke.mockResolvedValue(probe());
+    await refreshPackProbe();
+    expect(invoke).toHaveBeenCalledWith('probe_pack', { imgDir: 'C:/pack' });
+    expect(appStore.packProbe?.status).toBe('complete');
+    expect(appStore.packProbeGroup).toBe('C:/pack');
+    expect(appStore.packProbing).toBe(false);
+
+    // 探活途中切组：旧结论必须丢弃，当前组保持未确认。
+    let release = (_: IntegrityResult) => {};
+    invoke.mockReset();
+    invoke.mockImplementation(() => new Promise<IntegrityResult>((r) => (release = r)));
+    const pending = refreshPackProbe();
+    appStore.snapshot = snapOf({ currentProfile: '档A', currentGroup: 'C:/other' });
+    release(probe());
+    await pending;
+    expect(appStore.packProbeGroup).toBe('C:/pack');
+    expect(appStore.archiveReady).toBe(false);
   });
 });

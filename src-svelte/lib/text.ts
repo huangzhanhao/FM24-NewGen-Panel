@@ -49,10 +49,9 @@ const zhCN = {
     scopeSep: " · ",
     /** 无头像包组时的回显占位（侧栏还没关联目录） */
     scopeNoGroup: "未选头像包",
-    /** chip 状态点的悬停说明（三档：绿 / 琥珀 / 灰） */
-    stateOk: "条件已满足",
-    stateWarn: "还差几项，点进去看提示",
-    stateIdle: "尚未开始",
+    /** chip 状态点的悬停说明（两档：绿=就绪 / 橙=未就绪） */
+    stateOk: "已就绪",
+    stateWarn: "未就绪，点进去查看缺少的条件",
   },
 
   /** 侧栏底部主题切换 */
@@ -78,10 +77,10 @@ const zhCN = {
     tutorialTab: "教程",
     faqTab: "FAQ",
     searchPlaceholder: "搜索章节或关键词…",
-    searchHint: "Ctrl+F 搜索 · Esc 关闭",
+    searchHint: "Ctrl+F 聚焦搜索",
     resultCount: (shown: number, total: number) => `显示 ${shown} / 共 ${total} 条`,
     noResults: "没有匹配的条目，换个关键词试试。",
-    close: "关闭文档面板",
+    clearSearch: "清空搜索",
     note: "提示",
     warning: "注意",
   },
@@ -150,16 +149,12 @@ const zhCN = {
     selectRtfBrowseHint: "请先点击「激活」后再设置 RTF（当前为浏览预览）",
     scanRtfBtn: "扫描RTF",
     scanRtfHint: "解析 RTF 并填充名单预览（结果写入日志）",
-    fmLabel: "FM 存档：",
-    fmUnsetValue: "未设置",
-    selectFmBtn: "选择.fm",
     selectFmDialogTitle: "选择 FM 存档",
-    selectFmHint: "选择 FM 存档（.fm）作为名单来源",
-    scanFmBtn: "扫描.fm",
-    scanFmHint: "解析 .fm 存档并填充名单预览（结果写入日志）",
-    fmScannedTag: "已扫描 .fm 名单",
-    fmUnscannedTag: "已选 .fm（未扫描）",
-    fmRosterHelp: "扫描后名单预览与替换取数均来自该存档；混合名单可在预览中切换球员/职员视图。",
+    scanFmFileBtn: "扫描.fm存档",
+    scanFmFileHint: "选择 .fm 存档并立即扫描，结果刷新球员/职员缓存",
+    selectFmBrowseHint: "请先点击「激活」后再扫描 .fm 存档（当前为浏览预览）",
+    readMemoryBtn: "运行游戏读取",
+    readMemoryHint: "扫描正在运行的 FM 进程内存，结果刷新球员/职员缓存（无需 .fm 存档）",
     viewConfigBtn: "读取快照",
     viewConfigHint: "解析存档 XML 快照，在结果区「快照预览」中查看映射列表",
     viewSnapshotBtn: "查看位置",
@@ -600,13 +595,10 @@ const zhCN = {
     },
   },
 
-  /** 「替换执行」面板 */
+  /** 「批量替换」面板 */
   replace: {
-    cardTitle: "替换执行",
+    cardTitle: "批量替换",
     modeLabel: "模式：",
-    /** 读取来源开关（排在选项开关里）：轨道左＝RTF（默认），轨道右＝.fm 存档；文案随当前来源切换 */
-    sourceRtf: "从 RTF 读",
-    sourceFm: "从 .fm 存档读",
     optionsLabel: "选项设置：",
     optAllowDuplicates: "允许复用图片",
     optFilterNewgan: "仅随机人",
@@ -638,7 +630,7 @@ const zhCN = {
     needProfile: "选择 Profile",
     needGroup: "选择头像包",
     needRtf: "设置 RTF 名单",
-    needRoster: "设置名单文件",
+    needRoster: "先生成球员/职员名单缓存（运行游戏读取或扫描 .fm 存档）",
     todoPrefix: "还需完成：",
     missingDirsTitle: "缺失目录",
     missingDirsConfirm: (standard: number, count: number) =>
@@ -1020,10 +1012,9 @@ const zhTW: Dict = {
     scopeSep: " · ",
     /** 无头像包组时的回显占位（侧栏还没关联目录） */
     scopeNoGroup: "未選頭像包",
-    /** chip 状态点的悬停说明（三档：绿 / 琥珀 / 灰） */
-    stateOk: "條件已滿足",
-    stateWarn: "還差幾項，點進去看提示",
-    stateIdle: "尚未開始",
+    /** chip 状态点的悬停说明（兩檔：綠=就緒 / 橙=未就緒） */
+    stateOk: "已就緒",
+    stateWarn: "未就緒，點進去看缺少的條件",
   },
 
   /** 侧栏底部主题切换 */
@@ -1049,10 +1040,10 @@ const zhTW: Dict = {
     tutorialTab: "教學",
     faqTab: "FAQ",
     searchPlaceholder: "搜尋章節或關鍵字…",
-    searchHint: "Ctrl+F 搜尋 · Esc 關閉",
+    searchHint: "Ctrl+F 聚焦搜尋",
     resultCount: (shown: number, total: number) => `顯示 ${shown} / 共 ${total} 筆`,
     noResults: "沒有符合的項目，換個關鍵字試試。",
-    close: "關閉文件面板",
+    clearSearch: "清除搜尋",
     note: "提示",
     warning: "注意",
   },
@@ -1121,16 +1112,12 @@ const zhTW: Dict = {
     selectRtfBrowseHint: "請先點選「啟用」後再設定 RTF（當前為瀏覽預覽）",
     scanRtfBtn: "掃描RTF",
     scanRtfHint: "解析 RTF 並填充名單預覽（結果寫入日誌）",
-    fmLabel: "FM 存檔：",
-    fmUnsetValue: "未設定",
-    selectFmBtn: "選擇.fm",
     selectFmDialogTitle: "選擇 FM 存檔",
-    selectFmHint: "選擇 FM 存檔（.fm）作為名單來源",
-    scanFmBtn: "掃描.fm",
-    scanFmHint: "解析 .fm 存檔並填充名單預覽（結果寫入日誌）",
-    fmScannedTag: "已掃描 .fm 名單",
-    fmUnscannedTag: "已選 .fm（未掃描）",
-    fmRosterHelp: "掃描後名單預覽與替換取數均來自該存檔；混合名單可在預覽中切換球員/職員檢視。",
+    scanFmFileBtn: "掃描.fm存檔",
+    scanFmFileHint: "選擇 .fm 存檔並立即掃描，結果刷新球員/職員快取",
+    selectFmBrowseHint: "請先點選「啟用」後再掃描 .fm 存檔（當前為瀏覽預覽）",
+    readMemoryBtn: "執行遊戲讀取",
+    readMemoryHint: "掃描正在執行的 FM 行程記憶體，結果刷新球員/職員快取（無需 .fm 存檔）",
     viewConfigBtn: "讀取快照",
     viewConfigHint: "解析存檔 XML 快照，在結果區「快照預覽」中檢視對映列表",
     viewSnapshotBtn: "檢視位置",
@@ -1573,11 +1560,8 @@ const zhTW: Dict = {
 
   /** 「替换执行」面板 */
   replace: {
-    cardTitle: "替換執行",
+    cardTitle: "批次替換",
     modeLabel: "模式：",
-    /** 读取来源开关（排在选项开关里）：轨道左＝RTF（默认），轨道右＝.fm 存档；文案随当前来源切换 */
-    sourceRtf: "從 RTF 讀",
-    sourceFm: "從 .fm 存檔讀",
     optionsLabel: "選項設定：",
     optAllowDuplicates: "允許複用圖片",
     optFilterNewgan: "僅隨機人",
@@ -1609,7 +1593,7 @@ const zhTW: Dict = {
     needProfile: "選擇 Profile",
     needGroup: "選擇頭像包",
     needRtf: "設定 RTF 名單",
-    needRoster: "設定名單檔案",
+    needRoster: "先產生球員/職員名單快取（執行遊戲讀取或掃描 .fm 存檔）",
     todoPrefix: "還需完成：",
     missingDirsTitle: "缺失目錄",
     missingDirsConfirm: (standard: number, count: number) =>
@@ -1988,10 +1972,9 @@ const en: Dict = {
     scopeSep: " · ",
     /** 无头像包组时的回显占位（侧栏还没关联目录） */
     scopeNoGroup: "No facepack",
-    /** chip 状态点的悬停说明（三档：绿 / 琥珀 / 灰） */
+    /** chip status tooltip (two states: green = ready / orange = not ready) */
     stateOk: "Ready",
-    stateWarn: "A few steps left — click to see",
-    stateIdle: "Not started",
+    stateWarn: "Not ready — click to see what is missing",
   },
 
   /** 侧栏底部主题切换 */
@@ -2017,10 +2000,10 @@ const en: Dict = {
     tutorialTab: "Tutorial",
     faqTab: "FAQ",
     searchPlaceholder: "Search sections or keywords…",
-    searchHint: "Ctrl+F to search · Esc to close",
+    searchHint: "Ctrl+F to focus search",
     resultCount: (shown: number, total: number) => `${shown} of ${total} entries shown`,
     noResults: "No matching entries. Try another keyword.",
-    close: "Close documentation",
+    clearSearch: "Clear search",
     note: "Note",
     warning: "Warning",
   },
@@ -2097,18 +2080,15 @@ const en: Dict = {
     scanRtfBtn: "Scan RTF",
     scanRtfHint:
       "Parse the RTF and fill the roster preview (result written to the log)",
-    fmLabel: "FM save:",
-    fmUnsetValue: "Not set",
-    selectFmBtn: "Select .fm",
     selectFmDialogTitle: "Select FM save",
-    selectFmHint: "Select an FM save (.fm) as the roster source",
-    scanFmBtn: "Scan .fm",
-    scanFmHint:
-      "Parse the .fm save and fill the roster preview (result written to the log)",
-    fmScannedTag: ".fm roster scanned",
-    fmUnscannedTag: ".fm selected (not scanned)",
-    fmRosterHelp:
-      "Once scanned, the roster preview and replacement read from this save; mixed rosters offer a player/staff view switch in the preview.",
+    scanFmFileBtn: "Scan .fm save",
+    scanFmFileHint:
+      "Pick a .fm save and scan it immediately; the result refreshes the player/staff cache",
+    selectFmBrowseHint:
+      'Click "Activate" first before scanning a .fm save (currently previewing)',
+    readMemoryBtn: "Read running game",
+    readMemoryHint:
+      "Scan the memory of the running FM process; the result refreshes the player/staff cache (no .fm save needed)",
     viewConfigBtn: "Read snapshot",
     viewConfigHint:
       "Parse the savegame XML snapshot and view the mapping list under Snapshot preview",
@@ -2574,11 +2554,8 @@ const en: Dict = {
 
   /** 「替换执行」面板 */
   replace: {
-    cardTitle: "Replacement",
+    cardTitle: "Batch replacement",
     modeLabel: "Mode:",
-    /** 读取来源开关（排在选项开关里）：轨道左＝RTF（默认），轨道右＝.fm 存档；文案随当前来源切换 */
-    sourceRtf: "Read from RTF",
-    sourceFm: "Read from .fm save",
     optionsLabel: "Options:",
     optAllowDuplicates: "Allow image reuse",
     optFilterNewgan: "NewGAN only",
@@ -2611,7 +2588,8 @@ const en: Dict = {
     needProfile: "Select a profile",
     needGroup: "Select a facepack",
     needRtf: "Set the RTF roster",
-    needRoster: "Set a roster file",
+    needRoster:
+      "Build the player/staff roster cache first (read the running game or scan a .fm save)",
     todoPrefix: "Still needed:",
     missingDirsTitle: "Missing directories",
     missingDirsConfirm: (standard: number, count: number) =>

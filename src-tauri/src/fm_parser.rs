@@ -28,6 +28,9 @@ use crate::rtf_scanner::{
 const ETH_SKIN: [u8; 11] = [5, 7, 12, 18, 14, 13, 16, 2, 15, 16, 8];
 /// 主绑定的距离窗口；四档补配另有各自窗口。
 const BIND_WINDOW: usize = 1024;
+/// 有记录体的槽位的绑定窗口。真人教练/经理分区的块与槽位间距可达 2,000 B 以上；记录体本身
+/// 就是「这个槽位确有其人」的证据，因此允许更远的间距，而不是只对职员加一条特例通道。
+const BIND_WINDOW_REC: i64 = 4096;
 /// uid / selfUid 的合法上界（0 < v < 0x7866C101）。**不设 uid > 999999 的下界**：那会把职员
 /// 召回率从 95.856% 压到 84.081%，替换目标集整体错配。
 const UID_CEIL: u32 = 0x7866_C101;
@@ -1320,6 +1323,18 @@ fn self_ok(
             .unwrap_or(false)
 }
 
+/// 槽位对应的职员记录体。`pindex` 与槽位 `seq` 的错位有两种：多数是 `seq-1`，少数职员记录体
+/// （真人教练/经理所在的分区）正好等于 `seq`，且只在 `seq-1` 取不到时使用。
+/// 兜底必须通过 `near_uid` 自证，避免把相邻人员的记录体错配给本槽位。
+fn pick_staff_slot<'a>(
+    staff: &'a HashMap<u32, Vec<StaffRec>>,
+    s: &Slot,
+) -> Option<&'a StaffRec> {
+    pick_staff(staff, s.seq.wrapping_sub(1), s.i).or_else(|| {
+        pick_staff(staff, s.seq, s.i).filter(|r| near_uid(r.self_uid, s.uid))
+    })
+}
+
 fn read_slots(
     db: &[u8],
     rec: &HashMap<u32, PlayerRec>,
@@ -1466,8 +1481,8 @@ fn can_displace(
     }
 }
 
-/// 两轮主绑定（有记录体先绑）+ 四档补配。`emitted` / `used_slot` / `used_seq` 在三档之间
-/// 持续推进，所以候选集必须每档重新筛，不能一次算好复用。
+/// 三档主绑定（球员体 → 职员体 → 无记录体）+ 四档补配。`emitted` / `used_slot` / `used_seq`
+/// 在三档之间持续推进，所以候选集必须每档重新筛，不能一次算好复用。
 fn bind_all(
     slots: &[Slot],
     r_arr: &[usize],
@@ -1476,6 +1491,11 @@ fn bind_all(
     uid_seq: &HashMap<u32, i64>,
     uid_occ: &HashMap<u32, usize>,
 ) -> (Vec<Option<Slot>>, PatchStat) {
+    // 槽位的记录体有两种来源：球员体（键 `seq-1`，与 seq 一一对应）与职员体（键 `seq-1` 或
+    // `seq`，可被多个槽位共用）。这决定了两种槽位的去重语义不同，必须先分类再去重。
+    let has_player_body = |s: &Slot| rec.contains_key(&s.seq.wrapping_sub(1));
+    let has_staff_body = |s: &Slot| pick_staff_slot(staff, s).is_some();
+
     // 按 seq 去重：强候选优先、其次双写、其余；池内按距离取最近的一个。
     type Group = (
         Vec<(Slot, i64)>,
@@ -1500,29 +1520,47 @@ fn bind_all(
         }
     }
     let mut slots_u: Vec<Slot> = Vec::with_capacity(order.len());
+    let mut rep: HashSet<usize> = HashSet::new();
     for seq in order {
         let (a, b, c) = groups.remove(&seq).unwrap();
         let mut pool = if !a.is_empty() { a } else if !b.is_empty() { b } else { c };
         pool.sort_by_key(|(_, sc)| *sc);
         if let Some((s, _)) = pool.first() {
             slots_u.push(*s);
+            rep.insert(s.i);
+        }
+    }
+    // 只带职员体的槽位不参与上面的 seq 去重：职员体的 pindex 被多人共用，同 seq 下距离更近的
+    // 那个会赢，其余的被直接丢弃，真人教练/经理因此在绑定阶段整块消失。逐个补入后由绑定阶段
+    // 按距离决定归属。
+    for s in slots.iter().filter(|s| !has_player_body(s) && has_staff_body(s)) {
+        if rep.insert(s.i) {
+            slots_u.push(*s);
         }
     }
 
-    let staff_pindex: HashSet<u32> = staff.keys().copied().collect();
-    let has_rec = |s: &Slot| {
-        let seq = s.seq.wrapping_sub(1);
-        rec.contains_key(&seq) || staff_pindex.contains(&seq)
+    // 三档绑定，按「证据强度」降序：球员体 > 职员体 > 无记录体。球员体与 seq 一一对应，
+    // 是最硬的证据；职员体可被多人共用，但仍是「这个槽位确有其人」；无记录体只能靠紧窗口。
+    let pass_of = |s: &Slot| {
+        if has_player_body(s) {
+            0
+        } else if has_staff_body(s) {
+            1
+        } else {
+            2
+        }
     };
+    // 只带职员体的槽位不占用 seq 名额：它和同 seq 的球员槽位是两个不同的人。
+    let free_seq = |s: &Slot| !has_player_body(s) && has_staff_body(s);
     let mut used_slot: HashSet<usize> = HashSet::new();
     let mut used_seq: HashSet<u32> = HashSet::new();
     let mut binding: Vec<Option<Slot>> = vec![None; r_arr.len()];
 
-    for want_rec in [true, false] {
+    for pass in 0..3 {
         let mut bi_order: Vec<usize> = Vec::new();
         let mut cand: HashMap<usize, Vec<(Slot, i64)>> = HashMap::new();
-        for s in slots_u.iter().filter(|s| has_rec(s) == want_rec) {
-            if used_seq.contains(&s.seq) {
+        for s in slots_u.iter().filter(|s| pass_of(s) == pass) {
+            if !free_seq(s) && used_seq.contains(&s.seq) {
                 continue;
             }
             let Some(bi) = near_block(r_arr, s.i) else { continue };
@@ -1530,7 +1568,10 @@ fn bind_all(
                 continue;
             }
             let d = s.i as i64 - r_arr[bi] as i64;
-            if !(20..=BIND_WINDOW as i64).contains(&d) {
+            // 职员槽位才放宽间距（真人教练/经理分区的块与槽位间距可达 2,000 B 以上）；球员槽位
+            // 与无记录体的槽位仍用紧窗口。
+            let limit = if pass == 1 { BIND_WINDOW_REC } else { BIND_WINDOW as i64 };
+            if !(20..=limit).contains(&d) {
                 continue;
             }
             if !cand.contains_key(&bi) {
@@ -1548,11 +1589,13 @@ fn bind_all(
         pairs.sort_by_key(|(_, arr)| arr[0].1);
         for (bi, arr) in pairs {
             for (s, _) in arr {
-                if used_slot.contains(&s.i) || used_seq.contains(&s.seq) {
+                if used_slot.contains(&s.i) || (!free_seq(&s) && used_seq.contains(&s.seq)) {
                     continue;
                 }
                 used_slot.insert(s.i);
-                used_seq.insert(s.seq);
+                if !free_seq(&s) {
+                    used_seq.insert(s.seq);
+                }
                 binding[bi] = Some(s);
                 break;
             }
@@ -1602,7 +1645,6 @@ fn bind_all(
                     binding[bi] = Some(s);
                     emitted.insert(s.uid);
                     used_slot.insert(s.i);
-                    used_seq.insert(s.seq);
                     patch.patched += 1;
                 }
                 Some(cur) => {
@@ -1612,7 +1654,6 @@ fn bind_all(
                         binding[bi] = Some(s);
                         emitted.insert(s.uid);
                         used_slot.insert(s.i);
-                        used_seq.insert(s.seq);
                         patch.patched += 1;
                         patch.displaced += 1;
                     }
@@ -2009,7 +2050,7 @@ fn second_nation(rel: &[Rel]) -> Option<Rel> {
 
 // ===================== 字段组装 ================================================================
 
-fn valid_code(value: u8, min: u32, max: u32) -> String {
+pub(crate) fn valid_code(value: u8, min: u32, max: u32) -> String {
     let v = value as u32;
     if (min..=max).contains(&v) {
         v.to_string()
@@ -2018,7 +2059,7 @@ fn valid_code(value: u8, min: u32, max: u32) -> String {
     }
 }
 
-fn skin_display(raw: u8, eth: u8) -> u8 {
+pub(crate) fn skin_display(raw: u8, eth: u8) -> u8 {
     if raw == 0xFF {
         // ETH_SKIN 渲染后的值恒在 0..19；直接写 255 会让绝大多数肤色查不到图。
         ETH_SKIN.get(eth as usize).copied().unwrap_or(0)
@@ -2027,7 +2068,7 @@ fn skin_display(raw: u8, eth: u8) -> u8 {
     }
 }
 
-fn hair_display(raw: u8, status: u8, eth: u8) -> u8 {
+pub(crate) fn hair_display(raw: u8, status: u8, eth: u8) -> u8 {
     if status != 0xFF || !matches!(raw, 6 | 17 | 18) {
         return raw;
     }
@@ -2244,7 +2285,7 @@ fn emit_records(
         bound += 1;
         let seq = s.seq.wrapping_sub(1);
         let rec_found = rec.get(&seq);
-        let staff_found = pick_staff(staff, seq, s.i);
+        let staff_found = pick_staff_slot(staff, &s);
         // Q10：无球员且无职员记录体的 person 行不产出，否则默认 PlayerMale 会
         // 系统性污染约 6% 的提示词身份段。
         if rec_found.is_none() && staff_found.is_none() {
@@ -2484,8 +2525,9 @@ pub(crate) fn parse_fm_save(
     logger.info(
         "fm",
         format!(
-            "人员绑定完成（绑定 {} / 补位 {} / 置换 {}），耗时 {:.2?}",
-            slots.len(),
+            "人员绑定完成（绑定 {} / 未绑 {} / 补位 {} / 置换 {}），耗时 {:.2?}",
+            binding.iter().filter(|b| b.is_some()).count(),
+            binding.iter().filter(|b| b.is_none()).count(),
             patch.patched,
             patch.displaced,
             t_stage.elapsed()
@@ -2620,10 +2662,8 @@ pub(crate) fn parse_fm_save(
 
 // ===================== 单元测试 =================================================================
 
-// 模块可见性放宽到 crate：commands.rs 的「线程内自动扫描 .fm」用例要复用本模块的落盘夹具
-// write_minimal_fm（以及其依赖的 build_container/version_section），不为此复制一份容器构造。
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::logger::{ChannelLogger, LogLine};
     use crate::nationality::{NationalityDoc, NationalityMapping};
@@ -2702,75 +2742,6 @@ pub(crate) mod tests {
         let path = dir.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         path
-    }
-
-    /// 落盘一份能被 parse_fm_save 完整解析出 1 名球员的最小 .fm（commands.rs 的
-    /// 「线程内自动扫描 .fm」用例用）。字节布局与各阶段判据一一对应：40 B 头部（含游戏日
-    /// 2032 年第 100 天）、三段各 1 条的名池（Ada / Byron / C）、1 个球员记录体（b=600，
-    /// pindex=9、self_uid=42、kind=2、身高 180、cid=无）、1 个人员块（r=8092，名池三下标全
-    /// 0、出生 1990-04-10）、1 个双写槽位（i=8192，uid=42、seq=10 → 记录体 pindex=9、
-    /// newgen → uid 带 r- 前缀）。只依赖测试内的容器构造器，不触产品代码。
-    pub(crate) fn write_minimal_fm(path: &Path) {
-        let mut db = vec![0u8; 8300];
-        // 游戏日（game_date 只读 db[36..40]）。
-        db[36..38].copy_from_slice(&100u16.to_le_bytes());
-        db[38..40].copy_from_slice(&2032u16.to_le_bytes());
-        // 名池签名区（p=64）：{sig 0 c1 c2 c3 0}{key0=0}，c0 = p+24 起三段 {n}{key=len=utf8}。
-        let p = 64usize;
-        db[p..p + 4].copy_from_slice(&46421u32.to_le_bytes());
-        db[p + 8..p + 12].copy_from_slice(&8u32.to_le_bytes()); // c1 = 4*c2
-        db[p + 12..p + 16].copy_from_slice(&2u32.to_le_bytes()); // c2
-        db[p + 16..p + 20].copy_from_slice(&16u32.to_le_bytes()); // c3 = 8*c2
-        let mut q = p + 24;
-        for name in ["Ada", "Byron", "C"] {
-            db[q..q + 4].copy_from_slice(&1u32.to_le_bytes()); // n = 1
-            q += 4;
-            db[q..q + 4].copy_from_slice(&0u32.to_le_bytes()); // key = 0（即 first_key）
-            q += 4;
-            db[q..q + 4].copy_from_slice(&(name.len() as u32).to_le_bytes());
-            q += 4;
-            db[q..q + name.len()].copy_from_slice(name.as_bytes());
-            q += name.len();
-        }
-        // 球员记录体（b=600）：pos0..pos1 ∈ 1..=20、pos1..attr1 ∈ 1..=100；ca/pa/身高在值域内。
-        let b = 600usize;
-        db[b - 19..b - 15].copy_from_slice(&9u32.to_le_bytes()); // pindex
-        db[b - 15..b - 11].copy_from_slice(&42u32.to_le_bytes()); // self_uid
-        db[b - 7] = 2; // kind（球员）
-        for k in b + 23..b + 38 {
-            db[k] = 5;
-        }
-        for k in b + 38..b + 92 {
-            db[k] = 10;
-        }
-        db[b + 15..b + 18].copy_from_slice(&[0xFF, 0xFF, 0xFF]); // cid = CID_NONE → 俱乐部留空
-        db[b..b + 2].copy_from_slice(&100u16.to_le_bytes()); // ca
-        db[b + 2..b + 4].copy_from_slice(&120u16.to_le_bytes()); // pa
-        db[b + 122..b + 124].copy_from_slice(&180u16.to_le_bytes()); // 身高
-        // 人员块（r=8092）：db[r-4..r] = 0 走 cur = r-19 路径；名池三下标 0（a/b/c 处全 0）。
-        let r = 8092usize;
-        db[r..r + 2].copy_from_slice(&100u16.to_le_bytes()); // 出生 day
-        db[r + 2..r + 4].copy_from_slice(&1990u16.to_le_bytes()); // 出生 year
-        db[r + 5] = 2; // eth（码 2 的 CodeRules fallback=MENA，与 ALG 主国籍的目录一致）
-        db[r + 6] = 5; // 发色
-        db[r + 7] = 2; // 发长
-        db[r + 8] = 5; // 肤色（非 0xFF，不触发渲染）
-        db[r + 9] = 0; // rank 0 → ALG
-        for k in r + 17..r + 25 {
-            db[k] = 5;
-        }
-        // 槽位（i=8192）：uid 双写（dual）、seq=10、kind=2、男性、db[i-12] ≥ 8 → 随机人。
-        let i = 8192usize;
-        db[i..i + 4].copy_from_slice(&42u32.to_le_bytes());
-        db[i - 4..i].copy_from_slice(&10u32.to_le_bytes());
-        db[i + 4..i + 8].copy_from_slice(&42u32.to_le_bytes());
-        db[i + 8] = 2;
-        db[i - 12] = 8;
-        let bytes = build_container(&[
-            Section { name: "save_game_summary", raw: version_section(24), decomp_len: None },
-            Section { name: "game_db", raw: db, decomp_len: None },
-        ]);
-        std::fs::write(path, bytes).unwrap();
     }
 
     fn run_parse(path: &Path) -> (Result<(Vec<PlayerRecord>, RosterSummary, RosterCounts), String>, Vec<LogLine>) {
@@ -3332,6 +3303,49 @@ pub(crate) mod tests {
         let r2 = h2.run(false, &cancelled);
         assert_eq!(r2.cancelled_at, Some(BATCH));
         assert!(r2.bound < 4100, "取消后不应继续组装余下人员块");
+    }
+
+    // ---- 10b. 职员记录体按 slot.seq 取数 --------------------------------------------------------------
+
+    #[test]
+    fn staff_body_keyed_at_slot_seq_is_kept() {
+        // 真人职员分区里，职员记录体的 pindex 可能正好等于槽位 seq（不是 seq-1）；
+        // 该布局此前会把整条真人职员当 person 行丢掉。
+        let mut h = harness(8);
+        h.rec.remove(&0);
+        let seq = h.binding[0].as_ref().unwrap().seq;
+        h.staff.insert(seq, vec![StaffRec { p: h.blocks[0].r, self_uid: 1, ca: 88, pa: 99, hraw: 0 }]);
+        let report = h.run(false, &AtomicBool::new(false));
+        assert_eq!(report.dropped, 0, "有职员记录体的行不得按 person 丢弃");
+        let row = report.data.iter().find(|p| p.uid == "r-1").expect("第 0 行应产出");
+        assert!(row.kind.is_staff());
+        assert_eq!(row.detailed.as_ref().unwrap().ca, "88");
+
+        // 记录体编号必须自证：self_uid 与本槽位 uid 无关时仍按 person 丢弃，不做错配。
+        let mut h2 = harness(8);
+        h2.rec.remove(&0);
+        let seq = h2.binding[0].as_ref().unwrap().seq;
+        h2.staff.insert(seq, vec![StaffRec { p: h2.blocks[0].r, self_uid: 500, ca: 88, pa: 99, hraw: 0 }]);
+        assert_eq!(h2.run(false, &AtomicBool::new(false)).dropped, 1);
+    }
+
+    #[test]
+    fn staff_only_slot_is_not_dropped_by_seq_dedup() {
+        // 只带职员体的槽位与同 seq 的槽位是两个不同的人：职员体的 pindex 被多人共用，seq 去重
+        // 只能约束球员体。若一并去重，同 seq 下得分更高的槽位会挤掉真人职员的槽位，其人员块
+        // 在绑定阶段直接消失。
+        let slots = [
+            Slot { i: 1_100, uid: 500, seq: 7, kind: 2, dual: false, gender_bit: false, newgen: false },
+            Slot { i: 3_050, uid: 501, seq: 7, kind: 2, dual: true, gender_bit: false, newgen: false },
+        ];
+        let r_arr = [1_000usize, 3_000];
+        let rec = HashMap::new();
+        let mut staff = HashMap::new();
+        staff.insert(7u32, vec![StaffRec { p: 3_050, self_uid: 501, ca: 100, pa: 120, hraw: 0 }]);
+        let uid_seq = HashMap::from([(500u32, 7i64)]);
+        let (binding, _) = bind_all(&slots, &r_arr, &rec, &staff, &uid_seq, &HashMap::new());
+        assert_eq!(binding[0].map(|s| s.i), Some(1_100));
+        assert_eq!(binding[1].map(|s| s.i), Some(3_050), "只带职员体的槽位不得被 seq 去重挤掉");
     }
 
     // ---- 11. 国籍索引回落空串 --------------------------------------------------------------------------
@@ -4061,5 +4075,5 @@ pub(crate) mod tests {
             );
         }
     }
-}
 
+}

@@ -439,6 +439,10 @@ fn report_skipped(skipped: &[SkippedPlayer], logger: &impl LogSink) {
                 "{} 名球员没抽到图：头像包内没有可用图片（请核对头像包目录是否选对）：{samples}",
                 group.len()
             ),
+            SkipReason::StaffNotApplicable => format!(
+                "{} 名职员未按标准二的 14 种族目录配图（该标准仅作用于球员）：{samples}",
+                group.len()
+            ),
         };
         logger.warn("facemap", msg);
     }

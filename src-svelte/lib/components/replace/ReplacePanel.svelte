@@ -1,4 +1,4 @@
-<!-- ReplacePanel · 「替换执行」面板：选模式与选项、发起/取消替换、按钮内铺实时进度 -->
+<!-- ReplacePanel · 「批量替换」面板：选模式与选项、发起/取消替换、按钮内铺实时进度 -->
 <script lang="ts">
   import { ask } from "@tauri-apps/plugin-dialog";
   import { api } from "../../services/api";
@@ -19,16 +19,15 @@
   let allowDuplicates = $state(true);
   let filterNewgan = $state(true);
 
-  // 名单读取来源：开关关闭＝从 RTF 读（默认），开启＝从 .fm 存档读。
-  // 切换只记录选择，点「替换头像」时才按它读取；后端缓存来源与它不符（例如刚扫过 RTF 就切到 .fm）
-  // 会先按所选来源自动扫描，再开始替换。
-  let rosterSource = $state<"rtf" | "fm">("rtf");
+  // 名单读取来源已移到「存档资料」卡：替换只消费运行游戏读取 / 扫描.fm存档 / 扫描RTF 填好的缓存，
+  // 本面板不再有来源开关，也不在发起时补扫。
 
   // 替换只作用于后端当前激活档（浏览态下禁用发起）
   const snap = $derived(appStore.snapshot);
   const busy = $derived(appStore.busy);
   const browseMode = $derived(appStore.browseMode);
   const ready = $derived(appStore.replaceReady);
+  const cacheReady = $derived(appStore.rosterCacheReady);
 
   /** 发起替换：兜底校验目录完整性 → 既有映射预检（必要时确认）→ 调后端 start_replace */
   async function startReplace() {
@@ -77,7 +76,6 @@
         allowDuplicates,
         saveBackup: appStore.saveBackup,
         allowBlank,
-        rosterSource,
       });
       await refreshSnapshot(); // 不可丢：替换期间取消按钮可用、全局禁用生效
     } catch (e) {
@@ -138,20 +136,6 @@
         />
         <span class="track"></span>{t.replace.optSaveBackup}
       </label>
-      <!-- 读取来源：与上面三个开关同款皮肤；关闭（轨道左）＝RTF，开启（轨道右）＝.fm 存档，
-           文案跟随当前来源切换 -->
-      <label class="switch source">
-        <input
-          type="checkbox"
-          checked={rosterSource === "fm"}
-          onchange={(e) =>
-            (rosterSource = e.currentTarget.checked ? "fm" : "rtf")}
-          disabled={busy}
-        />
-        <span class="track"></span>{rosterSource === "fm"
-          ? t.replace.sourceFm
-          : t.replace.sourceRtf}
-      </label>
     </div>
   </div>
   <!-- 开始/取消按钮：未就绪或忙碌时禁用开始，非忙碌时禁用取消
@@ -163,7 +147,11 @@
       class:running={busy}
       onclick={startReplace}
       disabled={busy || browseMode || !ready}
-      use:tip={browseMode ? t.replace.browseDisabledHint : ""}
+      use:tip={browseMode
+        ? t.replace.browseDisabledHint
+        : !cacheReady
+          ? t.replace.needRoster
+          : ""}
     >
       <!-- 填充层：宽度绑定进度百分比；aria-hidden 避免被读屏当作内容 -->
       {#if busy}
@@ -212,21 +200,11 @@
     padding: var(--sp-1) var(--sp-4);
   }
   /* 选项行：固定两列等宽网格（不用 max-content，避免左栏 320 时被挤成单列）。
-     第二行第二格的「读取来源」由此与上一行的「仅随机人」左缘对齐；
      minmax(0,1fr) 允许列收缩，长文案（如英文）在格内换行，永不挤出卡片 */
   .opt-line {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--sp-7) var(--sp-5);
-  }
-  /* 来源开关是双位开关：左右两侧都是「开启」视觉——轨道常绿，滑块随所选侧移动。
-     checked（.fm）由全局规则右移滑块；默认（RTF）在左，这里把轨道与滑块补成开启色 */
-  .switch.source .track {
-    background: var(--accent);
-    border-color: var(--accent);
-  }
-  .switch.source .track::after {
-    background: var(--accent-contrast);
   }
 
   /* 窄栏（容器 ≤360）：标签与控件纵向堆叠、分段控件占满整行；

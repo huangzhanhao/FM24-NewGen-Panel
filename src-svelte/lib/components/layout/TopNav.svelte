@@ -12,9 +12,8 @@
   import type { Workbench } from '../../stores/ui.svelte';
   import { t } from '../../text';
 
-  /** chip 就绪度三档：ok=绿（可开工）/ warn=琥珀（有最小前提但缺项）/ idle=灰（前提都没有）。
-   *  区分依据是「有没有可开工的最小前提」，不是缺了几项 */
-  type ChipState = 'ok' | 'warn' | 'idle';
+  /** chip 就绪度两档：ok=绿（就绪，可开工）/ warn=橙（未就绪）。 */
+  type ChipState = 'ok' | 'warn';
 
   /** 三台定义：顺序即主流程顺序（备料 → 替换 → 可选 AI 生图）。
    *  只存 id，label 在模板里现取 t.workbench[id]——存字符串会快照住初始语言，切换后不刷新 */
@@ -24,28 +23,24 @@
     { id: 'ai' },
   ];
 
-  /** 快照是否已读：与快照预览同一口径——snapshotReadPath 非空即读过当前档的 config.xml */
-  const snapshotRead = $derived(!!appStore.snapshotReadPath);
-
-  /** 单台就绪度判据：全部只读 store getter，不反向驱动业务 */
+  /** 单台就绪度判据：全部只读 store getter，不反向驱动业务。
+   *  【存档资料台】激活档 + 已选组 + 头像包合法（探活 complete）+ 球员/职员缓存合法且非空 → 绿。
+   *  【批量替换台】激活档 + 已选组 + 名单缓存非空 → 绿（包里目录缺失/无法识别由替换前确认框兜底）。
+   *  【AI 台】模型已选 + Key 已设（本地 ComfyUI 免 Key）+ 名单缓存非空 → 绿。
+   *  任一条件不满足一律橙色：胶囊只有「就绪 / 未就绪」两态，不再有灰色中间档。 */
   function stateOf(id: Workbench): ChipState {
-    const s = appStore.snapshot;
     if (id === 'archive') {
-      if (!s || s.currentProfile === 'No Profile' || !s.currentGroup) return 'idle';
-      return (s.currentRtf || s.currentFm) && snapshotRead ? 'ok' : 'warn';
+      return appStore.archiveReady ? 'ok' : 'warn';
     }
     if (id === 'replace') {
-      if (!s || !s.currentGroup) return 'idle';
       return appStore.replaceReady ? 'ok' : 'warn';
     }
-    // AI：模型已选 + 本会话已设 Key + 名单可读 → 绿；模型或 Key 至少设了一个但不齐 → 琥珀；都没设 → 灰
     // 本地 ComfyUI 无鉴权：免 Key（与 ImageAiPanel / 后端 needs_key 同口径）。
     const modelSet = !!imageaiStore.model;
     const keySet =
       imageaiStore.provider?.kind === "localcomfyui" ||
       !!imageaiStore.keysSet[imageaiStore.providerId];
-    if (modelSet && keySet && appStore.rosterReady) return 'ok';
-    return modelSet || keySet ? 'warn' : 'idle';
+    return modelSet && keySet && appStore.rosterCacheReady ? 'ok' : 'warn';
   }
 
   const states = $derived(items.map((it) => stateOf(it.id)));
@@ -66,7 +61,6 @@
   const stateTitle: Record<ChipState, string> = {
     ok: t.workbench.stateOk,
     warn: t.workbench.stateWarn,
-    idle: t.workbench.stateIdle,
   };
 
   /** 顶栏右端作用域回显：始终显示**激活档**（真实作用域），不随侧栏下拉的浏览态变化——

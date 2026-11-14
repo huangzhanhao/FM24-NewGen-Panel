@@ -48,6 +48,10 @@ export const api = {
   scanRtf: () => invoke<RtfScanResult>('scan_rtf'),
   // 扫描.fm：解析当前 .fm 存档并填充名单预览缓存（与 scanRtf 同一缓存与摘要口径）。
   scanFm: () => invoke<RtfScanResult>('scan_fm'),
+  // 运行游戏读取：读正在运行的 FM 进程内存并填充同一份名单缓存（与 scanFm 同一摘要口径）。
+  scanFmMemory: () => invoke<RtfScanResult>('scan_fm_memory'),
+  // 静默探活头像包：只判定标准与目录完整性，不写日志/进度（就绪胶囊用）。
+  probePack: (imgDir: string) => invoke<IntegrityResult>('probe_pack', { imgDir }),
   // 打开标准规则目录（data/rules/）：编辑 standard2/standard3.json 后下次替换即生效。
   openRulesDir: () => invoke<void>('open_rules_dir'),
   // 预览指定存档（下拉浏览展示，不切换后端当前档/激活状态）。

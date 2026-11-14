@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NewGAN Manager · 设计系统 NGM DS 1.1 · 界面预览与质量保障</title>
+<title>FM24 NewGen Panel · 设计系统 NGM DS 1.1 · 界面预览与质量保障</title>
 <style>
 /* ============================================================
    设计令牌：深色（默认，「教练席海军蓝」）——与 src-svelte/app.css :root 同序同组
@@ -749,7 +749,7 @@ button:focus-visible,.link:focus-visible,.chip:focus-visible,.wb:focus-visible{o
     <div class="brand-row">
       <img class="brand-logo" src="../app-icon.png" alt="" />
       <div class="brand-text">
-        <div class="brand-name">NewGAN Manager</div>
+        <div class="brand-name">FM24 NewGen Panel</div>
         <div class="brand-sub">
           <span class="brand-ver">v2.0</span>
           <button class="theme-switch" onclick="toggleTheme()" title="切换到浅色主题">
@@ -1455,7 +1455,7 @@ button:focus-visible,.link:focus-visible,.chip:focus-visible,.wb:focus-visible{o
   <div class="toc"><a href="#d-language">设计语言</a><a href="#d-tokens">设计令牌</a><a href="#d-layout">布局骨架</a><a href="#d-type-rules">排版规范</a><a href="#d-components">组件库</a><a href="#d-theme">主题与语言</a><a href="#d-interaction">交互模式</a><a href="#d-engineering">工程约定</a></div>
 
   <h2 id="d-language"><span class="no">1</span>设计语言</h2>
-  <p>NewGAN Manager 是供 FM 玩家长时驻留的单机桌面工具，整体语言追求<strong>专业、冷静、可信、低打扰</strong>——像教练席的战术终端，而非炫技仪表盘或通用蓝白 SaaS。视觉上以「教练席海军蓝」深色为默认、「日间球场」浅色同期交付，两主题只是同一套令牌的不同取值；全界面只保留<strong>草坪青一个强调色</strong>，红绿琥珀仅承担语义状态。层级靠底色深浅（base / surface / raised / inset 四层，AI 画幅另有 stage 近黑舞台）、发丝描边与间距表达；装饰保持克制，反馈必须明确。</p>
+  <p>FM24 NewGen Panel 是供 FM 玩家长时驻留的单机桌面工具，整体语言追求<strong>专业、冷静、可信、低打扰</strong>——像教练席的战术终端，而非炫技仪表盘或通用蓝白 SaaS。视觉上以「教练席海军蓝」深色为默认、「日间球场」浅色同期交付，两主题只是同一套令牌的不同取值；全界面只保留<strong>草坪青一个强调色</strong>，红绿琥珀仅承担语义状态。层级靠底色深浅（base / surface / raised / inset 四层，AI 画幅另有 stage 近黑舞台）、发丝描边与间距表达；装饰保持克制，反馈必须明确。</p>
   <h3>1.1 四条设计原则</h3>
   <div class="grid2">
     <div class="principle"><div class="p-no">原则 01</div><h4>层级先于装饰</h4><p>信息优先级靠间距、字重、底色层级、强调色表达；禁止渐变文字、泛光、玻璃拟态等纯装饰手段制造“高级感”。</p></div>
@@ -1784,7 +1784,7 @@ LogDrawer（左滑）/ Modal / HelpPanel / Lightbox / Popover 浮于布局外</p
     </ol>
   </div>
 
-  <div class="doc-footer"><span>NewGAN Manager · NGM DS 1.1 设计系统</span><span>所有消费样式必须走令牌，禁止硬编码色值</span></div>
+  <div class="doc-footer"><span>FM24 NewGen Panel · NGM DS 1.1 设计系统</span><span>所有消费样式必须走令牌，禁止硬编码色值</span></div>
  </div>
 </div>
 
@@ -1897,7 +1897,7 @@ LogDrawer（左滑）/ Modal / HelpPanel / Lightbox / Popover 浮于布局外</p
     </ul>
   </div>
 
-  <div class="doc-footer"><span>NewGAN Manager v2.0 · 实施路径（B0–B5 及 B5 后演进已全部落地）</span><span>验收见「质量保障」§10</span></div>
+  <div class="doc-footer"><span>FM24 NewGen Panel v2.0 · 实施路径（B0–B5 及 B5 后演进已全部落地）</span><span>验收见「质量保障」§10</span></div>
  </div>
 </div>
 
@@ -1990,7 +1990,7 @@ LogDrawer（左滑）/ Modal / HelpPanel / Lightbox / Popover 浮于布局外</p
     <tr><td class="nowrap">2026-11-07</td><td>B5 后演进（内置帮助 / NationalityEditor / rules.ts 抽取 / ⑲ 悬停提示 / 另存共用动作）复验回写本稿</td><td>G1 <code>svelte-check</code> 0 错 0 警；G2 <strong>98/98</strong>（8 文件，新增 rules 11、help 4 用例，imageai 增至 58）；G3 build 成功（181 模块，CSS 93.29KB / gzip 15.40KB，JS 451.87KB / gzip 148.57KB）。设计令牌补 ⑲ 组、新增 §2.8 悬停提示节，组件清单补 help/、NationalityEditor、rules.ts、generatedImageSave</td></tr>
   </table>
 
-  <div class="doc-footer"><span>NewGAN Manager · UI 质量保障方案 v2</span><span>G1–G7 全绿方可合并 · 本页为当前唯一 QA 依据</span></div>
+  <div class="doc-footer"><span>FM24 NewGen Panel · UI 质量保障方案 v2</span><span>G1–G7 全绿方可合并 · 本页为当前唯一 QA 依据</span></div>
  </div>
 </div>
 

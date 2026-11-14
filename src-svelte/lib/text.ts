@@ -22,7 +22,7 @@ type ReplaceMode = {
 /** 简体中文（基准语言：另两份的键集合与函数签名以此为准）。 */
 const zhCN = {
   /** 应用品牌名（窗口/弹窗标题、侧栏品牌区共用；品牌名不翻译） */
-  brand: "NewGAN Manager",
+  brand: "FM24 NewGen Panel",
 
   /** 通用系统弹窗标题 */
   dialog: {
@@ -985,7 +985,7 @@ type Dict = typeof zhCN;
 /** 繁體中文（台湾用词：OpenCC s2twp 转换后人工校对术语）。 */
 const zhTW: Dict = {
   /** 应用品牌名（窗口/弹窗标题、侧栏品牌区共用；品牌名不翻译） */
-  brand: "NewGAN Manager",
+  brand: "FM24 NewGen Panel",
 
   /** 通用系统弹窗标题 */
   dialog: {
@@ -1945,7 +1945,7 @@ const zhTW: Dict = {
 /** English（协议值与专有名词保持原文：Profile / UID / RTF / Seed / API Key / Base URL 等）。 */
 const en: Dict = {
   /** 应用品牌名（窗口/弹窗标题、侧栏品牌区共用；品牌名不翻译） */
-  brand: "NewGAN Manager",
+  brand: "FM24 NewGen Panel",
 
   /** 通用系统弹窗标题 */
   dialog: {

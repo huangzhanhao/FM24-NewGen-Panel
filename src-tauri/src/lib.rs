@@ -252,7 +252,7 @@ pub fn run() {
             let webview_data = data_dir.join("webview");
             std::fs::create_dir_all(&webview_data)?;
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-                .title("NewGAN Manager") // 窗口标题
+                .title("FM24 NewGen Panel") // 窗口标题
                 .inner_size(1280.0, 800.0) // 初始内容区尺寸（宽×高，单位逻辑像素）
                 .min_inner_size(860.0, 600.0) // 窗口拖小下限（低于此宽布局不再保证）
                 .resizable(true) // 允许用户拖拽改变窗口大小

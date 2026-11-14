@@ -345,7 +345,7 @@
   <div class="side-foot">
     <button
       class="link small"
-      onclick={() => openUrl("https://github.com/huangzhanhao/NewGAN-Manager-ByHzH")}
+      onclick={() => openUrl("https://github.com/huangzhanhao/FM24-NewGen-Panel")}
       >{t.sidebar.linkHome}</button
     >
     <button class="link small" onclick={() => openHelpWindow("tutorial")}

@@ -3,7 +3,7 @@
 > 为 Football Manager 的 NewGAN / 随机人批量匹配头像（facepack）的桌面工具。
 > 随机人名单可来自 FM24 导出的 RTF、FM24 `.fm` 存档，或 Windows 上正在运行的 FM24 游戏进程。
 
-![Tauri Build](https://github.com/huangzhanhao/NewGAN-Manager-ByHzH/actions/workflows/tauri.yml/badge.svg)
+![Tauri Build](https://github.com/huangzhanhao/FM24-NewGen-Panel/actions/workflows/tauri.yml/badge.svg)
 
 **当前版本：v2.0.0** ｜ Fork 自 [Maradonna90/NewGAN-Manager](https://github.com/Maradonna90/NewGAN-Manager) ｜ 基于 **Tauri 2 + Rust + Svelte 5 + TypeScript** 重构，无需 Python / .NET 运行时。
 
@@ -23,7 +23,7 @@
 
 ### Windows 安装
 
-1. 从 [Releases](https://github.com/huangzhanhao/NewGAN-Manager-ByHzH/releases) 下载 Windows NSIS 安装包，例如 `NewGAN-Manager_2.0.0_x64-setup.exe`。
+1. 从 [Releases](https://github.com/huangzhanhao/FM24-NewGen-Panel/releases) 下载 Windows NSIS 安装包，例如 `NewGAN-Manager_2.0.0_x64-setup.exe`。
 2. 安装到当前用户目录，通常无需管理员权限；运行游戏内存读取时，如果进程打开失败，可尝试以管理员身份运行本工具。
 3. 应用使用系统 WebView2。Windows 10/11 通常已内置，缺失时按安装引导补齐。
 4. 当前安装包未购买代码签名证书。如遇 SmartScreen 或杀毒软件提示，请先确认安装包来源。

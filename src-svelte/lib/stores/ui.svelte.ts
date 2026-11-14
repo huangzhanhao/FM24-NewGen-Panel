@@ -4,6 +4,7 @@
  * 文件名必须带 .svelte：Svelte 5 约定在组件外的 .ts 里使用 $state 等 rune 时，
  * 只有 .svelte.ts 会被编译器按响应式源码处理，普通 .ts 不行。
  */
+import { emitTo } from '@tauri-apps/api/event';
 
 /** 主题取值：dark=深色「教练席海军蓝」（默认），light=浅色「日间球场」。 */
 export type Theme = 'dark' | 'light';
@@ -19,8 +20,14 @@ const LANG_KEY = 'ngm-lang';
  *  顺序即主流程顺序（先备料 → 再替换 → 可选 AI 生图），顶栏序号圆按此顺序排列。 */
 export type Workbench = 'archive' | 'replace' | 'ai';
 
-/** 内置文档面板的页签：tutorial=教程 / faq=常见问题。 */
-export type HelpTab = 'tutorial' | 'faq';
+/** 独立帮助窗口的标签；窗口内文档页签由 URL 与 help:tab 事件维护，不占主窗口状态。 */
+const HELP_WINDOW = 'help';
+
+/** 主窗口切主题/语言后，把新值推给已打开的帮助窗口；窗口没开时 emit 会失败，静默忽略。 */
+function syncHelpWindow(event: 'help:theme' | 'help:lang', value: Theme | Lang) {
+  if (!('__TAURI_INTERNALS__' in window)) return; // 浏览器调试无 Tauri 事件通道
+  void emitTo(HELP_WINDOW, event, value).catch(() => {});
+}
 
 /** 启动时读取上次选择的主题（没有记录时默认深色）。 */
 function readTheme(): Theme {
@@ -48,8 +55,6 @@ export const ui = $state({
   /** 当前工作台。与 logOpen 同类——它是「界面在哪一屏」，不是业务数据，故放这里而非 appStore；
    *  也不持久化：每次启动都从「存档资料」开始，用户先看清手里有什么料。 */
   workbench: 'archive' as Workbench,
-  /** 内置文档面板：null=关闭；值决定打开哪个页签，侧栏「教程 / FAQ」入口只改这里。 */
-  helpTab: null as HelpTab | null,
 });
 
 /** 把当前主题写到 <html data-theme>——这是深/浅两套 CSS 变量的唯一切换开关。 */
@@ -66,11 +71,13 @@ export function toggleTheme() {
     // 存储不可用时仅对本次会话生效
   }
   applyTheme();
+  syncHelpWindow('help:theme', ui.theme);
 }
 
 /** 切换界面语言并持久化（侧栏「语言」菜单调用）。 */
 export function setLang(lang: Lang) {
   ui.lang = lang;
+  syncHelpWindow('help:lang', lang);
   try {
     localStorage.setItem(LANG_KEY, lang);
   } catch {

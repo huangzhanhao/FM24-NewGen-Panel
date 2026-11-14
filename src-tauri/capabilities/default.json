@@ -1,6 +1,15 @@
 {
   "identifier": "default",
-  "description": "主窗口默认能力：对话框与文件/路径打开",
-  "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "opener:default", "opener:allow-open-path"]
+  "description": "主窗口与独立帮助窗口的能力：对话框、文件/路径打开、创建并聚焦帮助窗口",
+  "windows": ["main", "help"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-title",
+    "core:window:allow-close",
+    "dialog:default",
+    "opener:default",
+    "opener:allow-open-path"
+  ]
 }

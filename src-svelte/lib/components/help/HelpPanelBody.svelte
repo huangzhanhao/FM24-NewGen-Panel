@@ -1,34 +1,34 @@
-<!-- HelpPanel · 内置文档面板：侧栏「教程 / FAQ」入口打开同一浮层，左栏章节导航 + 右栏滚动正文，
-     顶部搜索框做全文过滤与定位；内容来自 lib/help.ts，随应用版本统一维护 -->
+<!-- HelpPanelBody · 内置文档面板主体：标题/页签/搜索 + 左栏章节导航 + 右栏滚动正文。
+     独立帮助窗口（HelpWindow）直接渲染它，内容来自 lib/help.ts，随应用版本统一维护。 -->
 <script lang="ts">
-  import { onDestroy, tick } from "svelte";
-  import { helpEntries, helpSearchText } from "../../help";
-  import { tip } from "../../stores/app.svelte";
+  import { tick } from "svelte";
+  import { helpEntries, helpSearchText, type HelpTab } from "../../help";
   import { ui } from "../../stores/ui.svelte";
   import { t } from "../../text";
   import Icon from "../../ui/Icon.svelte";
+
+  type Props = {
+    tab: HelpTab;
+    onTabChange: (tab: HelpTab) => void;
+  };
+  let { tab, onTabChange }: Props = $props();
 
   let query = $state("");
   let activeId = $state("");
   let contentEl = $state<HTMLDivElement | null>(null);
   let searchEl = $state<HTMLInputElement | null>(null);
 
-  const tab = $derived(ui.helpTab ?? "tutorial");
   const entries = $derived(helpEntries(ui.lang, tab));
   // 搜索词统一小写做包含匹配；中文不受大小写影响，英文关键词按不区分大小写处理
   const q = $derived(query.trim().toLowerCase());
   const filtered = $derived(q ? entries.filter((e) => helpSearchText(e).includes(q)) : entries);
 
-  // 打开面板或切换页签 / 语言时复位搜索与滚动位置；语言切换后条目整份替换，必须重新定位
-  let lastOpenKey = "";
+  // 切换页签 / 语言时复位搜索与滚动位置；语言切换后条目整份替换，必须重新定位
+  let lastKey = "";
   $effect(() => {
-    if (!ui.helpTab) {
-      lastOpenKey = "";
-      return;
-    }
-    const key = `${ui.helpTab}|${ui.lang}`;
-    if (key === lastOpenKey) return;
-    lastOpenKey = key;
+    const key = `${tab}|${ui.lang}`;
+    if (key === lastKey) return;
+    lastKey = key;
     query = "";
     activeId = entries[0]?.id ?? "";
     void tick().then(() => contentEl?.scrollTo({ top: 0 }));
@@ -37,15 +37,11 @@
   // 搜索词变化后定位到第一条命中；无命中时清空当前章节高亮
   let lastQuery = "";
   $effect(() => {
-    if (!ui.helpTab || q === lastQuery) return;
+    if (q === lastQuery) return;
     lastQuery = q;
     activeId = filtered[0]?.id ?? "";
     void tick().then(() => contentEl?.scrollTo({ top: 0 }));
   });
-
-  function close() {
-    ui.helpTab = null;
-  }
 
   function jumpTo(id: string) {
     activeId = id;
@@ -70,21 +66,13 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (!ui.helpTab) return;
-    if (e.key === "Escape") {
-      e.preventDefault();
-      close();
-      return;
-    }
-    // Ctrl/Cmd+F 直接聚焦面板内搜索，不触发浏览器原生查找
+    // Ctrl/Cmd+F 直接聚焦窗口内搜索，不触发浏览器原生查找
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
       e.preventDefault();
       searchEl?.focus();
       searchEl?.select();
     }
   }
-
-  onDestroy(() => cancelAnimationFrame(spyFrame));
 
   type Segment = { text: string; hit: boolean };
   /** 把整段文字按搜索词切片，命中段交给 <mark> 渲染；用 indexOf 而非正则，避免关键词里的特殊字符被当成语法 */
@@ -111,159 +99,146 @@
 
 <svelte:window onkeydown={onKey} />
 
-{#if ui.helpTab}
-  <div
-    class="modal-overlay"
-    role="presentation"
-    onclick={(e) => {
-      if (e.target === e.currentTarget) close();
-    }}
-  >
-    <div class="modal help-modal" role="dialog" aria-modal="true" aria-label={t.help.title}>
-      <header class="help-head">
-        <div class="help-heading">
-          <span class="help-mark"><Icon name="file" size={15} /></span>
-          <div>
-            <div class="help-title">{t.help.title}</div>
-            <div class="help-sub">{t.help.subtitle} · {t.app.brandVer}</div>
-          </div>
-        </div>
-
-        <div class="seg3 help-tabs" role="tablist">
-          <button
-            role="tab"
-            aria-selected={tab === "tutorial"}
-            class:active={tab === "tutorial"}
-            onclick={() => (ui.helpTab = "tutorial")}
-            >{t.help.tutorialTab}</button
-          >
-          <button
-            role="tab"
-            aria-selected={tab === "faq"}
-            class:active={tab === "faq"}
-            onclick={() => (ui.helpTab = "faq")}
-            >{t.help.faqTab}</button
-          >
-        </div>
-
-        <div class="input-wrap help-search">
-          <Icon name="search" />
-          <input
-            type="text"
-            bind:this={searchEl}
-            bind:value={query}
-            placeholder={t.help.searchPlaceholder}
-            aria-label={t.help.searchPlaceholder}
-          />
-          {#if query}
-            <button
-              type="button"
-              class="search-clear"
-              aria-label={t.help.close}
-              onclick={() => {
-                query = "";
-                void tick().then(() => searchEl?.focus());
-              }}
-            >
-              <Icon name="x" size={12} />
-            </button>
-          {/if}
-        </div>
-
-        <button class="icon-btn" use:tip={t.help.close} aria-label={t.help.close} onclick={close}>
-          <Icon name="x" size={14} />
-        </button>
-      </header>
-
-      <div class="help-body">
-        <nav class="help-nav" aria-label={t.help.title}>
-          {#each filtered as entry (entry.id)}
-            {@const n = entries.findIndex((e) => e.id === entry.id) + 1}
-            <button class="nav-item" class:current={activeId === entry.id} onclick={() => jumpTo(entry.id)}>
-              <span class="nav-num">{String(n).padStart(2, "0")}</span>
-              <span class="nav-label">{@render hl(entry.title)}</span>
-            </button>
-          {:else}
-            <p class="nav-empty">{t.help.noResults}</p>
-          {/each}
-        </nav>
-
-        <div class="help-content" bind:this={contentEl} onscroll={onScroll}>
-          {#each filtered as entry (entry.id)}
-            {@const n = entries.findIndex((e) => e.id === entry.id) + 1}
-            <article class="doc-entry" data-help-id={entry.id}>
-              <h2 class="doc-h">
-                <span class="doc-index">{String(n).padStart(2, "0")}</span>
-                <span>{@render hl(entry.title)}</span>
-              </h2>
-              {#if entry.summary}
-                <p class="doc-summary">{@render hl(entry.summary)}</p>
-              {/if}
-
-              {#each entry.blocks as block}
-                {#if block.kind === "p"}
-                  <p>{@render hl(block.text)}</p>
-                {:else if block.kind === "list"}
-                  {#if block.ordered}
-                    <ol class="doc-list">
-                      {#each block.items as item}<li>{@render hl(item)}</li>{/each}
-                    </ol>
-                  {:else}
-                    <ul class="doc-list">
-                      {#each block.items as item}<li>{@render hl(item)}</li>{/each}
-                    </ul>
-                  {/if}
-                {:else if block.kind === "note"}
-                  <div class="doc-note" class:warn={block.tone === "warn"}>
-                    <span class="note-label">{block.tone === "warn" ? t.help.warning : t.help.note}</span>
-                    <span>{@render hl(block.text)}</span>
-                  </div>
-                {:else if block.kind === "table"}
-                  <div class="doc-table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          {#each block.head as cell}<th>{@render hl(cell)}</th>{/each}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {#each block.rows as row}
-                          <tr>
-                            {#each row as cell}<td>{@render hl(cell)}</td>{/each}
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
-                  </div>
-                {:else if block.kind === "code"}
-                  <pre class="doc-code">{block.text}</pre>
-                {/if}
-              {/each}
-            </article>
-          {:else}
-            <div class="help-empty">
-              <Icon name="search" size={22} />
-              <p>{t.help.noResults}</p>
-            </div>
-          {/each}
-        </div>
+<div class="help-panel">
+  <header class="help-head" role="presentation">
+    <div class="help-heading">
+      <span class="help-mark"><Icon name="file" size={15} /></span>
+      <div>
+        <div class="help-title">{t.help.title}</div>
+        <div class="help-sub">{t.help.subtitle} · {t.app.brandVer}</div>
       </div>
+    </div>
 
-      <footer class="help-foot">
-        <span>{t.help.resultCount(filtered.length, entries.length)}</span>
-        <span>{t.help.searchHint}</span>
-      </footer>
+    <div class="seg3 help-tabs" role="tablist">
+      <button
+        role="tab"
+        aria-selected={tab === "tutorial"}
+        class:active={tab === "tutorial"}
+        onclick={() => onTabChange("tutorial")}>{t.help.tutorialTab}</button
+      >
+      <button
+        role="tab"
+        aria-selected={tab === "faq"}
+        class:active={tab === "faq"}
+        onclick={() => onTabChange("faq")}>{t.help.faqTab}</button
+      >
+    </div>
+
+    <div class="input-wrap help-search">
+      <Icon name="search" />
+      <input
+        type="text"
+        bind:this={searchEl}
+        bind:value={query}
+        placeholder={t.help.searchPlaceholder}
+        aria-label={t.help.searchPlaceholder}
+      />
+      {#if query}
+        <button
+          type="button"
+          class="search-clear"
+          aria-label={t.help.clearSearch}
+          onclick={() => {
+            query = "";
+            void tick().then(() => searchEl?.focus());
+          }}
+        >
+          <Icon name="x" size={12} />
+        </button>
+      {/if}
+    </div>
+  </header>
+
+  <div class="help-body">
+    <nav class="help-nav" aria-label={t.help.title}>
+      {#each filtered as entry (entry.id)}
+        {@const n = entries.findIndex((e) => e.id === entry.id) + 1}
+        <button class="nav-item" class:current={activeId === entry.id} onclick={() => jumpTo(entry.id)}>
+          <span class="nav-num">{String(n).padStart(2, "0")}</span>
+          <span class="nav-label">{@render hl(entry.title)}</span>
+        </button>
+      {:else}
+        <p class="nav-empty">{t.help.noResults}</p>
+      {/each}
+    </nav>
+
+    <div class="help-content" bind:this={contentEl} onscroll={onScroll}>
+      {#each filtered as entry (entry.id)}
+        {@const n = entries.findIndex((e) => e.id === entry.id) + 1}
+        <article class="doc-entry" data-help-id={entry.id}>
+          <h2 class="doc-h">
+            <span class="doc-index">{String(n).padStart(2, "0")}</span>
+            <span>{@render hl(entry.title)}</span>
+          </h2>
+          {#if entry.summary}
+            <p class="doc-summary">{@render hl(entry.summary)}</p>
+          {/if}
+
+          {#each entry.blocks as block}
+            {#if block.kind === "p"}
+              <p>{@render hl(block.text)}</p>
+            {:else if block.kind === "list"}
+              {#if block.ordered}
+                <ol class="doc-list">
+                  {#each block.items as item}<li>{@render hl(item)}</li>{/each}
+                </ol>
+              {:else}
+                <ul class="doc-list">
+                  {#each block.items as item}<li>{@render hl(item)}</li>{/each}
+                </ul>
+              {/if}
+            {:else if block.kind === "note"}
+              <div class="doc-note" class:warn={block.tone === "warn"}>
+                <span class="note-label">{block.tone === "warn" ? t.help.warning : t.help.note}</span>
+                <span>{@render hl(block.text)}</span>
+              </div>
+            {:else if block.kind === "table"}
+              <div class="doc-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      {#each block.head as cell}<th>{@render hl(cell)}</th>{/each}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each block.rows as row}
+                      <tr>
+                        {#each row as cell}<td>{@render hl(cell)}</td>{/each}
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {:else if block.kind === "code"}
+              <pre class="doc-code">{block.text}</pre>
+            {/if}
+          {/each}
+        </article>
+      {:else}
+        <div class="help-empty">
+          <Icon name="search" size={22} />
+          <p>{t.help.noResults}</p>
+        </div>
+      {/each}
     </div>
   </div>
-{/if}
+
+  <footer class="help-foot">
+    <span>{t.help.resultCount(filtered.length, entries.length)}</span>
+    <span>{t.help.searchHint}</span>
+  </footer>
+</div>
 
 <style>
-  /* 宽面板覆盖全局 .modal 的默认 900×600；scoped 类选择器优先级高于全局同名类 */
-  .help-modal {
-    width: min(1060px, 94vw);
-    height: min(740px, 90vh);
-    padding: 0;
+  /* 占满所在窗口（#app 没有固定高度，用 vh 而不是 100%）；
+     最小高度 0 让内部两栏各自滚动而不是把整页顶高 */
+  .help-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    min-height: 0;
     overflow: hidden;
+    background: var(--bg-base);
   }
 
   .help-head {
@@ -273,6 +248,7 @@
     flex: none;
     padding: var(--sp-4) var(--sp-5);
     border-bottom: 1px solid var(--hairline);
+    background: var(--bg-surface);
   }
 
   .help-heading {
@@ -322,7 +298,7 @@
 
   .help-search {
     flex: 1 1 200px;
-    max-width: 300px;
+    max-width: 320px;
     min-width: 140px;
     margin-left: auto;
   }
@@ -597,6 +573,7 @@
     flex: none;
     padding: var(--sp-2) var(--sp-5);
     border-top: 1px solid var(--hairline);
+    background: var(--bg-surface);
     color: var(--text-3);
     font-size: var(--fs-xs);
   }
@@ -612,11 +589,6 @@
   }
 
   @media (max-width: 760px) {
-    .help-modal {
-      width: 96vw;
-      height: 92vh;
-    }
-
     .help-head {
       flex-wrap: wrap;
       row-gap: var(--sp-3);

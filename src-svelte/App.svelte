@@ -4,6 +4,8 @@
      弹收尾提示，生图队列订阅与队列坞是否挂载无关）。前置条件提示等业务规则单点在 stores 里。 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import Sidebar from "./lib/components/layout/Sidebar.svelte";
   import TopNav from "./lib/components/layout/TopNav.svelte";
   import SetupCard from "./lib/components/setup/SetupCard.svelte";
@@ -13,7 +15,6 @@
   import ImageAiPanel from "./lib/components/imageai/ImageAiPanel.svelte";
   import StatusBar from "./lib/components/layout/StatusBar.svelte";
   import LogDrawer from "./lib/components/layout/LogDrawer.svelte";
-  import HelpPanel from "./lib/components/help/HelpPanel.svelte";
   import { t } from "./lib/text";
   import { appStore, initListeners } from "./lib/stores/app.svelte";
   import { initQueueListeners } from "./lib/stores/imageai.svelte";
@@ -28,6 +29,16 @@
     // 队列事件订阅不挂在队列坞上：切走 AI 台期间 running/finished 仍照常入账，
     // 侧栏 queueRunning 护栏与回台后的快照/收尾摘要才不会因组件卸载而失真。
     void initQueueListeners(showError);
+    // 主窗口关闭时顺手关掉独立帮助窗口：帮助窗口还开着的话，进程会继续驻留、应用像没退出
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlistenClose: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested(async () => {
+        const help = await WebviewWindow.getByLabel("help");
+        await help?.close();
+      })
+      .then((un) => (unlistenClose = un));
+    return () => unlistenClose?.();
   });
 </script>
 
@@ -66,6 +77,5 @@
   <StatusBar />
 </div>
 
-<!-- 浮在最上层，分别由 ui.logOpen / ui.helpTab 控制显隐，故置于主布局之外。 -->
+<!-- 浮在最上层，由 ui.logOpen 控制显隐，故置于主布局之外。 -->
 <LogDrawer />
-<HelpPanel />

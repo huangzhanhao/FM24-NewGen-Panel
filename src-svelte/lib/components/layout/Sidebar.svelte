@@ -11,6 +11,7 @@
     queueCancel,
   } from "../../stores/imageai.svelte"; // 队列运行中的作用域切换护栏
   import { ui, setLang, toggleTheme, type Lang } from "../../stores/ui.svelte";
+  import { openHelpWindow } from "../../helpWindow";
   import Icon from "../../ui/Icon.svelte";
   // Vite 静态资源导入：打包后是带哈希的图片 URL（app-icon.png 在项目根）
   import brandLogo from "../../../../app-icon.png";
@@ -339,7 +340,7 @@
     {/if}
   </section>
 
-  <!-- 底部：首页跳转仓库；教程/FAQ 打开应用内文档面板（离线可查，不跳外部页面）；
+  <!-- 底部：首页跳转仓库；教程/FAQ 打开独立帮助窗口（可拖到主窗口外，离线可查）；
        「语言」弹出三语菜单，点选即切换整个界面语言并记忆到 localStorage -->
   <div class="side-foot">
     <button
@@ -347,10 +348,10 @@
       onclick={() => openUrl("https://github.com/huangzhanhao/NewGAN-Manager-ByHzH")}
       >{t.sidebar.linkHome}</button
     >
-    <button class="link small" onclick={() => (ui.helpTab = "tutorial")}
+    <button class="link small" onclick={() => openHelpWindow("tutorial")}
       >{t.sidebar.linkTutorial}</button
     >
-    <button class="link small" onclick={() => (ui.helpTab = "faq")}
+    <button class="link small" onclick={() => openHelpWindow("faq")}
       >{t.sidebar.linkFaq}</button
     >
     <details class="lang-menu" bind:this={langMenu}>
